@@ -7,6 +7,7 @@ const { computeConfigHash } = require('@callmetechie/gatecontrol-config-hash');
 
 describe('integration: full-flow with mock server', () => {
   let mockServer;
+  let lanTarget;
 
   // Mock GateControl server: serves /api/v1/gateway/config + /heartbeat + /probe-ack
   before(async () => {
@@ -33,12 +34,15 @@ describe('integration: full-flow with mock server', () => {
     });
     await new Promise(r => mockServer.listen(0, '127.0.0.1', r));
 
-    // Mock LAN target on 65000 for the route
-    const lanTarget = http.createServer((req, res) => res.end('hello from LAN'));
-    await new Promise(r => lanTarget.listen(65000, '127.0.0.1', r));
+    // Mock LAN target on ephemeral port for the route
+    lanTarget = http.createServer((req, res) => res.end('hello from LAN'));
+    await new Promise(r => lanTarget.listen(0, '127.0.0.1', r));
   });
 
-  after(() => mockServer?.close());
+  after(() => {
+    mockServer?.close();
+    lanTarget?.close();
+  });
 
   it('placeholder — full bootstrap with real WG is integration-test-only', () => {
     // Full bootstrap requires root + wg-quick; run manually or in docker-smoke.
