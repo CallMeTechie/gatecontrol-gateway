@@ -1,0 +1,43 @@
+# GateControl Home Gateway — Example docker-compose
+# Copy to docker-compose.yml and adjust to your environment.
+#
+# Requirements:
+#   - gateway.env from GateControl UI (Peer-Detail → Download)
+#   - Gateway must be on same L2 segment as target LAN devices (WoL!)
+#   - Host network mode required for dynamic L4 port binding
+
+services:
+  gateway:
+    image: ghcr.io/callmetechie/gatecontrol-gateway:latest
+    restart: unless-stopped
+    network_mode: host
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN         # for wg-quick + TUN device
+      - NET_BIND_SERVICE  # for L4 routes on ports <1024 (DNS, HTTP, SSH, HTTPS)
+    # NET_RAW NOT added: WoL uses SO_BROADCAST which NET_ADMIN covers.
+    # Only enable NET_RAW if Device Discovery (V2) is active.
+    # security_opt.no-new-privileges NOT set: incompatible with non-root-user +
+    # cap_add NET_ADMIN on Linux — wg-quick shell-script calls `ip`/`iptables`
+    # that need ambient NET_ADMIN, which no-new-privileges blocks for UID != 0.
+    # Compensating controls: cap_drop:ALL, read_only, USER gateway, seccomp-default.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+      - /etc/wireguard     # wireguard-go writes config here; keep in tmpfs for read-only-FS
+    volumes:
+      - ./config:/config:ro      # Place gateway.env here
+    environment:
+      - LOG_LEVEL=info
+      - GATEWAY_ENV_PATH=/config/gateway.env
+    healthcheck:
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
