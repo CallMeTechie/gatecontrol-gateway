@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 ARG NODE_VERSION=20
-ARG ALPINE_VERSION=3.20
+ARG ALPINE_VERSION=3.22
 
 # --- Stage 1: build wireguard-go from source (pinned via WG_GO_REF) ---
 FROM golang:1.23-alpine${ALPINE_VERSION} AS wg-build
