@@ -125,5 +125,6 @@ jobs:
       - name: Pull and run container
         run: |
           docker pull --platform ${{ matrix.platform }} ghcr.io/callmetechie/gatecontrol-gateway:latest
-          docker run --rm --platform ${{ matrix.platform }} \
-            ghcr.io/callmetechie/gatecontrol-gateway:latest node -e "console.log('ok')"
+          # Override entrypoint — real entrypoint needs /config/gateway.env which we don't have
+          docker run --rm --platform ${{ matrix.platform }} --entrypoint node \
+            ghcr.io/callmetechie/gatecontrol-gateway:latest -e "console.log('ok')"
