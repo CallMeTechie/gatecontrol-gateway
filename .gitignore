@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+.stryker-tmp/
+reports/
+*.log
+.DS_Store
+config/gateway.env
+config/wg0.conf

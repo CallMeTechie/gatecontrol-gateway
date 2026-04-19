@@ -1,0 +1,30 @@
+{
+  "name": "gatecontrol-gateway",
+  "version": "0.0.0",
+  "description": "Home Gateway companion for GateControl — HTTP/TCP proxy + WoL",
+  "license": "UNLICENSED",
+  "private": true,
+  "main": "src/index.js",
+  "engines": { "node": ">=20.0.0" },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test --test-force-exit tests/",
+    "test:coverage": "node --test --experimental-test-coverage --test-force-exit tests/",
+    "test:mutation": "stryker run",
+    "lint": "eslint src tests"
+  },
+  "dependencies": {
+    "@callmetechie/gatecontrol-config-hash": "^1.0.0",
+    "axios": "^1.7.0",
+    "express": "^4.21.0",
+    "http-proxy": "^1.18.1",
+    "pino": "^9.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^8.0.0",
+    "eslint": "^9.10.0",
+    "eslint-plugin-security": "^3.0.0"
+  }
+}
