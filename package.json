@@ -1,11 +1,13 @@
 {
   "name": "gatecontrol-gateway",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Home Gateway companion for GateControl — HTTP/TCP proxy + WoL",
   "license": "UNLICENSED",
   "private": true,
   "main": "src/index.js",
-  "engines": { "node": ">=20.0.0" },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
