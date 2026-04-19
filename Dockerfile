@@ -4,7 +4,7 @@ ARG ALPINE_VERSION=3.20
 
 # --- Stage 1: build wireguard-go from source (pinned via WG_GO_REF) ---
 FROM golang:1.23-alpine${ALPINE_VERSION} AS wg-build
-ARG WG_GO_REF=0.0.20230223
+ARG WG_GO_REF=0.0.20250522
 RUN apk add --no-cache git make && \
     git clone --depth 1 --branch ${WG_GO_REF} https://git.zx2c4.com/wireguard-go /src && \
     cd /src && make && cp wireguard-go /wireguard-go
