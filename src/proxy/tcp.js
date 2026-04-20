@@ -87,7 +87,10 @@ class TcpProxyManager {
     const upstream = net.connect(route.target_lan_port, route.target_lan_host);
     clientSocket.pipe(upstream);
     upstream.pipe(clientSocket);
-    const onCloseOrError = () => { try { upstream.destroy(); } catch {} try { clientSocket.destroy(); } catch {} };
+    const onCloseOrError = () => {
+      try { upstream.destroy(); } catch (_e) { /* already destroyed */ }
+      try { clientSocket.destroy(); } catch (_e) { /* already destroyed */ }
+    };
     clientSocket.on('error', onCloseOrError);
     upstream.on('error', onCloseOrError);
     clientSocket.on('close', onCloseOrError);

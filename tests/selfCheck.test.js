@@ -40,7 +40,7 @@ describe('selfCheck', () => {
       tcpPorts: [],
       wgStatus: async () => ({ peers: [] }),
       dnsResolveFn: async () => [],
-      reachabilityFn: async (host, port) => ({ reachable: host === '192.168.1.10', latencyMs: 15 }),
+      reachabilityFn: async (host, _port) => ({ reachable: host === '192.168.1.10', latencyMs: 15 }),
       routes: [
         { id: 1, domain: 'a.example', target_lan_host: '192.168.1.10', target_lan_port: 80 },
         { id: 2, domain: 'b.example', target_lan_host: '192.168.1.20', target_lan_port: 80 },
