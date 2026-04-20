@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Heartbeat and config-sync now use dedicated HTTP/HTTPS agents with `keepAlive: false`. Node 20's global agent defaults to keep-alive, which caused stale TLS sockets to be reused after network hiccups — server responded with `TLS alert 80 (internal_error)` on every subsequent request until the container was restarted.
+
 ## [1.0.0] — 2026-04-18
 
 ### Added
