@@ -54,7 +54,7 @@ ENV WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
 # The 'gateway' user is kept in the image for future non-root operation if
 # wg-quick dependency is replaced with a direct wireguard-go+ip wrapper.
 
-HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
-  CMD node -e "require('http').get('http://127.0.0.1:' + (process.env.GC_API_PORT || 9876) + '/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"
+HEALTHCHECK --interval=60s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "const ip=process.env.GC_TUNNEL_IP; if(!ip){process.exit(1)} require('http').get('http://'+ip+':'+(process.env.GC_API_PORT||9876)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 ENTRYPOINT ["/sbin/tini", "--", "node", "src/index.js"]
