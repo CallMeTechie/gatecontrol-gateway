@@ -15,6 +15,7 @@ const ConfigSchema = z.object({
   GC_LAN_PROBE_TARGET: z.string().optional(),
   WG_PRIVATE_KEY: z.string().min(1),
   WG_PUBLIC_KEY: z.string().min(1),
+  WG_PRESHARED_KEY: z.string().optional(),  // Optional — server may or may not use PSK
   WG_ENDPOINT: z.string().min(1),
   WG_SERVER_PUBLIC_KEY: z.string().min(1),
   WG_ADDRESS: z.string().min(1),
@@ -58,6 +59,7 @@ function loadConfig(path) {
     wg: {
       privateKey: parsed.WG_PRIVATE_KEY,
       publicKey: parsed.WG_PUBLIC_KEY,
+      presharedKey: parsed.WG_PRESHARED_KEY || null,
       endpoint: parsed.WG_ENDPOINT,
       serverPublicKey: parsed.WG_SERVER_PUBLIC_KEY,
       address: parsed.WG_ADDRESS,

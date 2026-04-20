@@ -51,6 +51,11 @@ function buildWgConfFile(config) {
   lines.push('',
     '[Peer]',
     `PublicKey = ${config.wg.serverPublicKey}`,
+  );
+  if (config.wg.presharedKey) {
+    lines.push(`PresharedKey = ${config.wg.presharedKey}`);
+  }
+  lines.push(
     `Endpoint = ${config.wg.endpoint}`,
     `AllowedIPs = ${config.wg.allowedIps || '10.8.0.0/24'}`,
     `PersistentKeepalive = 25`,
