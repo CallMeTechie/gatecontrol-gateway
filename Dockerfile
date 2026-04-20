@@ -55,6 +55,6 @@ ENV WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
 # wg-quick dependency is replaced with a direct wireguard-go+ip wrapper.
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=60s --retries=3 \
-  CMD node -e "const ip=process.env.GC_TUNNEL_IP; if(!ip){process.exit(1)} require('http').get('http://'+ip+':'+(process.env.GC_API_PORT||9876)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD ["node", "src/healthcheck.js"]
 
 ENTRYPOINT ["/sbin/tini", "--", "node", "src/index.js"]

@@ -8,7 +8,7 @@
 
 ### Changed
 - Mutation `break` threshold lowered to 45 to reflect actual current score (49.58). `high`/`low` remain at 90/80 as aspirational targets — surviving mutants in `wol.js`, `config.js`, `router.js` need follow-up test coverage.
-- Docker HEALTHCHECK now targets `$GC_TUNNEL_IP:$GC_API_PORT/api/health` instead of `127.0.0.1`. The API binds only to the tunnel IP (assertion in `api/server.js`), so the old localhost probe always failed — Synology Container Manager reported the container as unhealthy. Start-period raised to 60s to accommodate WG bring-up.
+- Docker HEALTHCHECK now runs a dedicated `src/healthcheck.js` that parses `/config/gateway.env` directly. The previous inline `node -e` probe relied on `process.env.GC_TUNNEL_IP` / `GC_API_PORT`, but those variables live in the volume-mounted env file and are never exposed to the container's Docker ENV — the Node runtime reads the file and keeps the values in-memory, so a separate probe process sees nothing. Start-period raised to 60s to accommodate WG bring-up.
 - `/api/health` is now registered before the `/api` auth-middleware mount. Previously the auth guard matched first and rejected every unauthenticated probe with 401, so the health endpoint was unreachable despite its comment claiming otherwise.
 
 ## [1.0.0] — 2026-04-18
