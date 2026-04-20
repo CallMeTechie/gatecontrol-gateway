@@ -37,6 +37,10 @@ services:
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
+      # Force wg-quick to use wireguard-go (userspace) instead of kernel module.
+      # Required on Synology DSM, Alpine containers w/o wg-kernel-module, VMs etc.
+      # (Also baked into Dockerfile as ENV — overrideable here.)
+      - WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
     healthcheck:
       interval: 60s
       timeout: 5s

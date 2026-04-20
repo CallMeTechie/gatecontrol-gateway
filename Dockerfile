@@ -38,6 +38,11 @@ RUN setcap cap_net_admin+ep /usr/local/bin/wireguard-go
 
 WORKDIR /app
 
+# Tell wg-quick to use the userspace wireguard-go binary instead of the
+# kernel module (which isn't available on Synology DSM, Alpine containers
+# without the wireguard kernel module, or VMs without WG kernel support).
+ENV WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
+
 # NOTE: Container runs as root (UID 0) because wg-quick is a shell script that
 # hard-requires UID 0 (line 85: "exec sudo ... bash" when $UID != 0, and sudo
 # is not installed in this minimal image). The security boundary is the
