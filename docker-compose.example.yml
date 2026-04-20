@@ -24,9 +24,12 @@ services:
     # Compensating controls: cap_drop:ALL, read_only, USER gateway, seccomp-default.
     read_only: true
     tmpfs:
-      - /tmp
-      - /run
-      - /etc/wireguard     # wireguard-go writes config here; keep in tmpfs for read-only-FS
+      # Explicit uid/gid = gateway user (UID 100, GID 101 in Alpine-based image).
+      # Without this, tmpfs inherits root ownership and non-root gateway user
+      # gets EACCES on /etc/wireguard/gatecontrol0.conf at bootstrap.
+      - /tmp:uid=100,gid=101,mode=0755
+      - /run:uid=100,gid=101,mode=0755
+      - /etc/wireguard:uid=100,gid=101,mode=0700  # wireguard-go writes config here
     volumes:
       - ./config:/config:ro      # Place gateway.env here
     environment:
