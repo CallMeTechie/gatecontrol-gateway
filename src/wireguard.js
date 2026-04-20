@@ -67,12 +67,23 @@ function runCommand(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
     let stdout = '', stderr = '';
+    let settled = false;
     child.stdout.on('data', d => stdout += d);
     child.stderr.on('data', d => stderr += d);
-    child.on('error', reject);
-    child.on('close', code => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`${cmd} ${args.join(' ')} exited ${code}: ${stderr}`));
+    child.on('error', err => { if (!settled) { settled = true; reject(err); } });
+    // Use 'exit' event (fires on process exit) instead of 'close' (waits for
+    // all stdio pipes to close). wg-quick spawns wireguard-go as a daemon
+    // that inherits pipes — 'close' never fires because wireguard-go runs
+    // forever keeping stdout/stderr open. 'exit' fires when wg-quick itself
+    // exits, which is what we want.
+    child.on('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      // Give 50ms for final buffered stdout/stderr to arrive before we read
+      setTimeout(() => {
+        if (code === 0) resolve(stdout);
+        else reject(new Error(`${cmd} ${args.join(' ')} exited ${code}: ${stderr}`));
+      }, 50);
     });
   });
 }
