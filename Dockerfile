@@ -37,7 +37,14 @@ COPY --chown=gateway:gateway package.json /app/package.json
 RUN setcap cap_net_admin+ep /usr/local/bin/wireguard-go
 
 WORKDIR /app
-USER gateway
+
+# NOTE: Container runs as root (UID 0) because wg-quick is a shell script that
+# hard-requires UID 0 (line 85: "exec sudo ... bash" when $UID != 0, and sudo
+# is not installed in this minimal image). The security boundary is the
+# cap_drop: ALL + minimal-cap-add pattern enforced in docker-compose, NOT the
+# user UID. Inside this container root has only CAP_NET_ADMIN + CAP_NET_BIND_SERVICE.
+# The 'gateway' user is kept in the image for future non-root operation if
+# wg-quick dependency is replaced with a direct wireguard-go+ip wrapper.
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:' + (process.env.GC_API_PORT || 9876) + '/api/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"

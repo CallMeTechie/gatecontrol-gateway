@@ -23,13 +23,15 @@ services:
     # that need ambient NET_ADMIN, which no-new-privileges blocks for UID != 0.
     # Compensating controls: cap_drop:ALL, read_only, USER gateway, seccomp-default.
     read_only: true
+    # Container runs as root (UID 0) — wg-quick requires it (line 85: exec sudo
+     # if $UID != 0, and sudo is not installed in the image). Security is
+     # enforced via cap_drop: ALL + minimal caps. Root inside this container
+     # has ONLY CAP_NET_ADMIN + CAP_NET_BIND_SERVICE.
+    user: "0:0"
     tmpfs:
-      # Explicit uid/gid = gateway user (UID 100, GID 101 in Alpine-based image).
-      # Without this, tmpfs inherits root ownership and non-root gateway user
-      # gets EACCES on /etc/wireguard/gatecontrol0.conf at bootstrap.
-      - /tmp:uid=100,gid=101,mode=0755
-      - /run:uid=100,gid=101,mode=0755
-      - /etc/wireguard:uid=100,gid=101,mode=0700  # wireguard-go writes config here
+      - /tmp
+      - /run
+      - /etc/wireguard  # wireguard-go writes config here
     volumes:
       - ./config:/config:ro      # Place gateway.env here
     environment:
