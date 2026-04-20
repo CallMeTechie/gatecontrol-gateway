@@ -28,6 +28,11 @@ services:
      # enforced via cap_drop: ALL + minimal caps. Root inside this container
      # has ONLY CAP_NET_ADMIN + CAP_NET_BIND_SERVICE.
     user: "0:0"
+    # TUN device needed by wireguard-go (userspace WG impl).
+    # On some hosts (Synology DSM, minimal VMs, LXC containers) the device must be
+    # explicitly passed through. Requires `modprobe tun` on host if /dev/net/tun missing.
+    devices:
+      - /dev/net/tun:/dev/net/tun
     tmpfs:
       - /tmp
       - /run
