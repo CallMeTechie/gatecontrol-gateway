@@ -5,9 +5,11 @@ ARG ALPINE_VERSION=3.22
 # --- Stage 1: build wireguard-go from source (pinned via WG_GO_REF) ---
 FROM golang:1.23-alpine${ALPINE_VERSION} AS wg-build
 ARG WG_GO_REF=0.0.20250522
-RUN apk add --no-cache git make && \
-    git clone --depth 1 --branch ${WG_GO_REF} https://git.zx2c4.com/wireguard-go /src && \
-    cd /src && make && cp wireguard-go /wireguard-go
+# hadolint ignore=DL3018
+RUN apk add --no-cache git make
+WORKDIR /src
+RUN git clone --depth 1 --branch ${WG_GO_REF} https://git.zx2c4.com/wireguard-go . && \
+    make && cp wireguard-go /wireguard-go
 
 # --- Stage 2: npm install ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION} AS node-build
@@ -22,6 +24,7 @@ COPY src ./src
 
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
+# hadolint ignore=DL3018
 RUN apk add --no-cache wireguard-tools iproute2 libcap tini && \
     addgroup -S gateway && adduser -S -G gateway -H -s /sbin/nologin gateway && \
     mkdir -p /config /var/log/gateway && \
