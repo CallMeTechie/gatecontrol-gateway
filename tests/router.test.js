@@ -11,7 +11,26 @@ describe('http router', () => {
       { domain: 'nas.example.com', target_lan_host: '192.168.1.10', target_lan_port: 5001, wol_enabled: false },
     ]);
     const t = r.resolve('nas.example.com');
-    assert.deepEqual(t, { host: '192.168.1.10', port: 5001, wolMac: null, routeId: undefined });
+    assert.deepEqual(t, { host: '192.168.1.10', port: 5001, backendHttps: false, wolMac: null, routeId: undefined });
+  });
+
+  it('carries backend_https flag so LAN target can be HTTPS (e.g. DSM :5001)', () => {
+    const r = new Router();
+    r.setRoutes([
+      { id: 7, domain: 'nas.example.com', target_lan_host: '192.168.1.10', target_lan_port: 5001, backend_https: true },
+    ]);
+    const t = r.resolve('nas.example.com');
+    assert.equal(t.backendHttps, true);
+    assert.equal(t.host, '192.168.1.10');
+    assert.equal(t.port, 5001);
+  });
+
+  it('backendHttps defaults to false when flag absent', () => {
+    const r = new Router();
+    r.setRoutes([
+      { id: 8, domain: 'plain.example.com', target_lan_host: '192.168.1.11', target_lan_port: 80 },
+    ]);
+    assert.equal(r.resolve('plain.example.com').backendHttps, false);
   });
 
   it('returns null for unknown domain', () => {

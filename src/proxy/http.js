@@ -14,7 +14,13 @@ const logger = require('../logger');
  * (bootstrap) should wire WoL trigger into this error event.
  */
 function createHttpProxy({ router, onUpstreamUnreachable }) {
-  const proxy = httpProxy.createProxyServer({ changeOrigin: false, xfwd: true });
+  // secure:false disables LAN-cert verification. LAN HTTPS targets
+  // (DSM on :5001, router admin UIs, TR-064, etc.) almost always use
+  // self-signed certs — verifying them would mean the user has to
+  // pin a cert per route. For a LAN-only hop that's unnecessary
+  // overhead; the hop from the public internet to the gateway is
+  // already fully authenticated by WireGuard.
+  const proxy = httpProxy.createProxyServer({ changeOrigin: false, xfwd: true, secure: false });
   proxy.on('proxyReq', (proxyReq) => {
     // Strip X-Gateway-* headers before forwarding to LAN
     proxyReq.removeHeader('x-gateway-target');
@@ -43,8 +49,9 @@ function createHttpProxy({ router, onUpstreamUnreachable }) {
       res.writeHead(502, { 'Content-Type': 'text/plain' });
       return res.end(`No route for domain ${domain}`);
     }
+    const scheme = target.backendHttps ? 'https' : 'http';
     proxy.web(req, res, {
-      target: `http://${target.host}:${target.port}`,
+      target: `${scheme}://${target.host}:${target.port}`,
     });
   });
 }
