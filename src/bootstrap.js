@@ -19,6 +19,7 @@ const { startHeartbeatTicker } = require('./heartbeat');
 const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol-config-hash');
 const logger = require('./logger');
 const dns = require('node:dns/promises');
+const os = require('node:os');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
 
@@ -140,7 +141,7 @@ async function bootstrap() {
     intervalMs: config.heartbeatIntervalS * 1000,
     getHealth: async () => {
       const routes = [...store.httpRoutes, ...store.l4Routes.map(r => ({ id: r.id, target_lan_host: r.target_lan_host, target_lan_port: r.target_lan_port }))];
-      return runSelfCheck({
+      const health = await runSelfCheck({
         proxyPort: config.proxyPort,
         apiPort: config.apiPort,
         tcpPorts: tcpMgr.listListenerPorts(),
@@ -152,6 +153,10 @@ async function bootstrap() {
         },
         routes,
       });
+      // Opportunistic hostname report — server populates peers.hostname for
+      // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
+      health.hostname = os.hostname();
+      return health;
     },
   });
 
