@@ -14,6 +14,7 @@ const { createWolRouter } = require('./api/routes/wol');
 const { createStatusRouter } = require('./api/routes/status');
 const { createProbeRouter } = require('./api/routes/probe');
 const { runSelfCheck } = require('./health/selfCheck');
+const { collectTelemetry } = require('./health/telemetry');
 const { sendMagicPacket, waitForReachable } = require('./wol');
 const { startHeartbeatTicker } = require('./heartbeat');
 const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol-config-hash');
@@ -156,6 +157,10 @@ async function bootstrap() {
       // Opportunistic hostname report — server populates peers.hostname for
       // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
       health.hostname = os.hostname();
+      // Gateway telemetry (versions, resources, LAN context) — stapled onto
+      // every heartbeat; server persists the whole payload into
+      // gateway_meta.last_health and the admin UI pulls what it needs.
+      health.telemetry = collectTelemetry();
       return health;
     },
   });
