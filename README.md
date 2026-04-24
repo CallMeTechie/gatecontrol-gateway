@@ -33,6 +33,16 @@ See [Deployment Docs](docs/deployment/) for platform-specific instructions:
 
 **Unsupported:** VM in NAT-mode (WoL broken). Bridge-mode required.
 
+## User & Admin Documentation
+
+For task-oriented walkthroughs, feature reference, troubleshooting, and the security model, see [docs/documentation/](docs/documentation/) (German: [docs/documentation/README.de.md](docs/documentation/README.de.md)):
+
+- **[01 — User Journey](docs/documentation/01-user-journey.md)** — five end-to-end scenarios (NAS, RDP, WoL, L4, multi-device)
+- **[02 — Decision Guide](docs/documentation/02-decision-guide.md)** — Home Gateway vs. classic peer
+- **[03 — Features Reference](docs/documentation/03-features-reference.md)** — every capability in detail
+- **[04 — Troubleshooting](docs/documentation/04-troubleshooting.md)** — common failure modes with diagnostic commands
+- **[05 — Security Model](docs/documentation/05-security-model.md)** — threat model, hardening, attack surface
+
 ## Quick Start
 
 1. **GateControl-UI** → Peers → „Neuer Peer" → Checkbox „Home Gateway" → Speichern
