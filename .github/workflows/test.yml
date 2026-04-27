@@ -19,6 +19,15 @@ jobs:
         with: { node-version: 20 }
       - run: |
           find src tests -name "*.js" -exec node --check {} +
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+      - name: Shellcheck scripts/
+        run: |
+          shopt -s nullglob
+          files=(scripts/*.sh)
+          if [ ${#files[@]} -gt 0 ]; then
+            shellcheck -S warning "${files[@]}"
+          fi
 
   lint:
     runs-on: ubuntu-latest

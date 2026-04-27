@@ -1,0 +1,496 @@
+#!/usr/bin/env bash
+#
+# GateControl Gateway — Proxmox VE LXC Installer
+#
+# Run on the Proxmox host shell:
+#
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/CallMeTechie/gatecontrol-gateway/main/scripts/install-pve.sh)"
+#
+# Subcommands:
+#   install (default)        Create + provision a new LXC
+#   update <ctid>            Pull latest release into existing LXC + restart
+#   remove <ctid>            Stop and destroy the LXC
+#
+# Layout inside the container:
+#   /opt/gatecontrol-gateway/         Source tree (npm-installed)
+#   /opt/gatecontrol-gateway.previous Backup of last version (created by update)
+#   /etc/gatecontrol-gateway/gateway.env  Env file from dashboard download
+#   /etc/systemd/system/gatecontrol-gateway.service  systemd unit
+#
+
+set -euo pipefail
+
+readonly REPO="CallMeTechie/gatecontrol-gateway"
+readonly DEFAULT_HOSTNAME="gatecontrol-gateway"
+readonly DEFAULT_RAM=512
+readonly DEFAULT_CORES=1
+readonly DEFAULT_DISK=4
+readonly DEFAULT_BRIDGE="vmbr0"
+
+# ── Output helpers ────────────────────────────────────────────────────
+_c_reset='\033[0m'
+_c_blue='\033[1;34m'
+_c_green='\033[1;32m'
+_c_yellow='\033[1;33m'
+_c_red='\033[1;31m'
+
+msg_info() { printf '%b[INFO]%b %s\n' "$_c_blue"   "$_c_reset" "$*"; }
+msg_ok()   { printf '%b[OK]%b   %s\n' "$_c_green"  "$_c_reset" "$*"; }
+msg_warn() { printf '%b[WARN]%b %s\n' "$_c_yellow" "$_c_reset" "$*"; }
+msg_err()  { printf '%b[ERR]%b  %s\n' "$_c_red"    "$_c_reset" "$*" >&2; }
+die()      { msg_err "$*"; exit 1; }
+
+# ── Pre-flight checks (PVE-only) ──────────────────────────────────────
+
+preflight() {
+  [ "$EUID" -eq 0 ] || die "Must run as root on the Proxmox host"
+  command -v pveversion >/dev/null 2>&1 || die "pveversion missing — not a Proxmox host?"
+  command -v pct        >/dev/null 2>&1 || die "pct command missing — Proxmox required"
+  command -v whiptail   >/dev/null 2>&1 || die "whiptail missing — install via 'apt install whiptail'"
+  command -v jq         >/dev/null 2>&1 || die "jq missing — install via 'apt install jq'"
+}
+
+# ── Storage / template / network detection ────────────────────────────
+
+# Pick the first active storage that supports rootdir (LXC root volumes)
+detect_storage() {
+  local sto
+  sto=$(pvesm status -content rootdir 2>/dev/null \
+        | awk 'NR>1 && $3=="active" {print $1; exit}')
+  [ -n "$sto" ] || die "No active rootdir storage found — configure one in Datacenter → Storage"
+  echo "$sto"
+}
+
+# Find or download the Debian 12 standard template
+ensure_template() {
+  local tpl
+  tpl=$(pveam list local 2>/dev/null \
+        | awk -F'/' '/debian-12-standard/ {print $NF}' \
+        | awk '{print $1}' \
+        | head -1)
+  if [ -z "$tpl" ]; then
+    msg_info "Debian 12 template not present — refreshing pveam index..."
+    pveam update >/dev/null
+    tpl=$(pveam available --section system 2>/dev/null \
+          | awk '/debian-12-standard/ {print $2}' \
+          | head -1)
+    [ -n "$tpl" ] || die "No debian-12-standard template available in pveam"
+    msg_info "Downloading template: $tpl"
+    pveam download local "$tpl" >/dev/null || die "Template download failed"
+  fi
+  msg_ok "Template ready: $tpl"
+  TEMPLATE_VOLID="local:vztmpl/$tpl"
+}
+
+# ── Env-file handling ─────────────────────────────────────────────────
+
+prompt_env_file() {
+  local default_path="/root/gateway.env"
+  whiptail --title "Gateway pairing config" --msgbox \
+"Before continuing, generate a gateway.env in the GateControl Dashboard:
+
+  1. Open Dashboard → Peers → click your Gateway-Peer
+  2. 'Download Config' (saves gateway.env)
+  3. Copy the file to this Proxmox host (e.g. via scp)
+
+You will be asked for its path next." 14 70
+
+  local path
+  path=$(whiptail --title "Path to gateway.env" --inputbox \
+    "Absolute path to gateway.env on this host:" 10 70 "$default_path" 3>&1 1>&2 2>&3) \
+    || die "Cancelled by user"
+  echo "$path"
+}
+
+validate_env_file() {
+  local f="$1"
+  local missing=()
+  for key in GC_SERVER_URL GC_API_TOKEN GC_GATEWAY_TOKEN GC_TUNNEL_IP \
+             WG_PRIVATE_KEY WG_PUBLIC_KEY WG_ENDPOINT WG_SERVER_PUBLIC_KEY WG_ADDRESS; do
+    grep -qE "^${key}=" "$f" || missing+=("$key")
+  done
+  [ ${#missing[@]} -eq 0 ] || die "gateway.env is missing required keys: ${missing[*]}"
+}
+
+# ── LXC creation ──────────────────────────────────────────────────────
+
+create_lxc() {
+  local ctid="$1" hostname="$2" storage="$3" bridge="$4" ram="$5" cores="$6" disk="$7"
+
+  msg_info "Creating LXC $ctid (hostname=$hostname)..."
+  pct create "$ctid" "$TEMPLATE_VOLID" \
+    --hostname "$hostname" \
+    --memory "$ram" \
+    --cores "$cores" \
+    --rootfs "$storage:$disk" \
+    --net0 "name=eth0,bridge=$bridge,ip=dhcp,firewall=0" \
+    --features "nesting=1,keyctl=1" \
+    --unprivileged 1 \
+    --onboot 1 \
+    --start 0 \
+    --description "GateControl Home Gateway — managed by install-pve.sh" \
+    >/dev/null
+  msg_ok "LXC $ctid created"
+}
+
+# Append TUN device passthrough to /etc/pve/lxc/<id>.conf so wireguard-tools
+# can open /dev/net/tun. Without this an unprivileged LXC has no access.
+patch_lxc_conf_for_wg() {
+  local ctid="$1"
+  local conf="/etc/pve/lxc/${ctid}.conf"
+  [ -f "$conf" ] || die "LXC config file missing: $conf"
+
+  if ! grep -q '/dev/net/tun' "$conf"; then
+    cat >>"$conf" <<'EOF'
+
+# WireGuard TUN device passthrough (added by gatecontrol-gateway installer)
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+EOF
+    msg_ok "Patched $conf for WireGuard TUN passthrough"
+  else
+    msg_info "TUN passthrough already configured in $conf"
+  fi
+}
+
+wait_for_network() {
+  local ctid="$1"
+  msg_info "Waiting for container network..."
+  local attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    if pct exec "$ctid" -- sh -c 'getent hosts github.com >/dev/null 2>&1'; then
+      msg_ok "Network ready"
+      return 0
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+  die "Container network did not come up within 30s"
+}
+
+# ── In-container provisioning ─────────────────────────────────────────
+
+# Generate the bootstrap script that runs INSIDE the new LXC. Kept as a
+# heredoc into a temp file so we can `pct push` it and execute — pct exec
+# with multi-line stdin via -- bash -c '<huge string>' is fragile.
+build_setup_script() {
+  local out="$1"
+  cat >"$out" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+REPO="CallMeTechie/gatecontrol-gateway"
+LATEST_TAG="${LATEST_TAG:-}"
+
+echo "[setup] apt update + base packages"
+apt-get update -qq
+apt-get install -y -qq \
+  curl ca-certificates gnupg jq tar \
+  wireguard-tools iproute2 iptables \
+  >/dev/null
+
+echo "[setup] installing Node.js 20.x"
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
+apt-get install -y -qq nodejs >/dev/null
+
+if [ -z "$LATEST_TAG" ]; then
+  LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+               | jq -r .tag_name)
+fi
+[ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ] || {
+  echo "[setup] FAILED to resolve latest release tag" >&2
+  exit 1
+}
+echo "[setup] installing gateway $LATEST_TAG"
+
+mkdir -p /opt/gatecontrol-gateway
+curl -fsSL "https://github.com/${REPO}/archive/refs/tags/${LATEST_TAG}.tar.gz" \
+  | tar xz -C /opt/gatecontrol-gateway --strip-components=1
+
+cd /opt/gatecontrol-gateway
+# Suppress npm chatter; the prepare scripts in this repo are deterministic
+npm ci --omit=dev --silent --no-audit --no-fund
+
+echo "$LATEST_TAG" > /opt/gatecontrol-gateway/.installed_version
+
+# Place env file (was pushed to /tmp/gateway.env by the host script)
+mkdir -p /etc/gatecontrol-gateway
+mv /tmp/gateway.env /etc/gatecontrol-gateway/gateway.env
+chmod 600 /etc/gatecontrol-gateway/gateway.env
+chown root:root /etc/gatecontrol-gateway/gateway.env
+
+# systemd unit
+cat >/etc/systemd/system/gatecontrol-gateway.service <<'UNIT'
+[Unit]
+Description=GateControl Home Gateway
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=GATEWAY_ENV_PATH=/etc/gatecontrol-gateway/gateway.env
+WorkingDirectory=/opt/gatecontrol-gateway
+ExecStart=/usr/bin/node /opt/gatecontrol-gateway/src/index.js
+Restart=on-failure
+RestartSec=5
+User=root
+# WG needs CAP_NET_ADMIN (always present for root); systemd doesn't strip it
+# unless we ask. No further sandboxing here — gateway needs raw access to
+# manage the wg interface and bind low ports for L4 routes.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable gatecontrol-gateway.service >/dev/null 2>&1
+systemctl restart gatecontrol-gateway.service
+
+echo "[setup] done"
+SCRIPT
+}
+
+install_inside_lxc() {
+  local ctid="$1" env_file="$2"
+
+  # Push gateway.env (will be moved into /etc by the setup script)
+  pct push "$ctid" "$env_file" /tmp/gateway.env --perms 0600
+
+  # Build + push setup script
+  local setup_tmp
+  setup_tmp=$(mktemp)
+  trap 'rm -f "$setup_tmp"' RETURN
+  build_setup_script "$setup_tmp"
+  pct push "$ctid" "$setup_tmp" /root/gatecontrol-setup.sh --perms 0755
+
+  msg_info "Provisioning inside container (this can take 1–2 min)..."
+  pct exec "$ctid" -- bash /root/gatecontrol-setup.sh
+  pct exec "$ctid" -- rm -f /root/gatecontrol-setup.sh
+}
+
+# Wait for the gateway service to report active. The proxy/api ports bind
+# only to the WG-tunnel IP (config.tunnelIp), so we don't probe ports —
+# we trust systemd's Active state plus a journal sanity check.
+service_health_check() {
+  local ctid="$1"
+  msg_info "Waiting for gatecontrol-gateway service to come up..."
+  local state
+  local attempt=0
+  while [ "$attempt" -lt 30 ]; do
+    state=$(pct exec "$ctid" -- systemctl is-active gatecontrol-gateway.service 2>/dev/null || echo unknown)
+    if [ "$state" = "active" ]; then
+      msg_ok "Service active"
+      return 0
+    fi
+    sleep 2
+    attempt=$((attempt + 1))
+  done
+  msg_warn "Service did not reach 'active' within 60s — check 'journalctl -u gatecontrol-gateway' inside the container"
+  return 1
+}
+
+# ── Summary ───────────────────────────────────────────────────────────
+
+print_summary() {
+  local ctid="$1"
+  local ip
+  ip=$(pct exec "$ctid" -- ip -4 -o addr show dev eth0 2>/dev/null \
+       | awk '{print $4}' | cut -d/ -f1 | head -1)
+  local version
+  version=$(pct exec "$ctid" -- cat /opt/gatecontrol-gateway/.installed_version 2>/dev/null || echo unknown)
+
+  cat <<EOF
+
+──────────────────────────────────────────────────────────
+  GateControl Gateway installed in LXC $ctid
+──────────────────────────────────────────────────────────
+  Version:       $version
+  Container IP:  ${ip:-<dhcp pending>}
+  Hostname:      $(pct exec "$ctid" -- hostname 2>/dev/null || echo "?")
+
+  Next steps:
+    1. Open the GateControl Dashboard → Peers → your Gateway
+       and confirm it shows 'online' within ~30s.
+    2. Logs:    pct exec $ctid -- journalctl -u gatecontrol-gateway -f
+    3. Update:  bash $(realpath "$0" 2>/dev/null || basename "$0") update $ctid
+    4. Remove:  bash $(realpath "$0" 2>/dev/null || basename "$0") remove $ctid
+──────────────────────────────────────────────────────────
+EOF
+}
+
+# ── Subcommands ───────────────────────────────────────────────────────
+
+cmd_install() {
+  preflight
+
+  # Argument parsing
+  local CTID="" HOSTNAME_="$DEFAULT_HOSTNAME" ENV_FILE=""
+  local BRIDGE="$DEFAULT_BRIDGE" STORAGE="" RAM="$DEFAULT_RAM"
+  local CORES="$DEFAULT_CORES" DISK="$DEFAULT_DISK"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --ctid)     CTID="$2"; shift 2 ;;
+      --hostname) HOSTNAME_="$2"; shift 2 ;;
+      --env-file) ENV_FILE="$2"; shift 2 ;;
+      --bridge)   BRIDGE="$2"; shift 2 ;;
+      --storage)  STORAGE="$2"; shift 2 ;;
+      --ram)      RAM="$2"; shift 2 ;;
+      --cores)    CORES="$2"; shift 2 ;;
+      --disk)     DISK="$2"; shift 2 ;;
+      *) die "Unknown option: $1 (use --help for usage)" ;;
+    esac
+  done
+
+  [ -n "$CTID" ]    || CTID=$(pvesh get /cluster/nextid)
+  [ -n "$STORAGE" ] || STORAGE=$(detect_storage)
+
+  if [ -z "$ENV_FILE" ]; then
+    ENV_FILE=$(prompt_env_file)
+  fi
+  [ -f "$ENV_FILE" ] || die "gateway.env not found at: $ENV_FILE"
+  validate_env_file "$ENV_FILE"
+
+  # Refuse to clobber an existing CTID
+  if pct status "$CTID" >/dev/null 2>&1; then
+    die "LXC $CTID already exists — pick another --ctid or 'remove' the existing one first"
+  fi
+
+  # Confirm
+  whiptail --title "Confirm" --yesno \
+"Create LXC $CTID with these settings?
+
+  Hostname:  $HOSTNAME_
+  Storage:   $STORAGE
+  Bridge:    $BRIDGE
+  Resources: ${RAM} MB RAM / ${CORES} core(s) / ${DISK} GB disk
+  Env file:  $ENV_FILE" 16 65 \
+    || die "Aborted by user"
+
+  ensure_template
+  create_lxc "$CTID" "$HOSTNAME_" "$STORAGE" "$BRIDGE" "$RAM" "$CORES" "$DISK"
+  patch_lxc_conf_for_wg "$CTID"
+  msg_info "Starting LXC $CTID..."
+  pct start "$CTID"
+  wait_for_network "$CTID"
+  install_inside_lxc "$CTID" "$ENV_FILE"
+  service_health_check "$CTID" || true
+  print_summary "$CTID"
+}
+
+cmd_update() {
+  preflight
+  local CTID="${1:-}"
+  [ -n "$CTID" ] || die "Usage: $(basename "$0") update <ctid>"
+  pct status "$CTID" >/dev/null 2>&1 || die "LXC $CTID not found"
+
+  local current latest
+  current=$(pct exec "$CTID" -- cat /opt/gatecontrol-gateway/.installed_version 2>/dev/null || echo "unknown")
+  latest=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | jq -r .tag_name)
+  if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+    die "Could not resolve latest release tag"
+  fi
+
+  msg_info "Current: $current   Latest: $latest"
+  if [ "$current" = "$latest" ]; then
+    msg_ok "Already at latest"
+    return 0
+  fi
+
+  whiptail --title "Confirm update" --yesno \
+"Update LXC $CTID from $current to $latest?
+
+The current install will be moved to /opt/gatecontrol-gateway.previous
+so you can roll back manually if needed." 12 65 \
+    || die "Aborted by user"
+
+  msg_info "Backing up current install..."
+  pct exec "$CTID" -- bash -c '
+    set -e
+    rm -rf /opt/gatecontrol-gateway.previous
+    mv /opt/gatecontrol-gateway /opt/gatecontrol-gateway.previous
+  '
+
+  msg_info "Installing $latest..."
+  pct exec "$CTID" -- bash -c "
+    set -e
+    mkdir -p /opt/gatecontrol-gateway
+    curl -fsSL 'https://github.com/${REPO}/archive/refs/tags/${latest}.tar.gz' \
+      | tar xz -C /opt/gatecontrol-gateway --strip-components=1
+    cd /opt/gatecontrol-gateway
+    npm ci --omit=dev --silent --no-audit --no-fund
+    echo '${latest}' > /opt/gatecontrol-gateway/.installed_version
+    systemctl restart gatecontrol-gateway.service
+  "
+
+  service_health_check "$CTID" || msg_warn "Service did not become active — consider rolling back: pct exec $CTID -- bash -c 'rm -rf /opt/gatecontrol-gateway && mv /opt/gatecontrol-gateway.previous /opt/gatecontrol-gateway && systemctl restart gatecontrol-gateway'"
+  msg_ok "Updated to $latest. Previous version preserved at /opt/gatecontrol-gateway.previous"
+}
+
+cmd_remove() {
+  preflight
+  local CTID="${1:-}"
+  [ -n "$CTID" ] || die "Usage: $(basename "$0") remove <ctid>"
+  pct status "$CTID" >/dev/null 2>&1 || die "LXC $CTID not found"
+
+  whiptail --title "Confirm removal" --yesno \
+"Stop and DESTROY LXC $CTID?
+
+This permanently deletes the container and its filesystem.
+The gateway.env on the Proxmox host (if any) is NOT touched." 12 65 \
+    || die "Aborted by user"
+
+  msg_info "Stopping LXC $CTID..."
+  pct stop "$CTID" 2>/dev/null || true
+  msg_info "Destroying LXC $CTID..."
+  pct destroy "$CTID" --force 1
+  msg_ok "Container $CTID removed"
+}
+
+usage() {
+  cat <<EOF
+GateControl Gateway — Proxmox VE LXC Installer
+
+Usage:
+  $(basename "$0")                                   Install (interactive)
+  $(basename "$0") install [options]                 Install (non-interactive)
+  $(basename "$0") update <ctid>                     Update to latest release
+  $(basename "$0") remove <ctid>                     Stop and destroy LXC
+  $(basename "$0") --help                            Show this help
+
+Install options:
+  --ctid <id>        LXC container ID (default: next free)
+  --hostname <h>     Container hostname (default: $DEFAULT_HOSTNAME)
+  --env-file <p>     Path to gateway.env on this host (default: prompts)
+  --bridge <b>       Network bridge (default: $DEFAULT_BRIDGE)
+  --storage <s>      Storage for rootfs (default: first active rootdir storage)
+  --ram <mb>         Memory in MB (default: $DEFAULT_RAM)
+  --cores <n>        CPU cores (default: $DEFAULT_CORES)
+  --disk <gb>        Rootfs size in GB (default: $DEFAULT_DISK)
+
+Recommended provisioning order:
+  1. In the GateControl Dashboard, create a Gateway-Peer (or open an
+     existing one) and click 'Download Config' — saves gateway.env.
+  2. scp the gateway.env to this Proxmox host (e.g. /root/gateway.env).
+  3. Run this script. The container is unprivileged with TUN passthrough,
+     so WireGuard kernel module on the host is used.
+EOF
+}
+
+# ── Dispatcher ────────────────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-install}"
+  case "$cmd" in
+    install)         shift || true; cmd_install "$@" ;;
+    update)          shift || true; cmd_update  "$@" ;;
+    remove|destroy)  shift || true; cmd_remove  "$@" ;;
+    -h|--help|help)  usage; exit 0 ;;
+    *) die "Unknown subcommand: $cmd (try --help)" ;;
+  esac
+}
+
+main "$@"
