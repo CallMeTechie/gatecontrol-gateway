@@ -54,13 +54,31 @@ ensure_host_pkgs() {
     cmd="${entry#*:}"
     command -v "$cmd" >/dev/null 2>&1 || missing+=("$pkg")
   done
-  if [ ${#missing[@]} -gt 0 ]; then
-    msg_info "Installing missing host packages: ${missing[*]}"
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null \
-      || die "apt-get update failed"
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null \
-      || die "apt-get install failed for: ${missing[*]}"
+  [ ${#missing[@]} -eq 0 ] && return 0
+
+  # Detect a held APT lock up front so users don't sit on a frozen
+  # install — a Proxmox host can have unattended-upgrades or its own
+  # apt sweep running in the background.
+  if command -v fuser >/dev/null 2>&1 \
+     && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+    msg_warn "APT lock is held by another process — likely unattended-upgrades or pve-daily-update."
+    msg_warn "Wait for it to finish, or run:  ps aux | grep -E 'apt|dpkg'"
+    die "Cannot install ${missing[*]} while APT is locked"
   fi
+
+  msg_info "Installing missing host packages: ${missing[*]}"
+  msg_info "(running 'apt-get update + install' — output below)"
+  # Don't silence apt: a network-stalled enterprise repo or a 401 against
+  # pve-enterprise looks identical to a hang from the user's side. Show
+  # everything; a 30 s update is normal, 5 min means something's wrong
+  # and the user should see why.
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update; then
+    die "apt-get update failed — fix sources (e.g. disable pve-enterprise repo without subscription) and retry"
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"; then
+    die "apt-get install failed for: ${missing[*]}"
+  fi
+  msg_ok "Host packages installed"
 }
 
 preflight() {
