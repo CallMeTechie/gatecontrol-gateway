@@ -42,12 +42,33 @@ die()      { msg_err "$*"; exit 1; }
 
 # ── Pre-flight checks (PVE-only) ──────────────────────────────────────
 
+# Install Debian packages on the host if any are missing. Used for the
+# small handful of helpers (jq, whiptail) that PVE doesn't always ship
+# with — auto-install is friendlier than aborting with a manual
+# 'apt install' instruction.
+ensure_host_pkgs() {
+  local missing=()
+  local entry pkg cmd
+  for entry in "$@"; do
+    pkg="${entry%%:*}"
+    cmd="${entry#*:}"
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$pkg")
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    msg_info "Installing missing host packages: ${missing[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null \
+      || die "apt-get update failed"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" >/dev/null \
+      || die "apt-get install failed for: ${missing[*]}"
+  fi
+}
+
 preflight() {
   [ "$EUID" -eq 0 ] || die "Must run as root on the Proxmox host"
   command -v pveversion >/dev/null 2>&1 || die "pveversion missing — not a Proxmox host?"
   command -v pct        >/dev/null 2>&1 || die "pct command missing — Proxmox required"
-  command -v whiptail   >/dev/null 2>&1 || die "whiptail missing — install via 'apt install whiptail'"
-  command -v jq         >/dev/null 2>&1 || die "jq missing — install via 'apt install jq'"
+  # Auto-install jq / whiptail on bare PVE installs that don't include them.
+  ensure_host_pkgs whiptail:whiptail jq:jq
 }
 
 # ── Storage / template / network detection ────────────────────────────
