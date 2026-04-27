@@ -12,15 +12,21 @@ async function tcpProbe(host, port, timeoutMs = 2000) {
   });
 }
 
-async function runSelfCheck({ proxyPort, apiPort, tcpPorts, wgStatus, dnsResolveFn, reachabilityFn, routes }) {
-  // Layer 1 — Process: HTTP-Proxy localhost probe
-  const proxyHealthy = (await tcpProbe('127.0.0.1', proxyPort)).reachable;
-  const apiHealthy = (await tcpProbe('127.0.0.1', apiPort)).reachable;
+async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dnsResolveFn, reachabilityFn, routes }) {
+  // Layer 1 — Process: probe the address each listener actually binds to.
+  // The HTTP proxy, management API, and TCP listeners all bind to the WG
+  // tunnel IP (config.tunnelIp), NOT 127.0.0.1 — so probing localhost
+  // always reported false and made every gateway look unhealthy in the
+  // dashboard. Fall back to 127.0.0.1 only when bindIp wasn't supplied
+  // (older bootstrap.js or unit tests).
+  const probeIp = bindIp || '127.0.0.1';
+  const proxyHealthy = (await tcpProbe(probeIp, proxyPort)).reachable;
+  const apiHealthy = (await tcpProbe(probeIp, apiPort)).reachable;
 
   // Layer 1b — TCP-Listeners
   const tcp_listeners = await Promise.all((tcpPorts || []).map(async (port) => ({
     port,
-    status: (await tcpProbe('127.0.0.1', port)).reachable ? 'listening' : 'listener_failed',
+    status: (await tcpProbe(probeIp, port)).reachable ? 'listening' : 'listener_failed',
   })));
 
   // Layer 2 — Network: WG + DNS

@@ -98,6 +98,7 @@ async function bootstrap() {
               proxyPort: config.proxyPort,
               apiPort: config.apiPort,
               tcpPorts: tcpMgr.listListenerPorts(),
+              bindIp: config.tunnelIp,
               wgStatus: () => wireguard.getStatus(),
               dnsResolveFn: async () => dns.resolve4(new URL(config.serverUrl).hostname),
               reachabilityFn: async (h, p) => {
@@ -146,6 +147,7 @@ async function bootstrap() {
         proxyPort: config.proxyPort,
         apiPort: config.apiPort,
         tcpPorts: tcpMgr.listListenerPorts(),
+        bindIp: config.tunnelIp,
         wgStatus: () => wireguard.getStatus(),
         dnsResolveFn: async () => dns.resolve4(new URL(config.serverUrl).hostname),
         reachabilityFn: async (h, p) => {
