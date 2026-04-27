@@ -125,14 +125,19 @@ ensure_template() {
 
 prompt_env_file() {
   local default_path="/root/gateway.env"
-  whiptail --title "Gateway pairing config" --msgbox \
-"Before continuing, generate a gateway.env in the GateControl Dashboard:
 
+  # Plain-text explanation BEFORE any whiptail call — some terminals
+  # (especially bash -c "$(curl ...)" invocations under SSH) render the
+  # first msgbox invisibly and the user has to press ESC blind to
+  # advance. Plain text always shows.
+  cat >&2 <<'EOF'
+
+Before continuing, generate a gateway.env in the GateControl Dashboard:
   1. Open Dashboard → Peers → click your Gateway-Peer
   2. 'Download Config' (saves gateway.env)
   3. Copy the file to this Proxmox host (e.g. via scp)
 
-You will be asked for its path next." 14 70
+EOF
 
   local path
   path=$(whiptail --title "Path to gateway.env" --inputbox \
@@ -370,6 +375,7 @@ cmd_install() {
   local CTID="" HOSTNAME_="$DEFAULT_HOSTNAME" ENV_FILE=""
   local BRIDGE="$DEFAULT_BRIDGE" STORAGE="" RAM="$DEFAULT_RAM"
   local CORES="$DEFAULT_CORES" DISK="$DEFAULT_DISK"
+  local ASSUME_YES=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --ctid)     CTID="$2"; shift 2 ;;
@@ -380,6 +386,7 @@ cmd_install() {
       --ram)      RAM="$2"; shift 2 ;;
       --cores)    CORES="$2"; shift 2 ;;
       --disk)     DISK="$2"; shift 2 ;;
+      -y|--yes)   ASSUME_YES=1; shift ;;
       *) die "Unknown option: $1 (use --help for usage)" ;;
     esac
   done
@@ -398,16 +405,22 @@ cmd_install() {
     die "LXC $CTID already exists — pick another --ctid or 'remove' the existing one first"
   fi
 
-  # Confirm
-  whiptail --title "Confirm" --yesno \
-"Create LXC $CTID with these settings?
+  # Confirm — print plain summary first so it's always visible, then yesno
+  cat >&2 <<EOF
 
+──── About to create LXC $CTID ────
   Hostname:  $HOSTNAME_
   Storage:   $STORAGE
   Bridge:    $BRIDGE
   Resources: ${RAM} MB RAM / ${CORES} core(s) / ${DISK} GB disk
-  Env file:  $ENV_FILE" 16 65 \
-    || die "Aborted by user"
+  Env file:  $ENV_FILE
+─────────────────────────────────
+
+EOF
+  if [ "$ASSUME_YES" -eq 0 ]; then
+    whiptail --title "Confirm" --yesno "Proceed with these settings?" 8 60 \
+      || die "Aborted by user"
+  fi
 
   ensure_template
   create_lxc "$CTID" "$HOSTNAME_" "$STORAGE" "$BRIDGE" "$RAM" "$CORES" "$DISK"
@@ -509,6 +522,7 @@ Install options:
   --ram <mb>         Memory in MB (default: $DEFAULT_RAM)
   --cores <n>        CPU cores (default: $DEFAULT_CORES)
   --disk <gb>        Rootfs size in GB (default: $DEFAULT_DISK)
+  -y, --yes          Skip the final confirmation prompt
 
 Recommended provisioning order:
   1. In the GateControl Dashboard, create a Gateway-Peer (or open an
