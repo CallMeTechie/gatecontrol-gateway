@@ -123,6 +123,58 @@ ensure_template() {
 
 # ── Env-file handling ─────────────────────────────────────────────────
 
+# Trade a pairing token (XXXX-XXXX-XXXX-XXXX@host) for the gateway.env
+# content via the server's POST /api/v1/gateway/pair endpoint. Writes to
+# a tmp file and echoes the path. Caller validates as usual.
+redeem_pairing_token() {
+  local token="$1"
+  local code="${token%@*}"
+  local host="${token##*@}"
+  if [ -z "$code" ] || [ -z "$host" ] || [ "$code" = "$token" ]; then
+    die "Invalid pairing token format — expected XXXX-XXXX-XXXX-XXXX@hostname"
+  fi
+  if ! [[ "$code" =~ ^[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}$ ]]; then
+    die "Invalid pairing code segment — expected 4 groups of 4 hex chars"
+  fi
+
+  local tmp
+  tmp=$(mktemp /tmp/gateway.env.XXXXXX)
+  chmod 600 "$tmp"
+
+  msg_info "Redeeming pairing token at https://${host}/api/v1/gateway/pair ..."
+  local body_file
+  body_file=$(mktemp)
+  local http_code
+  http_code=$(curl -fsS --max-time 30 \
+    -o "$body_file" -w "%{http_code}" \
+    -X POST "https://${host}/api/v1/gateway/pair" \
+    -H "Content-Type: application/json" \
+    -d "{\"code\":\"${code^^}\"}" 2>/dev/null) || http_code=000
+
+  if [ "$http_code" != "200" ]; then
+    local err
+    err=$(jq -r '.error // "unknown"' <"$body_file" 2>/dev/null || echo "unknown")
+    rm -f "$body_file" "$tmp"
+    case "$http_code" in
+      400) die "Pairing failed: ${err} (token already used, expired, or never existed). Generate a new one in the dashboard." ;;
+      429) die "Pairing rate-limited: too many attempts from this IP — wait a few minutes and retry." ;;
+      000) die "Pairing failed: could not reach https://${host} (DNS / connectivity / TLS — verify the hostname)." ;;
+      *)   die "Pairing failed with HTTP $http_code: $err" ;;
+    esac
+  fi
+
+  # Server returns { "ok": true, "envContent": "GC_SERVER_URL=...\n..." }.
+  jq -r '.envContent' <"$body_file" >"$tmp"
+  rm -f "$body_file"
+
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    die "Pairing succeeded but envContent was empty — server bug, please report"
+  fi
+  msg_ok "Pairing token redeemed; gateway.env materialised at $tmp"
+  echo "$tmp"
+}
+
 prompt_env_file() {
   local default_path="/root/gateway.env"
 
@@ -132,10 +184,14 @@ prompt_env_file() {
   # advance. Plain text always shows.
   cat >&2 <<'EOF'
 
-Before continuing, generate a gateway.env in the GateControl Dashboard:
-  1. Open Dashboard → Peers → click your Gateway-Peer
-  2. 'Download Config' (saves gateway.env)
-  3. Copy the file to this Proxmox host (e.g. via scp)
+Two ways to provision this gateway:
+
+  Option A (one-shot, recommended): paste the bash command from the
+    GateControl Dashboard's Gateway-Peer modal — it includes the
+    pairing token via --token and skips all prompts.
+
+  Option B: download gateway.env from the dashboard, copy it to this
+    host (e.g. via scp), and provide its path below.
 
 EOF
 
@@ -372,7 +428,7 @@ cmd_install() {
   preflight
 
   # Argument parsing
-  local CTID="" HOSTNAME_="$DEFAULT_HOSTNAME" ENV_FILE=""
+  local CTID="" HOSTNAME_="$DEFAULT_HOSTNAME" ENV_FILE="" PAIRING_TOKEN=""
   local BRIDGE="$DEFAULT_BRIDGE" STORAGE="" RAM="$DEFAULT_RAM"
   local CORES="$DEFAULT_CORES" DISK="$DEFAULT_DISK"
   local ASSUME_YES=0
@@ -381,6 +437,7 @@ cmd_install() {
       --ctid)     CTID="$2"; shift 2 ;;
       --hostname) HOSTNAME_="$2"; shift 2 ;;
       --env-file) ENV_FILE="$2"; shift 2 ;;
+      --token)    PAIRING_TOKEN="$2"; shift 2 ;;
       --bridge)   BRIDGE="$2"; shift 2 ;;
       --storage)  STORAGE="$2"; shift 2 ;;
       --ram)      RAM="$2"; shift 2 ;;
@@ -394,7 +451,13 @@ cmd_install() {
   [ -n "$CTID" ]    || CTID=$(pvesh get /cluster/nextid)
   [ -n "$STORAGE" ] || STORAGE=$(detect_storage)
 
-  if [ -z "$ENV_FILE" ]; then
+  # --token wins over --env-file; --env-file wins over the prompt.
+  if [ -n "$PAIRING_TOKEN" ] && [ -n "$ENV_FILE" ]; then
+    die "Use either --token or --env-file, not both"
+  fi
+  if [ -n "$PAIRING_TOKEN" ]; then
+    ENV_FILE=$(redeem_pairing_token "$PAIRING_TOKEN")
+  elif [ -z "$ENV_FILE" ]; then
     ENV_FILE=$(prompt_env_file)
   fi
   [ -f "$ENV_FILE" ] || die "gateway.env not found at: $ENV_FILE"
@@ -516,7 +579,9 @@ Usage:
 Install options:
   --ctid <id>        LXC container ID (default: next free)
   --hostname <h>     Container hostname (default: $DEFAULT_HOSTNAME)
-  --env-file <p>     Path to gateway.env on this host (default: prompts)
+  --token <t>        Pairing token (XXXX-XXXX-XXXX-XXXX@host) — fetched
+                     from the dashboard's Gateway-Peer modal (LXC tab)
+  --env-file <p>     Path to gateway.env on this host (alternative to --token)
   --bridge <b>       Network bridge (default: $DEFAULT_BRIDGE)
   --storage <s>      Storage for rootfs (default: first active rootdir storage)
   --ram <mb>         Memory in MB (default: $DEFAULT_RAM)
@@ -524,12 +589,18 @@ Install options:
   --disk <gb>        Rootfs size in GB (default: $DEFAULT_DISK)
   -y, --yes          Skip the final confirmation prompt
 
-Recommended provisioning order:
-  1. In the GateControl Dashboard, create a Gateway-Peer (or open an
-     existing one) and click 'Download Config' — saves gateway.env.
-  2. scp the gateway.env to this Proxmox host (e.g. /root/gateway.env).
-  3. Run this script. The container is unprivileged with TUN passthrough,
-     so WireGuard kernel module on the host is used.
+Recommended provisioning (one-shot via dashboard):
+  1. In the GateControl Dashboard, create or open a Gateway-Peer.
+  2. The modal that pops up has an 'LXC' tab — copy the bash command.
+  3. Paste it on the Proxmox host shell. Done.
+
+Alternative provisioning (manual env-file transfer):
+  1. In the dashboard, switch to the 'Docker' tab and download gateway.env.
+  2. scp gateway.env to this Proxmox host (e.g. /root/gateway.env).
+  3. Run: $(basename "$0") install --env-file /root/gateway.env
+
+The container is unprivileged with TUN passthrough, so WireGuard kernel
+module on the host is reused without granting host-root capabilities.
 EOF
 }
 
