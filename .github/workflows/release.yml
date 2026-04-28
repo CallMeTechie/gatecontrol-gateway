@@ -106,6 +106,10 @@ jobs:
       - name: Bundle release tarball (production deps)
         run: |
           npm prune --omit=dev
+          # Write the tarball OUTSIDE the workspace tree so tar doesn't
+          # see its own output file change mid-read ("file changed as we
+          # read it" -> exit 1 under `set -e`). Then move it back into
+          # CWD where action-gh-release expects to find it.
           tar --exclude='./.git' \
               --exclude='./.github' \
               --exclude='./tests' \
@@ -117,7 +121,8 @@ jobs:
               --exclude='./scripts' \
               --exclude='./.eslintrc*' \
               --exclude='./.dockerignore' \
-              -czf gateway-bundle.tar.gz .
+              -czf /tmp/gateway-bundle.tar.gz .
+          mv /tmp/gateway-bundle.tar.gz ./gateway-bundle.tar.gz
           ls -lh gateway-bundle.tar.gz
 
       - name: GitHub Release
