@@ -291,9 +291,14 @@ LATEST_TAG="${LATEST_TAG:-}"
 
 echo "[setup] apt update + base packages"
 apt-get update -qq
+# openresolv supplies /usr/sbin/resolvconf which wg-quick invokes when
+# WG_DNS is set. Without it wg-quick aborts with "resolvconf: command
+# not found" (exit 127) before the WG link is up. Debian 12 standard
+# LXC template doesn't ship it.
 apt-get install -y -qq \
   curl ca-certificates gnupg jq tar \
   wireguard-tools iproute2 iptables \
+  openresolv \
   >/dev/null
 
 echo "[setup] installing Node.js 20.x"
@@ -371,12 +376,14 @@ install_inside_lxc() {
   # Push gateway.env (will be moved into /etc by the setup script)
   pct push "$ctid" "$env_file" /tmp/gateway.env --perms 0600
 
-  # Build + push setup script
+  # Build + push setup script. Avoid `trap '… "$setup_tmp"' RETURN` —
+  # the local goes out of scope before the trap fires, which under set -u
+  # surfaces as "setup_tmp: unbound variable" after a successful install.
   local setup_tmp
   setup_tmp=$(mktemp)
-  trap 'rm -f "$setup_tmp"' RETURN
   build_setup_script "$setup_tmp"
   pct push "$ctid" "$setup_tmp" /root/gatecontrol-setup.sh --perms 0755
+  rm -f "$setup_tmp"
 
   msg_info "Provisioning inside container (this can take 1–2 min)..."
   pct exec "$ctid" -- bash /root/gatecontrol-setup.sh
@@ -414,6 +421,12 @@ print_summary() {
   local version
   version=$(pct exec "$ctid" -- cat /opt/gatecontrol-gateway/.installed_version 2>/dev/null || echo unknown)
 
+  # When the script ran via bash -c "$(curl …)" the positional $0 is
+  # 'bash' (or empty) and realpath/basename throw "missing operand" if
+  # we hand them the raw value. Print the canonical curl-pipe-bash
+  # invocation back to the user so they can copy-paste it directly.
+  local self_invocation="bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install-pve.sh)\""
+
   cat <<EOF
 
 ──────────────────────────────────────────────────────────
@@ -427,8 +440,8 @@ print_summary() {
     1. Open the GateControl Dashboard → Peers → your Gateway
        and confirm it shows 'online' within ~30s.
     2. Logs:    pct exec $ctid -- journalctl -u gatecontrol-gateway -f
-    3. Update:  bash $(realpath "$0" 2>/dev/null || basename "$0") update $ctid
-    4. Remove:  bash $(realpath "$0" 2>/dev/null || basename "$0") remove $ctid
+    3. Update:  $self_invocation -- update $ctid
+    4. Remove:  $self_invocation -- remove $ctid
 ──────────────────────────────────────────────────────────
 EOF
 }
