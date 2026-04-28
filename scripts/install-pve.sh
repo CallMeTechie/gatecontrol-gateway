@@ -613,6 +613,11 @@ main() {
     update)          shift || true; cmd_update  "$@" ;;
     remove|destroy)  shift || true; cmd_remove  "$@" ;;
     -h|--help|help)  usage; exit 0 ;;
+    # When the first arg is a flag (--token, --yes, --env-file, …) the
+    # caller skipped the subcommand. That's the shape the dashboard
+    # generates ("bash -c "$(curl …)" -- --token X --yes") so default
+    # to the install subcommand and pass every flag through.
+    -*)              cmd_install "$@" ;;
     *) die "Unknown subcommand: $cmd (try --help)" ;;
   esac
 }
