@@ -284,26 +284,37 @@ build_setup_script() {
   cat >"$out" <<'SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+
+# Suppress the inherited locale that pct exec brings from the PVE host
+# (typically en_US.UTF-8) but isn't generated in the fresh LXC. Setup
+# tools (apt, perl, locale, …) don't need anything beyond the C locale,
+# which is always available, and forcing it shuts up the cascade of
+# "Cannot set LC_*: No such file or directory" warnings.
+export LC_ALL=C LANG=C
+unset LC_CTYPE LC_MESSAGES LANGUAGE
 export DEBIAN_FRONTEND=noninteractive
 
 REPO="CallMeTechie/gatecontrol-gateway"
 LATEST_TAG="${LATEST_TAG:-}"
 
-echo "[setup] apt update + base packages"
-apt-get update -qq
+step() { printf '\n\033[1;34m[setup %s]\033[0m %s\n' "$1" "$2"; }
+
+step '1/4' 'apt update + base packages (~30 s)'
+# Use -q (one q): suppresses progress bars but still prints package
+# names and counts so the user can see the install is alive.
 # openresolv supplies /usr/sbin/resolvconf which wg-quick invokes when
 # WG_DNS is set. Without it wg-quick aborts with "resolvconf: command
 # not found" (exit 127) before the WG link is up. Debian 12 standard
 # LXC template doesn't ship it.
-apt-get install -y -qq \
+apt-get update -q
+apt-get install -y -q \
   curl ca-certificates gnupg jq tar \
   wireguard-tools iproute2 iptables \
-  openresolv \
-  >/dev/null
+  openresolv
 
-echo "[setup] installing Node.js 20.x"
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
-apt-get install -y -qq nodejs >/dev/null
+step '2/4' 'installing Node.js 20 (~60 s)'
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y -q nodejs
 
 if [ -z "$LATEST_TAG" ]; then
   LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
@@ -313,8 +324,8 @@ fi
   echo "[setup] FAILED to resolve latest release tag" >&2
   exit 1
 }
-echo "[setup] installing gateway $LATEST_TAG"
 
+step '3/4' "downloading gateway bundle ${LATEST_TAG} (~30 MB)"
 # Download the pre-built bundle (source + production node_modules). The
 # bundle is built by the release workflow with NODE_AUTH_TOKEN so it can
 # pull the private @callmetechie/gatecontrol-config-hash package — the
@@ -322,13 +333,16 @@ echo "[setup] installing gateway $LATEST_TAG"
 # at the auth step.
 mkdir -p /opt/gatecontrol-gateway
 BUNDLE_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/gateway-bundle.tar.gz"
-if ! curl -fsSL "$BUNDLE_URL" | tar xz -C /opt/gatecontrol-gateway; then
+if ! curl -fSL --progress-bar "$BUNDLE_URL" -o /tmp/gateway-bundle.tar.gz; then
   echo "[setup] FAILED to download gateway-bundle.tar.gz from $BUNDLE_URL" >&2
   echo "[setup] If this is a brand-new release, the bundle may not yet be uploaded — wait 2 min for the release workflow to finish and re-run." >&2
   exit 1
 fi
-
+tar xzf /tmp/gateway-bundle.tar.gz -C /opt/gatecontrol-gateway
+rm -f /tmp/gateway-bundle.tar.gz
 echo "$LATEST_TAG" > /opt/gatecontrol-gateway/.installed_version
+
+step '4/4' 'configuring systemd service'
 
 # Place env file (was pushed to /tmp/gateway.env by the host script)
 mkdir -p /etc/gatecontrol-gateway
@@ -366,7 +380,8 @@ systemctl daemon-reload
 systemctl enable gatecontrol-gateway.service >/dev/null 2>&1
 systemctl restart gatecontrol-gateway.service
 
-echo "[setup] done"
+echo
+echo "[setup] done — service started, awaiting WG handshake."
 SCRIPT
 }
 
