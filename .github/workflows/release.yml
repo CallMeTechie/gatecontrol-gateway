@@ -82,27 +82,11 @@ jobs:
             ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.tag }}
             ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.version }}
 
-      - name: Trivy scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.tag }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: CRITICAL
-          exit-code: 0  # scan + report, don't fail pipeline (Alpine may have findings)
-
-      - name: SBOM via Syft
-        uses: anchore/sbom-action@v0
-        with:
-          image: ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.tag }}
-          format: cyclonedx-json
-          output-file: sbom.cdx.json
-
-      # Bundle a self-contained tarball with production node_modules so the
-      # install-pve.sh installer can deploy without npm ci'ing private
-      # GitHub-Packages deps inside an LXC (the user's PVE host has no
-      # GH_PACKAGES_TOKEN). Strip dev tooling + repo metadata to keep it
-      # tight.
+      # Bundle FIRST, before the third-party SBOM/Trivy steps, so a flaky
+      # external installer (e.g. Syft mirror serving HTML 404 like it did
+      # on 2026-04-28) doesn't sink the release. Bundle is the
+      # critical-path artifact for install-pve.sh; SBOM + sarif are
+      # advisory.
       - name: Bundle release tarball (production deps)
         run: |
           npm prune --omit=dev
@@ -124,6 +108,24 @@ jobs:
               -czf /tmp/gateway-bundle.tar.gz .
           mv /tmp/gateway-bundle.tar.gz ./gateway-bundle.tar.gz
           ls -lh gateway-bundle.tar.gz
+
+      - name: Trivy scan
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.tag }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL
+          exit-code: 0  # scan + report, don't fail pipeline (Alpine may have findings)
+
+      - name: SBOM via Syft
+        continue-on-error: true
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.tag }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
 
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
