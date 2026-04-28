@@ -34,9 +34,15 @@ _c_green='\033[1;32m'
 _c_yellow='\033[1;33m'
 _c_red='\033[1;31m'
 
-msg_info() { printf '%b[INFO]%b %s\n' "$_c_blue"   "$_c_reset" "$*"; }
-msg_ok()   { printf '%b[OK]%b   %s\n' "$_c_green"  "$_c_reset" "$*"; }
-msg_warn() { printf '%b[WARN]%b %s\n' "$_c_yellow" "$_c_reset" "$*"; }
+# All status helpers write to stderr so functions that legitimately
+# echo their result on stdout (e.g. redeem_pairing_token returning a
+# tmp-file path captured via "$(...)") don't leak the [INFO]/[OK] lines
+# into the caller's variable. Reported in the wild: ENV_FILE captured
+# the entire "[INFO] Redeeming…\n[OK] materialised at …\n/tmp/…"
+# multi-line string and the next [ -f "$ENV_FILE" ] failed.
+msg_info() { printf '%b[INFO]%b %s\n' "$_c_blue"   "$_c_reset" "$*" >&2; }
+msg_ok()   { printf '%b[OK]%b   %s\n' "$_c_green"  "$_c_reset" "$*" >&2; }
+msg_warn() { printf '%b[WARN]%b %s\n' "$_c_yellow" "$_c_reset" "$*" >&2; }
 msg_err()  { printf '%b[ERR]%b  %s\n' "$_c_red"    "$_c_reset" "$*" >&2; }
 die()      { msg_err "$*"; exit 1; }
 
