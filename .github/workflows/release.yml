@@ -98,6 +98,28 @@ jobs:
           format: cyclonedx-json
           output-file: sbom.cdx.json
 
+      # Bundle a self-contained tarball with production node_modules so the
+      # install-pve.sh installer can deploy without npm ci'ing private
+      # GitHub-Packages deps inside an LXC (the user's PVE host has no
+      # GH_PACKAGES_TOKEN). Strip dev tooling + repo metadata to keep it
+      # tight.
+      - name: Bundle release tarball (production deps)
+        run: |
+          npm prune --omit=dev
+          tar --exclude='./.git' \
+              --exclude='./.github' \
+              --exclude='./tests' \
+              --exclude='./reports' \
+              --exclude='./docs' \
+              --exclude='./Dockerfile' \
+              --exclude='./Dockerfile.*' \
+              --exclude='./docker-compose*.yml' \
+              --exclude='./scripts' \
+              --exclude='./.eslintrc*' \
+              --exclude='./.dockerignore' \
+              -czf gateway-bundle.tar.gz .
+          ls -lh gateway-bundle.tar.gz
+
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
@@ -107,6 +129,7 @@ jobs:
           files: |
             sbom.cdx.json
             trivy-results.sarif
+            gateway-bundle.tar.gz
 
   smoke-multiarch:
     runs-on: ubuntu-latest

@@ -310,13 +310,18 @@ fi
 }
 echo "[setup] installing gateway $LATEST_TAG"
 
+# Download the pre-built bundle (source + production node_modules). The
+# bundle is built by the release workflow with NODE_AUTH_TOKEN so it can
+# pull the private @callmetechie/gatecontrol-config-hash package — the
+# LXC has no such token, so npm ci on a bare source tarball would fail
+# at the auth step.
 mkdir -p /opt/gatecontrol-gateway
-curl -fsSL "https://github.com/${REPO}/archive/refs/tags/${LATEST_TAG}.tar.gz" \
-  | tar xz -C /opt/gatecontrol-gateway --strip-components=1
-
-cd /opt/gatecontrol-gateway
-# Suppress npm chatter; the prepare scripts in this repo are deterministic
-npm ci --omit=dev --silent --no-audit --no-fund
+BUNDLE_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/gateway-bundle.tar.gz"
+if ! curl -fsSL "$BUNDLE_URL" | tar xz -C /opt/gatecontrol-gateway; then
+  echo "[setup] FAILED to download gateway-bundle.tar.gz from $BUNDLE_URL" >&2
+  echo "[setup] If this is a brand-new release, the bundle may not yet be uploaded — wait 2 min for the release workflow to finish and re-run." >&2
+  exit 1
+fi
 
 echo "$LATEST_TAG" > /opt/gatecontrol-gateway/.installed_version
 
@@ -539,10 +544,8 @@ so you can roll back manually if needed." 12 65 \
   pct exec "$CTID" -- bash -c "
     set -e
     mkdir -p /opt/gatecontrol-gateway
-    curl -fsSL 'https://github.com/${REPO}/archive/refs/tags/${latest}.tar.gz' \
-      | tar xz -C /opt/gatecontrol-gateway --strip-components=1
-    cd /opt/gatecontrol-gateway
-    npm ci --omit=dev --silent --no-audit --no-fund
+    curl -fsSL 'https://github.com/${REPO}/releases/download/${latest}/gateway-bundle.tar.gz' \
+      | tar xz -C /opt/gatecontrol-gateway
     echo '${latest}' > /opt/gatecontrol-gateway/.installed_version
     systemctl restart gatecontrol-gateway.service
   "
