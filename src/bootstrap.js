@@ -163,6 +163,7 @@ async function bootstrap() {
       // every heartbeat; server persists the whole payload into
       // gateway_meta.last_health and the admin UI pulls what it needs.
       health.telemetry = collectTelemetry();
+      health.config_hash = store.currentHash || null;
       return health;
     },
   });
