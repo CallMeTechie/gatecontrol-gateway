@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const { sendHeartbeat } = require('../src/heartbeat');
+const { sendHeartbeat, _collectHealth } = require('../src/heartbeat');
 
 describe('heartbeat', () => {
   it('sends POST /api/v1/gateway/heartbeat with Bearer + JSON payload', async () => {
@@ -30,5 +30,28 @@ describe('heartbeat', () => {
     const body = JSON.parse(received.body);
     assert.equal(body.http_proxy_healthy, true);
     server.close();
+  });
+
+  it('_collectHealth returns full result when getHealth resolves in time', async () => {
+    const result = await _collectHealth(async () => ({ overall_healthy: true, foo: 1 }), 1000);
+    assert.equal(result.overall_healthy, true);
+    assert.equal(result.foo, 1);
+  });
+
+  it('_collectHealth returns timeout payload when getHealth hangs past cap', async () => {
+    const slow = () => new Promise(() => { /* never resolves */ });
+    const start = Date.now();
+    const result = await _collectHealth(slow, 100);
+    const elapsed = Date.now() - start;
+    assert.equal(result.overall_healthy, false);
+    assert.equal(result.reason, 'health_collection_timeout');
+    assert.ok(elapsed < 500, `should return promptly, took ${elapsed}ms`);
+  });
+
+  it('_collectHealth returns error payload when getHealth throws', async () => {
+    const result = await _collectHealth(async () => { throw new Error('boom'); }, 1000);
+    assert.equal(result.overall_healthy, false);
+    assert.equal(result.reason, 'health_collection_error');
+    assert.equal(result.error, 'boom');
   });
 });

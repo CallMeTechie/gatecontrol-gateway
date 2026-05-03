@@ -50,3 +50,30 @@ describe('wireguard', () => {
     assert.match(ini, /AllowedIPs\s*=\s*10\.0\.0\.0\/8/);
   });
 });
+
+describe('wireguard runCommand timeout', () => {
+  const fs = require('node:fs');
+  const { _runCommand } = require('../src/wireguard');
+  const hasSleep = (() => { try { return fs.statSync('/bin/sleep').isFile(); } catch { return false; } })();
+  const skip = !hasSleep;
+
+  it('rejects with timeout error and kills child when timeoutMs exceeded', { skip }, async () => {
+    const start = Date.now();
+    await assert.rejects(
+      _runCommand('/bin/sleep', ['5'], { timeoutMs: 80 }),
+      /timed out after 80ms/,
+    );
+    const elapsed = Date.now() - start;
+    assert.ok(elapsed < 1000, `expected timeout to fire fast, took ${elapsed}ms`);
+  });
+
+  it('resolves normally when child exits before timeoutMs', { skip }, async () => {
+    const out = await _runCommand('/bin/sh', ['-c', 'echo hello'], { timeoutMs: 2000 });
+    assert.match(out, /hello/);
+  });
+
+  it('without timeoutMs the legacy (unbounded) path still works', { skip }, async () => {
+    const out = await _runCommand('/bin/sh', ['-c', 'echo legacy']);
+    assert.match(out, /legacy/);
+  });
+});

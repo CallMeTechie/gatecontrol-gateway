@@ -13,13 +13,13 @@ const { createConfigChangedRouter } = require('./api/routes/configChanged');
 const { createWolRouter } = require('./api/routes/wol');
 const { createStatusRouter } = require('./api/routes/status');
 const { createProbeRouter } = require('./api/routes/probe');
-const { runSelfCheck } = require('./health/selfCheck');
+const { createSelfCheckRunner } = require('./health/selfCheckRunner');
+const { tcpProbe } = require('./health/selfCheck');
 const { collectTelemetry } = require('./health/telemetry');
 const { sendMagicPacket, waitForReachable } = require('./wol');
 const { startHeartbeatTicker } = require('./heartbeat');
 const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol-config-hash');
 const logger = require('./logger');
-const dns = require('node:dns/promises');
 const os = require('node:os');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
@@ -77,6 +77,11 @@ async function bootstrap() {
   await new Promise(r => httpProxyServer.listen(config.proxyPort, config.tunnelIp, r));
   logger.info({ bind: `${config.tunnelIp}:${config.proxyPort}` }, 'HTTP proxy listening');
 
+  // Shared self-check runner — used by /api/status AND the heartbeat ticker.
+  // Centralised so the route-list, DNS resolver and reachability probe are
+  // wired up once instead of duplicated at each call-site.
+  const runHealthCheck = createSelfCheckRunner({ config, store, tcpMgr, wireguard });
+
   // 6. Management API
   const apiApp = createApiServer({
     bindIp: config.tunnelIp,
@@ -92,28 +97,13 @@ async function bootstrap() {
           waitForReachable,
         }));
         mergeRouter.use(createStatusRouter({
-          getSelfCheckResult: async () => {
-            const allRoutes = [...store.httpRoutes, ...store.l4Routes.map(r => ({ id: r.id, domain: `l4:${r.listen_port}`, target_lan_host: r.target_lan_host, target_lan_port: r.target_lan_port }))];
-            return runSelfCheck({
-              proxyPort: config.proxyPort,
-              apiPort: config.apiPort,
-              tcpPorts: tcpMgr.listListenerPorts(),
-              bindIp: config.tunnelIp,
-              wgStatus: () => wireguard.getStatus(),
-              dnsResolveFn: async () => dns.resolve4(new URL(config.serverUrl).hostname),
-              reachabilityFn: async (h, p) => {
-                const res = await require('./health/selfCheck').tcpProbe(h, p);
-                return { reachable: res.reachable, latencyMs: res.latencyMs };
-              },
-              routes: allRoutes,
-            });
-          },
+          getSelfCheckResult: runHealthCheck,
         }));
         mergeRouter.use(createProbeRouter({
           lanProbeFn: async () => {
             if (!config.lanProbeTarget) return { skipped: true };
             const [host, port = 80] = config.lanProbeTarget.split(':');
-            return require('./health/selfCheck').tcpProbe(host, parseInt(port, 10));
+            return tcpProbe(host, parseInt(port, 10));
           },
         }));
         return mergeRouter;
@@ -142,20 +132,7 @@ async function bootstrap() {
     apiToken: config.apiToken,
     intervalMs: config.heartbeatIntervalS * 1000,
     getHealth: async () => {
-      const routes = [...store.httpRoutes, ...store.l4Routes.map(r => ({ id: r.id, target_lan_host: r.target_lan_host, target_lan_port: r.target_lan_port }))];
-      const health = await runSelfCheck({
-        proxyPort: config.proxyPort,
-        apiPort: config.apiPort,
-        tcpPorts: tcpMgr.listListenerPorts(),
-        bindIp: config.tunnelIp,
-        wgStatus: () => wireguard.getStatus(),
-        dnsResolveFn: async () => dns.resolve4(new URL(config.serverUrl).hostname),
-        reachabilityFn: async (h, p) => {
-          const res = await require('./health/selfCheck').tcpProbe(h, p);
-          return { reachable: res.reachable, latencyMs: res.latencyMs };
-        },
-        routes,
-      });
+      const health = await runHealthCheck();
       // Opportunistic hostname report — server populates peers.hostname for
       // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
       health.hostname = os.hostname();

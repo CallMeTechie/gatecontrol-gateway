@@ -56,4 +56,25 @@ describe('http router', () => {
     assert.equal(t.wolMac, 'AA:BB:CC:DD:EE:FF');
     assert.equal(t.routeId, 1);
   });
+
+  // Kills the `route.wol_enabled ? wol_mac : null` mutant — without this the
+  // mutant `wol_enabled ? null : wol_mac` would survive because no test
+  // covers the disabled-but-MAC-set case.
+  it('wolMac is null when wol_enabled=false even if wol_mac is set', () => {
+    const r = new Router();
+    r.setRoutes([
+      { id: 2, domain: 'y.example', target_lan_host: '10.0.0.2', target_lan_port: 80,
+        wol_enabled: false, wol_mac: 'AA:BB:CC:DD:EE:FF' },
+    ]);
+    assert.equal(r.resolve('y.example').wolMac, null);
+  });
+
+  it('wolMac is null when wol_enabled=true but wol_mac missing', () => {
+    const r = new Router();
+    r.setRoutes([
+      { id: 3, domain: 'z.example', target_lan_host: '10.0.0.3', target_lan_port: 80,
+        wol_enabled: true },
+    ]);
+    assert.equal(r.resolve('z.example').wolMac, null);
+  });
 });

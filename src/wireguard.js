@@ -64,13 +64,20 @@ function buildWgConfFile(config) {
 }
 
 function runCommand(cmd, args, opts = {}) {
+  const { timeoutMs, ...spawnOpts } = opts;
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts });
+    const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...spawnOpts });
     let stdout = '', stderr = '';
     let settled = false;
+    let killTimer = null;
     child.stdout.on('data', d => stdout += d);
     child.stderr.on('data', d => stderr += d);
-    child.on('error', err => { if (!settled) { settled = true; reject(err); } });
+    child.on('error', err => {
+      if (settled) return;
+      settled = true;
+      if (killTimer) clearTimeout(killTimer);
+      reject(err);
+    });
     // Use 'exit' event (fires on process exit) instead of 'close' (waits for
     // all stdio pipes to close). wg-quick spawns wireguard-go as a daemon
     // that inherits pipes — 'close' never fires because wireguard-go runs
@@ -79,12 +86,26 @@ function runCommand(cmd, args, opts = {}) {
     child.on('exit', (code) => {
       if (settled) return;
       settled = true;
+      if (killTimer) clearTimeout(killTimer);
       // Give 50ms for final buffered stdout/stderr to arrive before we read
       setTimeout(() => {
         if (code === 0) resolve(stdout);
         else reject(new Error(`${cmd} ${args.join(' ')} exited ${code}: ${stderr}`));
       }, 50);
     });
+    // Optional hard-timeout: kill the child if it hasn't exited in time.
+    // Used by getStatus() so a hung `wg show` can never block the heartbeat
+    // collection. wg-quick up/down deliberately runs without a timeout
+    // because boot-time setup (resolv.conf, route table) can legitimately
+    // take longer.
+    if (typeof timeoutMs === 'number' && timeoutMs > 0) {
+      killTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill('SIGKILL'); } catch (_e) { /* already gone */ }
+        reject(new Error(`${cmd} ${args.join(' ')} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+    }
   });
 }
 
@@ -104,7 +125,11 @@ async function bringDown() {
 }
 
 async function getStatus() {
-  const out = await runCommand('wg', ['show', WG_INTERFACE, 'dump']);
+  // 1500ms is generous — `wg show` reads from kernel/userspace netlink and
+  // returns in <50ms in practice. Cap exists to keep self-check / heartbeat
+  // bounded if the wg interface ever wedges (rare but observed on resume
+  // from suspend / TUN device hiccups).
+  const out = await runCommand('wg', ['show', WG_INTERFACE, 'dump'], { timeoutMs: 1500 });
   return parseWgShowDump(out);
 }
 
@@ -115,4 +140,7 @@ module.exports = {
   writeConfAndBringUp,
   bringDown,
   getStatus,
+  // Exported for unit tests of the timeout/kill behaviour. Not part of the
+  // module's public API — internal modules should call the named helpers above.
+  _runCommand: runCommand,
 };

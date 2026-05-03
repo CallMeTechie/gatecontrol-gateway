@@ -54,4 +54,47 @@ describe('wol', () => {
     assert.equal(_computeBroadcast('', '255.255.255.0'), null);
     assert.equal(_computeBroadcast('192.168.1.5', '255.255'), null);
   });
+
+  // Boundary tests — kill mutants that flip octet-range comparisons.
+  it('_computeBroadcast: rejects octet > 255 in IP', () => {
+    assert.equal(_computeBroadcast('192.168.1.999', '255.255.255.0'), null);
+    assert.equal(_computeBroadcast('256.168.1.5', '255.255.255.0'), null);
+  });
+
+  it('_computeBroadcast: rejects octet > 255 in mask', () => {
+    assert.equal(_computeBroadcast('192.168.1.5', '999.255.255.0'), null);
+  });
+
+  it('_computeBroadcast: rejects negative octets / non-numeric', () => {
+    assert.equal(_computeBroadcast('-1.168.1.5', '255.255.255.0'), null);
+    assert.equal(_computeBroadcast('a.b.c.d', '255.255.255.0'), null);
+  });
+
+  it('_computeBroadcast: /16 boundary — 192.168.1.5 / 255.255.0.0 → 192.168.255.255', () => {
+    assert.equal(_computeBroadcast('192.168.1.5', '255.255.0.0'), '192.168.255.255');
+  });
+
+  it('_computeBroadcast: /32 host route → IP itself', () => {
+    assert.equal(_computeBroadcast('192.168.1.5', '255.255.255.255'), '192.168.1.5');
+  });
+
+  // validateMac edge-cases — kills mutants that simplify the regex.
+  it('validateMac rejects empty + partial MACs', () => {
+    assert.equal(validateMac(''), false);
+    assert.equal(validateMac('AA:BB:CC:DD:EE'), false);    // 5 octets
+    assert.equal(validateMac('AA:BB:CC:DD:EE:FF:11'), false); // 7 octets
+    assert.equal(validateMac('GG:HH:II:JJ:KK:LL'), false);  // hex out of range
+  });
+
+  it('validateMac accepts no-separator and dash forms', () => {
+    assert.equal(validateMac('AABBCCDDEEFF'), true);
+    assert.equal(validateMac('AA-BB-CC-DD-EE-FF'), true);
+    assert.equal(validateMac('aa:bb:cc:dd:ee:ff'), true);
+  });
+
+  it('buildMagicPacket accepts lowercase mac and produces uppercase-equivalent bytes', () => {
+    const lower = buildMagicPacket('aa:bb:cc:dd:ee:ff');
+    const upper = buildMagicPacket('AA:BB:CC:DD:EE:FF');
+    assert.deepEqual(lower, upper);
+  });
 });
