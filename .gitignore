@@ -6,3 +6,6 @@ reports/
 .DS_Store
 config/gateway.env
 config/wg0.conf
+.env
+*.env
+!.env.example
