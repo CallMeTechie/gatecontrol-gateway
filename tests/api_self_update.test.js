@@ -56,3 +56,11 @@ test('new request_id after a failed pull is NOT cooled down', async () => {
   const srv = await serve(dir); const res = await post(srv, { request_id: 'new' }); srv.close();
   assert.equal(res.status, 200); assert.equal(res.body.queued, true);
 });
+
+test('post-success loop: a different request_id within 60s of a good pull is cooled down', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'st-'));
+  fs.writeFileSync(path.join(dir, 'last-pull'), JSON.stringify({ request_id: 'old', ok: true, pulled_at: Date.now() }));
+  const srv = await serve(dir); const res = await post(srv, { request_id: 'new' }); srv.close();
+  assert.equal(res.status, 200); assert.equal(res.body.skipped, 'cooldown');
+  assert.equal(fs.existsSync(path.join(dir, 'pending-update')), false);
+});

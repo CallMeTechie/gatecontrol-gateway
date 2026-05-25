@@ -27,11 +27,11 @@ repo_digest() { docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests
 exec 9>"$LOCK"
 if ! flock -n 9; then log "another update running, exit"; exit 0; fi
 
-REQUEST_ID=""
-if [ -f "$FLAG" ]; then
-  REQUEST_ID="$(grep -o '"request_id":"[^"]*"' "$FLAG" | head -1 | cut -d'"' -f4 || true)"
-  rm -f "$FLAG"   # consume-on-lock: a later trigger writes a fresh flag
-fi
+# Nothing to do unless a flag is present. DSM polls this script on a timer, so
+# without this guard every poll would pull+recreate the container.
+if [ ! -f "$FLAG" ]; then exit 0; fi
+REQUEST_ID="$(grep -o '"request_id":"[^"]*"' "$FLAG" | head -1 | cut -d'"' -f4 || true)"
+rm -f "$FLAG"   # consume-on-lock: a later trigger writes a fresh flag
 log "update start request_id=${REQUEST_ID:-none}"
 
 CID="$(running_cid)"
@@ -40,11 +40,14 @@ OLD_DIGEST=""
 log "container=$CID old_digest=${OLD_DIGEST:-none}"
 
 dc pull "$SERVICE" >>"$LOG" 2>&1 || log "pull reported error (continuing)"
-dc up -d --force-recreate "$SERVICE" >>"$LOG" 2>&1
+# Guard against set -e: if recreate fails we must still reach the rollback +
+# last-pull steps below (don't let a non-zero exit abort the script).
+up_ok=true
+dc up -d --force-recreate "$SERVICE" >>"$LOG" 2>&1 || { log "compose up failed"; up_ok=false; }
 
 ok=false
 deadline=$(( $(date +%s) + HEALTH_CEILING ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
+while [ "$up_ok" = true ] && [ "$(date +%s)" -lt "$deadline" ]; do
   NCID="$(running_cid)"
   if [ -n "$NCID" ]; then
     hs="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$NCID" 2>/dev/null || echo starting)"
