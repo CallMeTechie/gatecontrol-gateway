@@ -7,6 +7,7 @@
 
 const os = require('node:os');
 const fs = require('node:fs');
+const path = require('node:path');
 const dns = require('node:dns');
 const { execFileSync } = require('node:child_process');
 const logger = require('../logger');
@@ -34,6 +35,23 @@ const WG_TOOLS_VERSION = (() => {
     return null;
   }
 })();
+
+// ─── Update-state helpers ────────────────────────────────────────────────
+
+const STATE_DIR = process.env.GATEWAY_STATE_DIR || '/state';
+
+function _readLastPull() {
+  try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'last-pull'), 'utf8')); }
+  catch { return null; }
+}
+function _stateDirWritable() {
+  try { fs.accessSync(STATE_DIR, fs.constants.W_OK); return true; }
+  catch { return false; }
+}
+function _pendingUpdate() {
+  try { fs.accessSync(path.join(STATE_DIR, 'pending-update')); return true; }
+  catch { return false; }
+}
 
 // ─── Per-heartbeat computed values ──────────────────────────────────────
 
@@ -87,6 +105,7 @@ function diskUsage() {
 function collectTelemetry() {
   const memTotal = os.totalmem();
   const memFree = os.freemem();
+  const _lp = _readLastPull();
   return {
     // Versions
     gateway_version: GATEWAY_VERSION,
@@ -107,6 +126,14 @@ function collectTelemetry() {
     // LAN context
     dns_resolvers: dns.getServers(),
     default_gateway_ip: defaultGatewayIp(),
+
+    // Update state
+    state_dir_writable: _stateDirWritable(),
+    pending_update: _pendingUpdate(),
+    image_digest: _lp && _lp.image_digest ? _lp.image_digest : null,
+    last_pull_at: _lp && typeof _lp.pulled_at === 'number' ? _lp.pulled_at : null,
+    last_pull_ok: _lp ? (_lp.ok === true) : null,
+    last_pull_request_id: _lp && _lp.request_id ? _lp.request_id : null,
   };
 }
 

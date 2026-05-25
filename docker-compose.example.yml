@@ -39,6 +39,7 @@ services:
       - /etc/wireguard  # wireguard-go writes config here
     volumes:
       - ./config:/config:ro      # Place gateway.env here
+      - ./gateway-state:/state          # rw: self-update flag + last-pull marker (#2b)
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env

@@ -124,4 +124,48 @@ WG_DNS=10.8.0.1`);
     assert.equal(isTunnelIpValid('not-an-ip'), false);
     assert.equal(isTunnelIpValid('10.8.0'), false);
   });
+
+  it('stateDir defaults to /state', () => {
+    const f = writeEnv(`
+GC_SERVER_URL=https://example.com
+GC_API_TOKEN=gc_gw_${'a'.repeat(64)}
+GC_GATEWAY_TOKEN=${'b'.repeat(64)}
+GC_TUNNEL_IP=10.8.0.5
+GC_PROXY_PORT=8080
+GC_API_PORT=9876
+WG_PRIVATE_KEY=xxx
+WG_PUBLIC_KEY=yyy
+WG_ENDPOINT=example.com:51820
+WG_SERVER_PUBLIC_KEY=zzz
+WG_ADDRESS=10.8.0.5/24
+WG_DNS=10.8.0.1
+    `.trim());
+    delete process.env.GATEWAY_STATE_DIR;
+    const cfg = loadConfig(f);
+    assert.equal(cfg.stateDir, '/state');
+  });
+
+  it('stateDir respects GATEWAY_STATE_DIR env var', () => {
+    const f = writeEnv(`
+GC_SERVER_URL=https://example.com
+GC_API_TOKEN=gc_gw_${'a'.repeat(64)}
+GC_GATEWAY_TOKEN=${'b'.repeat(64)}
+GC_TUNNEL_IP=10.8.0.5
+GC_PROXY_PORT=8080
+GC_API_PORT=9876
+WG_PRIVATE_KEY=xxx
+WG_PUBLIC_KEY=yyy
+WG_ENDPOINT=example.com:51820
+WG_SERVER_PUBLIC_KEY=zzz
+WG_ADDRESS=10.8.0.5/24
+WG_DNS=10.8.0.1
+    `.trim());
+    process.env.GATEWAY_STATE_DIR = '/data/state';
+    try {
+      const cfg = loadConfig(f);
+      assert.equal(cfg.stateDir, '/data/state');
+    } finally {
+      delete process.env.GATEWAY_STATE_DIR;
+    }
+  });
 });

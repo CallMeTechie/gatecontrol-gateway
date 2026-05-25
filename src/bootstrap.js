@@ -11,6 +11,7 @@ const { TcpProxyManager } = require('./proxy/tcp');
 const { createApiServer } = require('./api/server');
 const { createConfigChangedRouter } = require('./api/routes/configChanged');
 const { createWolRouter } = require('./api/routes/wol');
+const { createSelfUpdateRouter } = require('./api/routes/selfUpdate');
 const { createStatusRouter } = require('./api/routes/status');
 const { createProbeRouter } = require('./api/routes/probe');
 const { createSelfCheckRunner } = require('./health/selfCheckRunner');
@@ -106,6 +107,7 @@ async function bootstrap() {
             return tcpProbe(host, parseInt(port, 10));
           },
         }));
+        mergeRouter.use(createSelfUpdateRouter({ stateDir: config.stateDir }));
         return mergeRouter;
       },
     },
