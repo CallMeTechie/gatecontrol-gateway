@@ -56,6 +56,7 @@ function loadConfig(path) {
     heartbeatIntervalS: parsed.GC_HEARTBEAT_INTERVAL_S,
     pollIntervalS: parsed.GC_POLL_INTERVAL_S,
     lanProbeTarget: parsed.GC_LAN_PROBE_TARGET || null,
+    stateDir: process.env.GATEWAY_STATE_DIR || '/state',
     wg: {
       privateKey: parsed.WG_PRIVATE_KEY,
       publicKey: parsed.WG_PUBLIC_KEY,
