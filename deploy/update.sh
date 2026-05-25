@@ -20,7 +20,13 @@ OVERRIDE="$COMPOSE_DIR/docker-compose.rollback.yml"
 log() { echo "[$(date -Iseconds)] $*" >>"$LOG"; }
 dc() { docker compose -f "$COMPOSE_DIR/docker-compose.yml" "$@"; }
 running_cid() { dc ps -q "$SERVICE" 2>/dev/null | head -1; }
-repo_digest() { docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$1" 2>/dev/null || true; }
+# Resolve a container's image RepoDigest (repo@sha256:…). RepoDigests lives on the IMAGE,
+# not the container, so resolve the container's image id first, then inspect the image.
+repo_digest() {
+  img=$(docker inspect --format '{{.Image}}' "$1" 2>/dev/null) || return 0
+  [ -n "$img" ] || return 0
+  docker inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "$img" 2>/dev/null || true
+}
 
 [ -f "$COMPOSE_DIR/docker-compose.yml" ] || { echo "no docker-compose.yml in $COMPOSE_DIR" >&2; exit 2; }
 
