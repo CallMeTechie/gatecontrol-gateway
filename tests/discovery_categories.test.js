@@ -24,3 +24,11 @@ test('CATEGORIES carry ports/mdns/ssdp for Phase 2', () => {
   // HTTP-vs-L4 is decided per-port in Phase 2 (spec §9.1) — no per-category routeClass.
   for (const c of CATEGORIES) assert.equal(c.routeClass, undefined);
 });
+
+test('every CATEGORIES entry has array ports/mdns/ssdp (structural completeness)', () => {
+  for (const c of CATEGORIES) {
+    assert.ok(Array.isArray(c.ports), `${c.key}: ports must be an array`);
+    assert.ok(Array.isArray(c.mdns), `${c.key}: mdns must be an array`);
+    assert.ok(Array.isArray(c.ssdp), `${c.key}: ssdp must be an array`);
+  }
+});
