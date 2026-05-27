@@ -11,6 +11,8 @@ const path = require('node:path');
 const dns = require('node:dns');
 const { execFileSync } = require('node:child_process');
 const logger = require('../logger');
+const { lanSubnets } = require('../discovery/lanInterfaces');
+const { catalogue } = require('../discovery/categories');
 
 // ─── Cached-at-load values ──────────────────────────────────────────────
 // Nothing here changes over the container lifetime, so we read once at
@@ -106,6 +108,7 @@ function collectTelemetry() {
   const memTotal = os.totalmem();
   const memFree = os.freemem();
   const _lp = _readLastPull();
+  const _gwIp = defaultGatewayIp();
   return {
     // Versions
     gateway_version: GATEWAY_VERSION,
@@ -125,7 +128,13 @@ function collectTelemetry() {
 
     // LAN context
     dns_resolvers: dns.getServers(),
-    default_gateway_ip: defaultGatewayIp(),
+    default_gateway_ip: _gwIp,
+
+    // LAN discovery — data only (Phase 1). The `lan_discovery` capability flag
+    // is intentionally NOT set here; it is added in Phase 2 once /api/lan-scan
+    // exists, so a Phase-1-only gateway won't surface a dead discovery button.
+    lan_subnets: lanSubnets(_gwIp),
+    lan_discovery_categories: catalogue(),
 
     // Update state
     state_dir_writable: _stateDirWritable(),
