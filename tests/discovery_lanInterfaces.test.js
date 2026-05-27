@@ -69,3 +69,24 @@ test('lanSubnets dedups same subnet and skips /32 host routes', () => {
   const subs = lanSubnets('192.168.1.1', ifaces);
   assert.deepEqual(subs, [{ iface: 'eth0', cidr: '192.168.1.0/24', primary: true }]);
 });
+
+test('lanSubnets skips IPv6 addresses on a physical interface', () => {
+  const ifaces = {
+    eth0: [
+      { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', internal: false },
+      { address: '192.168.1.50', netmask: '255.255.255.0', family: 'IPv4', internal: false },
+    ],
+  };
+  assert.deepEqual(lanSubnets('192.168.1.1', ifaces),
+    [{ iface: 'eth0', cidr: '192.168.1.0/24', primary: true }]);
+});
+
+test('lanSubnets falls back to first when defaultGwIp matches no subnet', () => {
+  const two = {
+    eth0: [{ address: '192.168.1.50', netmask: '255.255.255.0', family: 'IPv4', internal: false }],
+    eth1: [{ address: '10.0.0.5',     netmask: '255.255.255.0', family: 'IPv4', internal: false }],
+  };
+  const subs = lanSubnets('8.8.8.8', two); // gw matches no subnet
+  assert.equal(subs.filter(s => s.primary).length, 1);
+  assert.equal(subs[0].primary, true);
+});

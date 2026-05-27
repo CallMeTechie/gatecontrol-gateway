@@ -4,9 +4,10 @@ const os = require('node:os');
 
 const WG_INTERFACE = 'gatecontrol0';
 
-// Canonical physical-LAN interface filter — the ONE copy (wol.js imports this).
-// Excludes loopback, WireGuard (the GateControl tunnel `gatecontrol0` AND any
-// generic `wg*`), Docker/bridge, and other VPN overlays.
+// Canonical physical-LAN interface filter — the single source of truth for what
+// counts as a scannable LAN interface. Excludes loopback, WireGuard (the
+// GateControl tunnel `gatecontrol0` AND any generic `wg*`), Docker/bridge, and
+// other VPN overlays.
 function isPhysicalLan(name) {
   if (name === 'lo' || name.startsWith('wg') || name.startsWith(WG_INTERFACE)) return false;
   if (name.startsWith('docker') || name.startsWith('br-')) return false;
@@ -17,7 +18,7 @@ function isPhysicalLan(name) {
 
 function netmaskToPrefix(netmask) {
   return netmask.split('.').map(Number).reduce(
-    (bits, o) => bits + (((o >>> 0).toString(2).match(/1/g) || []).length), 0);
+    (bits, o) => bits + ((o.toString(2).match(/1/g) || []).length), 0);
 }
 
 function _ipToInt(ip) {
