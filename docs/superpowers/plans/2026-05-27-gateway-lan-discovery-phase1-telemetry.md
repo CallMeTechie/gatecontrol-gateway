@@ -4,19 +4,20 @@
 
 **Goal:** Make the gateway companion report its physical-LAN subnets and the discovery service-category catalogue in its heartbeat telemetry — **data only**, so the server can later render subnet/category checkboxes. This phase does **not** expose the `lan_discovery` capability flag (that comes in Phase 2), so a Phase-1-only gateway will not yet offer discovery.
 
-**Architecture:** Two small, dependency-free helper modules under `src/discovery/` (a static category catalogue and a LAN-interface enumerator that reuses the existing `wol.js` interface filter), wired into the existing `collectTelemetry()` in `src/health/telemetry.js`. No new npm dependencies, no network calls, no new endpoints. Harmless to ship on its own.
+**Architecture:** A small category-catalogue module and a LAN-interface enumerator under `src/discovery/`, wired into the existing `collectTelemetry()` in `src/health/telemetry.js`. The physical-LAN interface filter becomes a single shared function (`isPhysicalLan`) reused by both the new enumerator and the existing `wol.js` (removing a copy-paste filter that would otherwise drift). No new npm dependencies, no network calls, no new endpoints.
 
 **Tech Stack:** Node ≥ 20, `node:os`, built-in `node --test` runner, pino logging. Repo: `gatecontrol-gateway`.
 
-**Spec:** `gatecontrol/docs/superpowers/specs/2026-05-27-gateway-lan-discovery-design.md` (§4.4 categories, §6.2 telemetry, §11 Phase 1).
+**Spec:** `gatecontrol/docs/superpowers/specs/2026-05-27-gateway-lan-discovery-design.md` (§4.4 categories, §6.2 telemetry, §9.1 per-port classification, §11 Phase 1).
 
 ---
 
 ## File Structure
 
-- **Create** `src/discovery/categories.js` — the static service-category catalogue (keys, labels, ports, mDNS types, SSDP patterns, route class). Phase 1 uses only `catalogue()` (keys+labels) for telemetry; Phase 2 reuses `CATEGORIES` for the scan engine. Single responsibility: the catalogue is the one source of truth shared by gateway scan + server UI.
-- **Create** `src/discovery/lanInterfaces.js` — enumerate physical-LAN IPv4 subnets as `{ iface, cidr, primary }`, excluding loopback/WireGuard/Docker/VPN interfaces (same filter as `wol.js`). Pure functions, `ifaces` injectable for tests. Phase 2 reuses `ipInCidr` / `lanSubnets` for the scan interface-guard.
-- **Modify** `src/health/telemetry.js` — add `lan_subnets` + `lan_discovery_categories` to the object returned by `collectTelemetry()`; compute the default-gateway IP once and pass it in for primary-subnet detection.
+- **Create** `src/discovery/categories.js` — the static service-category catalogue (keys, labels, ports, mDNS types, SSDP patterns). Phase 1 uses only `catalogue()` (keys+labels) for telemetry; Phase 2 reuses `CATEGORIES`. HTTP-vs-L4 is decided **per port** in Phase 2 (spec §9.1), so no per-category route class is stored. Single source of truth shared by gateway scan + server UI.
+- **Create** `src/discovery/lanInterfaces.js` — enumerate physical-LAN IPv4 subnets as `{ iface, cidr, primary }`, excluding loopback / WireGuard (`gatecontrol0` **and** generic `wg*`) / Docker / VPN interfaces; skip `/32` host-routes. Owns the canonical `isPhysicalLan(name)` filter and the IPv4 helpers (`ipInCidr` etc.) that Phase 2's interface-guard will reuse. Pure functions, `ifaces` injectable for tests.
+- **Modify** `src/wol.js` — replace its inline interface-exclusion filter (lines 40-43) with the shared `isPhysicalLan`, and drop the now-unused local `WG_INTERFACE` const. Removes the duplicate filter so WoL and discovery can't drift.
+- **Modify** `src/health/telemetry.js` — add `lan_subnets` + `lan_discovery_categories` to `collectTelemetry()`; compute the default-gateway IP once and pass it in for primary-subnet detection.
 - **Create** `tests/discovery_categories.test.js`, `tests/discovery_lanInterfaces.test.js`, `tests/telemetry_lan_discovery.test.js`.
 
 ---
@@ -47,14 +48,14 @@ test('catalogue() returns key+label only for every category', () => {
     ['web', 'media', 'remote_access', 'file_sharing', 'printers', 'databases', 'iot']);
 });
 
-test('CATEGORIES carry ports/mdns/ssdp/routeClass for Phase 2', () => {
+test('CATEGORIES carry ports/mdns/ssdp for Phase 2', () => {
   const web = CATEGORIES.find(c => c.key === 'web');
   assert.ok(web.ports.includes(443) && web.ports.includes(80));
-  assert.equal(web.routeClass, 'http');
   assert.ok(web.mdns.includes('_http._tcp'));
   const iot = CATEGORIES.find(c => c.key === 'iot');
-  assert.equal(iot.routeClass, 'l4');
   assert.ok(iot.ports.includes(1883));
+  // HTTP-vs-L4 is decided per-port in Phase 2 (spec §9.1) — no per-category routeClass.
+  for (const c of CATEGORIES) assert.equal(c.routeClass, undefined);
 });
 ```
 
@@ -71,15 +72,17 @@ Expected: FAIL with `Cannot find module '../src/discovery/categories'`.
 // Service-category catalogue for LAN discovery — the single source of truth
 // shared by the gateway scan engine (Phase 2: ports/mdns/ssdp) and the server
 // UI (keys+labels via telemetry). Each category bundles the signals across all
-// three discovery sources; `routeClass` is the suggested route type.
+// three discovery sources. HTTP-vs-L4 is decided PER PORT in Phase 2 (spec §9.1),
+// not per category — e.g. a printer's 631/IPP is HTTP while 9100/515 are L4 — so
+// no per-category route class is stored here.
 const CATEGORIES = [
-  { key: 'web',           label: 'Web',              routeClass: 'http', ports: [80, 443, 8080, 8443, 8000, 8081, 3000, 5000], mdns: ['_http._tcp', '_https._tcp'], ssdp: [] },
-  { key: 'media',         label: 'Media',            routeClass: 'http', ports: [32400, 8096, 8200], mdns: ['_googlecast._tcp', '_airplay._tcp'], ssdp: ['MediaServer', 'MediaRenderer'] },
-  { key: 'remote_access', label: 'Remote access',    routeClass: 'l4',   ports: [22, 3389, 5900], mdns: ['_ssh._tcp', '_rfb._tcp'], ssdp: [] },
-  { key: 'file_sharing',  label: 'File sharing',     routeClass: 'l4',   ports: [445, 139, 548, 2049, 21], mdns: ['_smb._tcp', '_afpovertcp._tcp'], ssdp: [] },
-  { key: 'printers',      label: 'Printers',         routeClass: 'http', ports: [9100, 631, 515], mdns: ['_ipp._tcp', '_pdl-datastream._tcp'], ssdp: ['Printer'] },
-  { key: 'databases',     label: 'Databases',        routeClass: 'l4',   ports: [5432, 3306, 6379, 27017], mdns: [], ssdp: [] },
-  { key: 'iot',           label: 'IoT / Smart home', routeClass: 'l4',   ports: [1883, 5683, 8123], mdns: ['_hap._tcp', '_matter._tcp', '_hue._tcp'], ssdp: ['Belkin', 'WeMo'] },
+  { key: 'web',           label: 'Web',              ports: [80, 443, 8080, 8443, 8000, 8081, 3000, 5000], mdns: ['_http._tcp', '_https._tcp'], ssdp: [] },
+  { key: 'media',         label: 'Media',            ports: [32400, 8096, 8200], mdns: ['_googlecast._tcp', '_airplay._tcp'], ssdp: ['MediaServer', 'MediaRenderer'] },
+  { key: 'remote_access', label: 'Remote access',    ports: [22, 3389, 5900], mdns: ['_ssh._tcp', '_rfb._tcp'], ssdp: [] },
+  { key: 'file_sharing',  label: 'File sharing',     ports: [445, 139, 548, 2049, 21], mdns: ['_smb._tcp', '_afpovertcp._tcp'], ssdp: [] },
+  { key: 'printers',      label: 'Printers',         ports: [9100, 631, 515], mdns: ['_ipp._tcp', '_pdl-datastream._tcp'], ssdp: ['Printer'] },
+  { key: 'databases',     label: 'Databases',        ports: [5432, 3306, 6379, 27017], mdns: [], ssdp: [] },
+  { key: 'iot',           label: 'IoT / Smart home', ports: [1883, 5683, 8123], mdns: ['_hap._tcp', '_matter._tcp', '_hue._tcp'], ssdp: ['Belkin', 'WeMo'] },
 ];
 
 // Keys + labels only — what the server UI needs to render checkboxes, without
@@ -124,21 +127,26 @@ const FAKE = {
   lo:           [{ address: '127.0.0.1',   netmask: '255.0.0.0',     family: 'IPv4', internal: true }],
   eth0:         [{ address: '192.168.1.50', netmask: '255.255.255.0', family: 'IPv4', internal: false }],
   gatecontrol0: [{ address: '10.8.0.79',    netmask: '255.255.255.0', family: 'IPv4', internal: false }],
+  wg0:          [{ address: '10.9.0.2',     netmask: '255.255.255.0', family: 'IPv4', internal: false }],
   docker0:      [{ address: '172.17.0.1',   netmask: '255.255.0.0',   family: 'IPv4', internal: false }],
 };
 
 test('helpers compute prefix / network / membership', () => {
   assert.equal(netmaskToPrefix('255.255.255.0'), 24);
   assert.equal(netmaskToPrefix('255.255.0.0'), 16);
+  assert.equal(netmaskToPrefix('255.255.255.128'), 25);
   assert.equal(networkAddress('192.168.1.50', '255.255.255.0'), '192.168.1.0');
   assert.equal(ipInCidr('192.168.1.1', '192.168.1.0', 24), true);
   assert.equal(ipInCidr('192.168.2.1', '192.168.1.0', 24), false);
+  assert.equal(ipInCidr('10.0.0.255', '10.0.0.0', 24), true);
 });
 
-test('isPhysicalLan excludes loopback / WG / docker / VPN', () => {
+test('isPhysicalLan excludes loopback / WG (gatecontrol0 + wg*) / docker / VPN', () => {
   assert.equal(isPhysicalLan('eth0'), true);
+  assert.equal(isPhysicalLan('ens18'), true);
   assert.equal(isPhysicalLan('lo'), false);
   assert.equal(isPhysicalLan('gatecontrol0'), false);
+  assert.equal(isPhysicalLan('wg0'), false);      // generic WireGuard
   assert.equal(isPhysicalLan('docker0'), false);
   assert.equal(isPhysicalLan('tailscale0'), false);
 });
@@ -148,7 +156,18 @@ test('lanSubnets returns only physical LAN subnets, marks default-route subnet p
   assert.deepEqual(subs, [{ iface: 'eth0', cidr: '192.168.1.0/24', primary: true }]);
 });
 
-test('lanSubnets marks exactly one primary; deterministic fallback when no gw match', () => {
+test('lanSubnets marks the subnet containing the default gw as primary (non-first)', () => {
+  const two = {
+    eth0: [{ address: '192.168.1.50', netmask: '255.255.255.0', family: 'IPv4', internal: false }],
+    eth1: [{ address: '10.0.0.5',     netmask: '255.255.255.0', family: 'IPv4', internal: false }],
+  };
+  const subs = lanSubnets('10.0.0.1', two); // gw lives in eth1's subnet
+  assert.equal(subs.filter(s => s.primary).length, 1);
+  assert.equal(subs.find(s => s.cidr === '10.0.0.0/24').primary, true);
+  assert.equal(subs.find(s => s.cidr === '192.168.1.0/24').primary, false);
+});
+
+test('lanSubnets: deterministic fallback to first when no gw match, exactly one primary', () => {
   const two = {
     eth0: [{ address: '192.168.1.50', netmask: '255.255.255.0', family: 'IPv4', internal: false }],
     eth1: [{ address: '10.0.0.5',     netmask: '255.255.255.0', family: 'IPv4', internal: false }],
@@ -156,6 +175,18 @@ test('lanSubnets marks exactly one primary; deterministic fallback when no gw ma
   const subs = lanSubnets(null, two); // no default gw → fall back to first
   assert.equal(subs.filter(s => s.primary).length, 1);
   assert.equal(subs[0].primary, true);
+});
+
+test('lanSubnets dedups same subnet and skips /32 host routes', () => {
+  const ifaces = {
+    eth0: [
+      { address: '192.168.1.50', netmask: '255.255.255.0', family: 'IPv4', internal: false },
+      { address: '192.168.1.51', netmask: '255.255.255.0', family: 'IPv4', internal: false }, // same /24 → dedup
+    ],
+    ens18: [{ address: '54.36.233.20', netmask: '255.255.255.255', family: 'IPv4', internal: false }], // /32 → skipped
+  };
+  const subs = lanSubnets('192.168.1.1', ifaces);
+  assert.deepEqual(subs, [{ iface: 'eth0', cidr: '192.168.1.0/24', primary: true }]);
 });
 ```
 
@@ -173,9 +204,11 @@ const os = require('node:os');
 
 const WG_INTERFACE = 'gatecontrol0';
 
-// Same exclusion set as wol.js sendMagicPacket — physical LAN only.
+// Canonical physical-LAN interface filter — the ONE copy (wol.js imports this).
+// Excludes loopback, WireGuard (the GateControl tunnel `gatecontrol0` AND any
+// generic `wg*`), Docker/bridge, and other VPN overlays.
 function isPhysicalLan(name) {
-  if (name === 'lo' || name.startsWith(WG_INTERFACE)) return false;
+  if (name === 'lo' || name.startsWith('wg') || name.startsWith(WG_INTERFACE)) return false;
   if (name.startsWith('docker') || name.startsWith('br-')) return false;
   if (name.startsWith('veth') || name.startsWith('tailscale')) return false;
   if (name.startsWith('zt') || name.startsWith('nebula')) return false; // ZeroTier, Nebula
@@ -208,7 +241,9 @@ function ipInCidr(ip, network, prefix) {
  * `defaultGwIp` (from telemetry.defaultGatewayIp) selects the primary subnet —
  * the one whose network contains the host default route. Exactly one entry is
  * flagged primary when at least one subnet exists (deterministic fallback: the
- * first). `ifaces` is injectable for tests.
+ * first). `/32` host-routes and `/0` are skipped (not scannable LANs), so a
+ * VPS-style host with only a public `/32` yields an empty list. `ifaces` is
+ * injectable for tests.
  */
 function lanSubnets(defaultGwIp, ifaces = os.networkInterfaces()) {
   const entries = [];
@@ -217,7 +252,9 @@ function lanSubnets(defaultGwIp, ifaces = os.networkInterfaces()) {
     if (!isPhysicalLan(name)) continue;
     for (const addr of (addrs || [])) {
       if (addr.family !== 'IPv4' || addr.internal) continue;
+      if (!addr.netmask || !addr.address) continue;          // defensive: malformed entry
       const prefix = netmaskToPrefix(addr.netmask);
+      if (prefix <= 0 || prefix >= 32) continue;             // /0 and /32 aren't scannable LAN subnets
       const network = networkAddress(addr.address, addr.netmask);
       const cidr = `${network}/${prefix}`;
       if (seen.has(cidr)) continue;
@@ -239,7 +276,7 @@ module.exports = { lanSubnets, isPhysicalLan, netmaskToPrefix, networkAddress, i
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `node --test --test-force-exit tests/discovery_lanInterfaces.test.js`
-Expected: PASS (4 tests).
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -250,10 +287,72 @@ git commit -m "feat(discovery): enumerate physical-LAN subnets with primary dete
 
 ---
 
-## Task 3: Wire LAN data into telemetry
+## Task 3: Share the physical-LAN filter with `wol.js` (de-duplicate)
+
+`wol.js` currently has its own copy of the interface-exclusion filter (lines 40-43) that misses generic `wg*` interfaces. Point it at the canonical `isPhysicalLan` so WoL and discovery agree and the `wg*` fix applies to both. (WoL magic packets are L2 broadcasts that can't traverse a WireGuard tunnel anyway, so excluding `wg*` from WoL is correct.)
 
 **Files:**
-- Modify: `src/health/telemetry.js` (imports near top; `collectTelemetry()` body, lines ~105-138)
+- Modify: `src/wol.js` (import near line 6; remove `WG_INTERFACE` const at line 8; replace filter at lines 40-43)
+- Test: existing `tests/wol.test.js` (regression) — no new test file; `isPhysicalLan('wg0')` is already asserted in Task 2.
+
+- [ ] **Step 1: Establish the baseline (existing wol tests green)**
+
+Run: `node --test --test-force-exit tests/wol.test.js`
+Expected: PASS (baseline before refactor).
+
+- [ ] **Step 2: Add the import**
+
+In `src/wol.js`, after `const logger = require('./logger');` (line 6), add:
+
+```js
+const { isPhysicalLan } = require('./discovery/lanInterfaces');
+```
+
+- [ ] **Step 3: Remove the now-unused local const**
+
+Delete this line (line 8) — `isPhysicalLan` now owns the WG name knowledge, and leaving an unused const fails lint:
+
+```js
+const WG_INTERFACE = 'gatecontrol0';
+```
+
+- [ ] **Step 4: Replace the inline filter with the shared function**
+
+In `sendMagicPacket`, replace these four lines:
+
+```js
+    if (name === 'lo' || name.startsWith(WG_INTERFACE)) continue;
+    if (name.startsWith('docker') || name.startsWith('br-')) continue;
+    if (name.startsWith('veth') || name.startsWith('tailscale')) continue;
+    if (name.startsWith('zt') || name.startsWith('nebula')) continue; // ZeroTier, Nebula
+```
+
+with:
+
+```js
+    if (!isPhysicalLan(name)) continue;
+```
+
+- [ ] **Step 5: Run wol tests + lint to verify no regression**
+
+Run: `node --test --test-force-exit tests/wol.test.js`
+Expected: PASS (unchanged).
+Run: `npx eslint src/wol.js`
+Expected: 0 errors (no unused-var for the removed const).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/wol.js
+git commit -m "refactor(wol): use shared isPhysicalLan filter (also excludes wg*)"
+```
+
+---
+
+## Task 4: Wire LAN data into telemetry
+
+**Files:**
+- Modify: `src/health/telemetry.js` (imports after line 13; `collectTelemetry()` body, lines ~105-138)
 - Test: `tests/telemetry_lan_discovery.test.js`
 
 - [ ] **Step 1: Write the failing test**
@@ -274,7 +373,7 @@ test('collectTelemetry exposes lan_subnets + category catalogue (data only)', ()
     assert.deepEqual(Object.keys(s).sort(), ['cidr', 'iface', 'primary']);
     assert.match(s.cidr, /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/);
   }
-  // at most one primary
+  // at most one primary (could be 0 on a host with no scannable LAN subnet)
   assert.ok(t.lan_subnets.filter(s => s.primary).length <= 1);
 
   // category catalogue: keys+labels
@@ -354,19 +453,21 @@ git commit -m "feat(telemetry): report lan_subnets + discovery category catalogu
 
 ---
 
-## Task 4: Full verification
+## Task 5: Full verification
 
 **Files:** none (verification only)
 
 - [ ] **Step 1: Run the full test suite**
 
 Run: `npm test`
-Expected: all suites PASS (including the 3 new files; pre-existing tests unchanged).
+Expected: all suites PASS (the 3 new files + the unchanged `wol.test.js` regression; pre-existing tests intact).
 
 - [ ] **Step 2: Lint**
 
 Run: `npm run lint`
-Expected: 0 errors.
+Expected: 0 errors. (A `security/detect-object-injection` *warning* in `lanInterfaces.js` — array-index access in `netmaskToPrefix`/`networkAddress`, the same warning class already emitted by `wol.js` today — does not fail the lint. Do not "fix" it.)
+
+> **Environment caveat for the executor:** this sandbox may have eslint 9 globally installed, which cannot read `.eslintrc.json` and makes a bare `eslint` error locally. The repo pins eslint **8.57.1** in `package-lock.json` and CI runs `npm ci` first. Run lint via `npm run lint` (which resolves the pinned local eslint), **not** a global `eslint`. Do not change the plan based on a local eslint-9 failure.
 
 - [ ] **Step 3: Confirm telemetry shape end-to-end**
 
@@ -375,11 +476,15 @@ Expected: a JSON array of `{key,label}` objects starting with `{"key":"web","lab
 
 - [ ] **Step 4: Push (releases Phase 1 via CI)**
 
-> Per project convention CI auto-bumps the version on push (`feat:` → minor) and publishes to GHCR — **no manual version bump**. Pushing here ships Phase 1. It is data-only and safe to deploy ahead of Phase 2/3.
+> Per project convention CI auto-bumps the version on push (`feat:` → minor) and publishes to GHCR — **no manual version bump**. CI also enforces a coverage gate (≥70%) and runs a mutation-test job; the three new test files cover the new modules, so the gate should hold. Pushing here ships Phase 1. It is data-only (no capability flag → the server won't offer discovery), so it is safe to deploy ahead of Phase 2/3.
 
 ```bash
 git push
 ```
+
+- [ ] **Step 5: Deploy intent**
+
+> Per project convention (`feedback_cicd_deploy_flow`: pull image after build → deploy promptly). Phase 1 is data-only and harmless, so deploying the new gateway image promptly is fine — but **not required** until Phase 2 lands. Operator's call: deploy now to verify telemetry on the real fleet, or hold the deploy until Phase 2 to ship the discovery capability in one go. State the choice when executing.
 
 ---
 
@@ -387,5 +492,6 @@ git push
 
 - **No new dependencies** — everything uses `node:os` / built-ins. Do not add `multicast-dns`/SSDP libs here; those belong to Phase 2.
 - **No manual version bump**, **no `Co-Authored-By` trailer** in commits (project conventions).
-- `lan_subnets` contents are host-dependent; tests assert **shape**, not exact values, so they pass in CI containers.
-- Phase 2 will `require('./categories').CATEGORIES` and `require('./lanInterfaces').{lanSubnets,ipInCidr}` — keep these exports stable.
+- `lan_subnets` contents are host-dependent (and may legitimately be **empty** on a VPS-style host with only a `/32` and a `wg*` tunnel — both are excluded by design); tests assert **shape**, not exact values, so they pass in CI containers.
+- Phase 2 will `require('./categories').CATEGORIES` and `require('./lanInterfaces').{ lanSubnets, ipInCidr, isPhysicalLan }` — keep these exports stable. The Phase-2 interface-guard must reuse `isPhysicalLan`/`ipInCidr` (do not re-implement).
+- HTTP-vs-L4 route classification is **per-port** in Phase 2 (spec §9.1), not per-category — `printers` is the mixed case (631/IPP → HTTP, 9100/515 → L4).
