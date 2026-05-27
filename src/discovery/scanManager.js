@@ -38,8 +38,15 @@ class ScanManager {
 
   async start({ requestId, subnets, activeScan, categoryMode, categories }) {
     if (this.active) throw new Error('scan_in_progress');
-    this.active = { requestId, startedAt: Date.now() };
-    const send = (devices, done) => this.client.sendBatch({ requestId, devices, done });
+    const myScan = { requestId, startedAt: Date.now() };
+    this.active = myScan;
+    // Per-scan guard: once this scan is no longer the active one (e.g. it timed
+    // out and was reset, possibly with a newer scan now running), ignore any late
+    // batches an orphaned runScan emits — never send a duplicate/stale terminal done.
+    const send = (devices, done) => {
+      if (this.active !== myScan) return Promise.resolve();
+      return this.client.sendBatch({ requestId, devices, done });
+    };
     let timer = null;
     try {
       await Promise.race([
