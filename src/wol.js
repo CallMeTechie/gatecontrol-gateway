@@ -4,8 +4,7 @@ const dgram = require('node:dgram');
 const os = require('node:os');
 const net = require('node:net');
 const logger = require('./logger');
-
-const WG_INTERFACE = 'gatecontrol0';
+const { isPhysicalLan } = require('./discovery/lanInterfaces');
 
 function validateMac(mac) {
   return /^([0-9a-fA-F]{2}[:-]?){5}[0-9a-fA-F]{2}$/.test(mac);
@@ -37,10 +36,7 @@ async function sendMagicPacket(mac) {
   const results = [];
 
   for (const [name, addrs] of Object.entries(ifaces)) {
-    if (name === 'lo' || name.startsWith(WG_INTERFACE)) continue;
-    if (name.startsWith('docker') || name.startsWith('br-')) continue;
-    if (name.startsWith('veth') || name.startsWith('tailscale')) continue;
-    if (name.startsWith('zt') || name.startsWith('nebula')) continue; // ZeroTier, Nebula
+    if (!isPhysicalLan(name)) continue;
     for (const addr of addrs) {
       if (addr.family !== 'IPv4' || addr.internal) continue;
       const broadcast = _computeBroadcast(addr.address, addr.netmask);

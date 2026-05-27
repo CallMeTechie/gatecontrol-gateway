@@ -9,3 +9,6 @@ config/wg0.conf
 .env
 *.env
 !.env.example
+
+# Local-only: brainstorm specs & implementation plans (never pushed)
+docs/superpowers/
