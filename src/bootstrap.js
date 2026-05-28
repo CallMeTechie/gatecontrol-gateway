@@ -14,9 +14,16 @@ const { createWolRouter } = require('./api/routes/wol');
 const { createSelfUpdateRouter } = require('./api/routes/selfUpdate');
 const { createStatusRouter } = require('./api/routes/status');
 const { createProbeRouter } = require('./api/routes/probe');
+const { makeDiscoveryClient } = require('./discovery/discoveryClient');
+const { discoverMdns } = require('./discovery/mdns');
+const { discoverSsdp } = require('./discovery/ssdp');
+const { sweep } = require('./discovery/tcpSweep');
+const { runScan } = require('./discovery/scanEngine');
+const { ScanManager } = require('./discovery/scanManager');
+const { createLanScanRouter } = require('./api/routes/lanScan');
 const { createSelfCheckRunner } = require('./health/selfCheckRunner');
 const { tcpProbe } = require('./health/selfCheck');
-const { collectTelemetry } = require('./health/telemetry');
+const { collectTelemetry, defaultGatewayIp } = require('./health/telemetry');
 const { sendMagicPacket, waitForReachable } = require('./wol');
 const { startHeartbeatTicker } = require('./heartbeat');
 const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol-config-hash');
@@ -36,6 +43,12 @@ async function bootstrap() {
   const store = new ConfigStore();
   const router = new Router();
   const tcpMgr = new TcpProxyManager({ bindIp: config.tunnelIp });
+
+  const discoveryClient = makeDiscoveryClient({ serverUrl: config.serverUrl, apiToken: config.apiToken });
+  const scanMgr = new ScanManager({
+    config, discoveryClient, runScan,
+    sources: { discoverMdns, discoverSsdp, sweep },
+  });
 
   // 3. On config change → apply
   store.on('change', async ({ cfg, hash }) => {
@@ -108,6 +121,7 @@ async function bootstrap() {
           },
         }));
         mergeRouter.use(createSelfUpdateRouter({ stateDir: config.stateDir }));
+        mergeRouter.use(createLanScanRouter({ scanMgr, defaultGatewayIp }));
         return mergeRouter;
       },
     },

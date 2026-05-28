@@ -21,6 +21,6 @@ test('collectTelemetry exposes lan_subnets + category catalogue (data only)', ()
   assert.deepEqual(t.lan_discovery_categories.map(c => c.key),
     ['web', 'media', 'remote_access', 'file_sharing', 'printers', 'databases', 'iot']);
 
-  // Phase 1 must NOT advertise the capability flag (that is Phase 2)
-  assert.equal(t.lan_discovery, undefined);
+  // Phase 2: the capability flag is now set (the /api/lan-scan endpoint exists).
+  assert.equal(t.lan_discovery, true);
 });

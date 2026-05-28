@@ -130,9 +130,8 @@ function collectTelemetry() {
     dns_resolvers: dns.getServers(),
     default_gateway_ip: _gwIp,
 
-    // LAN discovery — data only (Phase 1). The `lan_discovery` capability flag
-    // is intentionally NOT set here; it is added in Phase 2 once /api/lan-scan
-    // exists, so a Phase-1-only gateway won't surface a dead discovery button.
+    // LAN discovery (Phase 2: capability flag now set — /api/lan-scan exists).
+    lan_discovery: true,
     lan_subnets: lanSubnets(_gwIp),
     lan_discovery_categories: catalogue(),
 
@@ -146,4 +145,4 @@ function collectTelemetry() {
   };
 }
 
-module.exports = { collectTelemetry };
+module.exports = { collectTelemetry, defaultGatewayIp };

@@ -13,6 +13,9 @@ const ConfigSchema = z.object({
   GC_HEARTBEAT_INTERVAL_S: z.coerce.number().int().min(5).max(600).default(30),
   GC_POLL_INTERVAL_S: z.coerce.number().int().min(30).max(3600).default(300),
   GC_LAN_PROBE_TARGET: z.string().optional(),
+  GC_DISCOVERY_MAX_PREFIX: z.coerce.number().int().min(8).max(32).default(22),
+  GC_DISCOVERY_TIMEOUT_MS: z.coerce.number().int().min(5000).max(300000).default(45000),
+  GC_DISCOVERY_CONCURRENCY: z.coerce.number().int().min(1).max(1024).default(128),
   WG_PRIVATE_KEY: z.string().min(1),
   WG_PUBLIC_KEY: z.string().min(1),
   WG_PRESHARED_KEY: z.string().optional(),  // Optional — server may or may not use PSK
@@ -56,6 +59,9 @@ function loadConfig(path) {
     heartbeatIntervalS: parsed.GC_HEARTBEAT_INTERVAL_S,
     pollIntervalS: parsed.GC_POLL_INTERVAL_S,
     lanProbeTarget: parsed.GC_LAN_PROBE_TARGET || null,
+    discoveryMaxPrefix: parsed.GC_DISCOVERY_MAX_PREFIX,
+    discoveryTimeoutMs: parsed.GC_DISCOVERY_TIMEOUT_MS,
+    discoveryConcurrency: parsed.GC_DISCOVERY_CONCURRENCY,
     stateDir: process.env.GATEWAY_STATE_DIR || '/state',
     wg: {
       privateKey: parsed.WG_PRIVATE_KEY,
