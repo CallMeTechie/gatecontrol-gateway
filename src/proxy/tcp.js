@@ -20,20 +20,36 @@ class TcpProxyManager {
     // Remove listeners no longer in config
     for (const [id, l] of this._listeners) {
       if (!newIds.has(id)) {
-        await this._stopListener(id, l);
+        try {
+          await this._stopListener(id, l);
+        } catch (err) {
+          logger.warn({ routeId: id, err: err.message }, 'Failed to stop TCP listener — continuing');
+        }
       }
     }
-    // Add or update
+    // Add or update. Each route is isolated: a failure to bind one listener
+    // (e.g. EADDRINUSE — a host process owns the port under network_mode:host,
+    // or two routes share a listen_port) must NOT abort the others, and must
+    // NOT reject this method. setRoutes runs inside an async EventEmitter
+    // 'change' listener (bootstrap.js), where a rejection is unhandled and —
+    // on Node's default mode — would crash-loop the gateway. Skip + log instead.
     for (const route of l4Routes) {
-      const existing = this._listeners.get(route.id);
-      if (!existing) {
-        await this._startListener(route);
-      } else if (existing.target.port !== route.target_lan_port
-              || existing.target.host !== route.target_lan_host
-              || existing.listenPortRequested !== route.listen_port
-              || route._forcePortChange) {
-        // Port- or target-change → dual-bind overlap
-        await this._transitionListener(route, existing);
+      try {
+        const existing = this._listeners.get(route.id);
+        if (!existing) {
+          await this._startListener(route);
+        } else if (existing.target.port !== route.target_lan_port
+                || existing.target.host !== route.target_lan_host
+                || existing.listenPortRequested !== route.listen_port
+                || route._forcePortChange) {
+          // Port- or target-change → dual-bind overlap
+          await this._transitionListener(route, existing);
+        }
+      } catch (err) {
+        logger.error(
+          { routeId: route.id, listenPort: route.listen_port, err: err.code || err.message },
+          'Failed to apply TCP route — skipping it; other routes unaffected',
+        );
       }
     }
   }

@@ -59,4 +59,28 @@ describe('TcpProxyManager', () => {
     assert.ok(newPort, 'new port should exist');
     await mgr.stopAll();
   });
+
+  it('isolates a failed listener (EADDRINUSE): siblings still bind and setRoutes does not reject', async () => {
+    // Occupy a fixed port so the middle route hits EADDRINUSE on bind.
+    const blocker = net.createServer();
+    const blockedPort = await new Promise(r =>
+      blocker.listen(0, '127.0.0.1', () => r(blocker.address().port)));
+
+    const mgr = new TcpProxyManager({ bindIp: '127.0.0.1' });
+    // Conflict route sits BETWEEN two good ones — proves the loop is not aborted.
+    // Must resolve (not reject): a reject here is unhandled in the bootstrap
+    // 'change' listener and would crash-loop the gateway.
+    await mgr.setRoutes([
+      { id: 1, listen_port: 0, target_lan_host: '127.0.0.1', target_lan_port: upstreamPort },
+      { id: 2, listen_port: blockedPort, target_lan_host: '127.0.0.1', target_lan_port: upstreamPort },
+      { id: 3, listen_port: 0, target_lan_host: '127.0.0.1', target_lan_port: upstreamPort },
+    ]);
+
+    const ports = mgr.listListenerPorts();
+    assert.equal(ports.length, 2, 'both good routes bound; conflicting one skipped');
+    assert.ok(!ports.includes(blockedPort), 'conflicting route did not bind');
+
+    await mgr.stopAll();
+    blocker.close();
+  });
 });
