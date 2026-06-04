@@ -1,6 +1,6 @@
 {
   "name": "gatecontrol-gateway",
-  "version": "1.12.1",
+  "version": "1.13.0",
   "description": "Home Gateway companion for GateControl — HTTP/TCP proxy + WoL",
   "license": "UNLICENSED",
   "private": true,
