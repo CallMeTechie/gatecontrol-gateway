@@ -11,7 +11,7 @@ const path = require('node:path');
 const dns = require('node:dns');
 const { execFileSync } = require('node:child_process');
 const logger = require('../logger');
-const { lanSubnets } = require('../discovery/lanInterfaces');
+const { lanSubnets, primaryLanIp } = require('../discovery/lanInterfaces');
 const { catalogue } = require('../discovery/categories');
 
 // ─── Cached-at-load values ──────────────────────────────────────────────
@@ -129,6 +129,12 @@ function collectTelemetry() {
     // LAN context
     dns_resolvers: dns.getServers(),
     default_gateway_ip: _gwIp,
+    // Own primary LAN IPv4 — lets the server rewrite a co-located service's
+    // loopback target (127.0.0.1) to this host's real LAN address when its
+    // route has failed over to a sibling gateway. NULL on a host with no
+    // private LAN address; the server then keeps lan_ip NULL and degrades
+    // safely (HTTP 502 / no L4 listener instead of mis-forwarding).
+    lan_ip: primaryLanIp(_gwIp),
 
     // LAN discovery (Phase 2: capability flag now set — /api/lan-scan exists).
     lan_discovery: true,

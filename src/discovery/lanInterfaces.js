@@ -71,4 +71,49 @@ function lanSubnets(defaultGwIp, ifaces = os.networkInterfaces()) {
   return entries.map((e, i) => ({ iface: e.iface, cidr: e.cidr, primary: i === primaryIdx }));
 }
 
-module.exports = { lanSubnets, isPhysicalLan, netmaskToPrefix, networkAddress, ipInCidr };
+// RFC1918 private IPv4 only (10/8, 172.16–31/12, 192.168/16). Mirrors the
+// server's isPrivateIpv4 (src/utils/validate.js) — the server rejects anything
+// else from a heartbeat, so emitting only private addresses avoids leaking a
+// public IP and keeps both sides in agreement.
+function _isPrivateIpv4(ip) {
+  const p = ip.split('.').map(Number);
+  if (p.length !== 4 || p.some(o => !Number.isInteger(o) || o < 0 || o > 255)) return false;
+  const [a, b] = p;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+/**
+ * The host's own primary LAN IPv4 — the address a sibling gateway forwards to
+ * when a co-located (127.0.0.1) service has failed over to it. Reported in the
+ * heartbeat as `lan_ip`. Only physical-LAN, non-internal, RFC1918-private
+ * addresses are considered. `defaultGwIp` (telemetry.defaultGatewayIp) selects
+ * the primary: the candidate whose own subnet contains the host default route;
+ * otherwise the first private candidate (deterministic, matching lanSubnets).
+ * Returns null when no private LAN address exists (e.g. a VPS with only a
+ * public /32) — the server then keeps lan_ip NULL and degrades safely.
+ * `ifaces` is injectable for tests.
+ */
+function primaryLanIp(defaultGwIp, ifaces = os.networkInterfaces()) {
+  const cands = [];
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (!isPhysicalLan(name)) continue;
+    for (const addr of (addrs || [])) {
+      if (addr.family !== 'IPv4' || addr.internal) continue;
+      if (!addr.address || !addr.netmask) continue;
+      if (!_isPrivateIpv4(addr.address)) continue;            // excludes public, loopback, link-local
+      cands.push({ address: addr.address, network: networkAddress(addr.address, addr.netmask),
+        prefix: netmaskToPrefix(addr.netmask) });
+    }
+  }
+  if (cands.length === 0) return null;
+  if (defaultGwIp) {
+    const hit = cands.find(c => ipInCidr(defaultGwIp, c.network, c.prefix));
+    if (hit) return hit.address;
+  }
+  return cands[0].address;                                     // deterministic fallback
+}
+
+module.exports = { lanSubnets, primaryLanIp, isPhysicalLan, netmaskToPrefix, networkAddress, ipInCidr };
