@@ -24,3 +24,17 @@ test('collectTelemetry exposes lan_subnets + category catalogue (data only)', ()
   // Phase 2: the capability flag is now set (the /api/lan-scan endpoint exists).
   assert.equal(t.lan_discovery, true);
 });
+
+test('collectTelemetry exposes lan_ip — private IPv4 or null, never loopback/public', () => {
+  delete require.cache[require.resolve('../src/health/telemetry')];
+  const { collectTelemetry } = require('../src/health/telemetry');
+  const t = collectTelemetry();
+
+  assert.ok('lan_ip' in t, 'lan_ip field is present');
+  // Host-dependent: either null (no private LAN address, e.g. CI/VPS) or an
+  // RFC1918 private IPv4 — never loopback or a public address.
+  if (t.lan_ip !== null) {
+    assert.match(t.lan_ip, /^(10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}$/);
+    assert.ok(!t.lan_ip.startsWith('127.'), 'never loopback');
+  }
+});
