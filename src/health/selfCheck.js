@@ -12,7 +12,7 @@ async function tcpProbe(host, port, timeoutMs = 2000) {
   });
 }
 
-async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dnsResolveFn, reachabilityFn, routes }) {
+async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dnsResolveFn, reachabilityFn, routes, l4RouteCount }) {
   // Layer 1 — Process: probe the address each listener actually binds to.
   // The HTTP proxy, management API, and TCP listeners all bind to the WG
   // tunnel IP (config.tunnelIp), NOT 127.0.0.1 — so probing localhost
@@ -48,14 +48,26 @@ async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dn
 
   const anyListenerFailed = tcp_listeners.some(l => l.status === 'listener_failed');
 
+  // Listener-deficit detection. A configured L4 route whose bind failed never
+  // enters the TcpProxyManager Map, so its port is absent from `tcpPorts`
+  // entirely (distinct from `listener_failed`, which means registered-but-
+  // unreachable). Because the config hash is already committed after the failed
+  // apply, the 'change' event never re-fires and the listener is never retried.
+  // Surfacing the deficit here lets the heartbeat path trigger a re-apply.
+  const l4_routes_configured = l4RouteCount || 0;
+  const l4_listeners_present = tcp_listeners.length;
+  const l4_listeners_missing = Math.max(0, l4_routes_configured - l4_listeners_present);
+
   return {
     http_proxy_healthy: proxyHealthy,
     api_healthy: apiHealthy,
     tcp_listeners,
+    l4_routes_configured,
+    l4_listeners_missing,
     wg_handshake_age_s,
     dns_resolve_ok,
     route_reachability,
-    overall_healthy: proxyHealthy && apiHealthy && !anyListenerFailed,
+    overall_healthy: proxyHealthy && apiHealthy && !anyListenerFailed && l4_listeners_missing === 0,
   };
 }
 

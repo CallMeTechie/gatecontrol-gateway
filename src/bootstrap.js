@@ -148,7 +148,10 @@ async function bootstrap() {
     apiToken: config.apiToken,
     intervalMs: config.heartbeatIntervalS * 1000,
     getHealth: async () => {
-      const health = await runHealthCheck();
+      // reconcile=true: the heartbeat tick doubles as the self-heal driver —
+      // a detected L4 listener deficit (bind failed, config hash unchanged →
+      // 'change' never re-fires) triggers a re-apply of the route table.
+      const health = await runHealthCheck({ reconcile: true });
       // Opportunistic hostname report — server populates peers.hostname for
       // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
       health.hostname = os.hostname();
