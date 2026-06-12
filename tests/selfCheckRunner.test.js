@@ -68,4 +68,47 @@ describe('selfCheckRunner', () => {
     assert.equal(result.http_proxy_healthy, false);
     assert.equal(result.api_healthy, false);
   });
+
+  it('re-applies the L4 route table when listeners are missing (reconcile=true)', async () => {
+    // Models the bug: a configured L4 route has no registered listener (bind
+    // failed on a prior apply, config hash unchanged since → 'change' never
+    // re-fired). The heartbeat path must detect the deficit and re-apply.
+    const wireguard = { getStatus: async () => ({ peers: [] }) };
+    const store = {
+      httpRoutes: [],
+      l4Routes: [{ id: 7, listen_port: 3389, target_lan_host: '127.0.0.1', target_lan_port: 1 }],
+    };
+    let setRoutesCalls = 0;
+    let registeredPorts = []; // starts empty → listener missing
+    const tcpMgr = {
+      listListenerPorts: () => registeredPorts,
+      setRoutes: async (routes) => { setRoutesCalls += 1; registeredPorts = routes.map(r => r.listen_port); },
+    };
+    const config = { proxyPort: 1, apiPort: 1, tunnelIp: '127.0.0.1', serverUrl: 'https://127.0.0.1' };
+
+    const run = createSelfCheckRunner({ config, store, tcpMgr, wireguard });
+    const result = await run({ reconcile: true });
+
+    assert.equal(setRoutesCalls, 1, 'missing listener triggers exactly one re-apply');
+    assert.equal(result.listener_reapply_triggered, true);
+    assert.equal(result.l4_listeners_missing, 0, 're-check after re-apply shows the listener restored');
+  });
+
+  it('does NOT re-apply on the read-only path (reconcile=false)', async () => {
+    const wireguard = { getStatus: async () => ({ peers: [] }) };
+    const store = {
+      httpRoutes: [],
+      l4Routes: [{ id: 7, listen_port: 3389, target_lan_host: '127.0.0.1', target_lan_port: 1 }],
+    };
+    let setRoutesCalls = 0;
+    const tcpMgr = { listListenerPorts: () => [], setRoutes: async () => { setRoutesCalls += 1; } };
+    const config = { proxyPort: 1, apiPort: 1, tunnelIp: '127.0.0.1', serverUrl: 'https://127.0.0.1' };
+
+    const run = createSelfCheckRunner({ config, store, tcpMgr, wireguard });
+    const result = await run();
+
+    assert.equal(setRoutesCalls, 0, '/api/status reads stay side-effect free');
+    assert.equal(result.l4_listeners_missing, 1);
+    assert.notEqual(result.listener_reapply_triggered, true);
+  });
 });

@@ -34,6 +34,37 @@ describe('selfCheck', () => {
     assert.equal(result.wg_handshake_age_s, 42);
   });
 
+  it('flags missing L4 listeners and marks overall_healthy=false', async () => {
+    // 2 L4 routes configured, but no listener ports registered → both binds
+    // are missing (the bind-failure-without-re-apply bug). proxy/api are also
+    // unreachable here, but the assertion targets the new listener-deficit term.
+    const result = await runSelfCheck({
+      proxyPort: 9999, apiPort: 9998,
+      tcpPorts: [],
+      l4RouteCount: 2,
+      wgStatus: async () => ({ peers: [] }),
+      dnsResolveFn: async () => [],
+      reachabilityFn: async () => ({ reachable: true }),
+      routes: [],
+    });
+    assert.equal(result.l4_routes_configured, 2);
+    assert.equal(result.l4_listeners_missing, 2);
+    assert.equal(result.overall_healthy, false);
+  });
+
+  it('reports zero missing listeners when count matches and omitted l4RouteCount is treated as zero', async () => {
+    const result = await runSelfCheck({
+      proxyPort: 9999, apiPort: 9998,
+      tcpPorts: [],
+      wgStatus: async () => ({ peers: [] }),
+      dnsResolveFn: async () => [],
+      reachabilityFn: async () => ({ reachable: true }),
+      routes: [],
+    });
+    assert.equal(result.l4_routes_configured, 0);
+    assert.equal(result.l4_listeners_missing, 0);
+  });
+
   it('returns per-route reachability summary', async () => {
     const result = await runSelfCheck({
       proxyPort: 9999, apiPort: 9998,
