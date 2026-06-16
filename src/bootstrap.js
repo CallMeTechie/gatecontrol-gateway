@@ -29,8 +29,22 @@ const { startHeartbeatTicker } = require('./heartbeat');
 const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol-config-hash');
 const logger = require('./logger');
 const os = require('node:os');
+const { lanSubnets, ipInCidr } = require('./discovery/lanInterfaces');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
+
+// Build a host guard from the gateway's own physical-LAN subnets. Non-IPv4
+// hosts (hostnames) pass — they resolve in the gateway's own resolver.
+function makeHostGuard(gwIp) {
+  const owned = lanSubnets(gwIp).map(s => {
+    const [network, prefix] = s.cidr.split('/');
+    return { network, prefix: Number(prefix) };
+  });
+  return (host) => {
+    if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return true; // hostname → allow
+    return owned.some(o => ipInCidr(host, o.network, o.prefix));
+  };
+}
 
 async function bootstrap() {
   const config = loadConfig(DEFAULT_ENV_PATH);
@@ -119,6 +133,8 @@ async function bootstrap() {
             const [host, port = 80] = config.lanProbeTarget.split(':');
             return tcpProbe(host, parseInt(port, 10));
           },
+          tcpProbe: async (h, p) => (await tcpProbe(h, p)).reachable,
+          isHostAllowed: makeHostGuard(defaultGatewayIp()),
         }));
         mergeRouter.use(createSelfUpdateRouter({ stateDir: config.stateDir }));
         mergeRouter.use(createLanScanRouter({ scanMgr, defaultGatewayIp }));
