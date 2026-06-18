@@ -8,6 +8,7 @@ const { fetchConfig, checkHash } = require('./sync/syncClient');
 const { Router } = require('./proxy/router');
 const { createHttpProxy } = require('./proxy/http');
 const { TcpProxyManager } = require('./proxy/tcp');
+const { EgressProxyManager } = require('./proxy/egress');
 const { createApiServer } = require('./api/server');
 const { createConfigChangedRouter } = require('./api/routes/configChanged');
 const { createWolRouter } = require('./api/routes/wol');
@@ -57,6 +58,7 @@ async function bootstrap() {
   const store = new ConfigStore();
   const router = new Router();
   const tcpMgr = new TcpProxyManager({ bindIp: config.tunnelIp });
+  const egressMgr = new EgressProxyManager();
 
   const discoveryClient = makeDiscoveryClient({ serverUrl: config.serverUrl, apiToken: config.apiToken });
   const scanMgr = new ScanManager({
@@ -69,6 +71,7 @@ async function bootstrap() {
     logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length }, 'Applying new config');
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
+    await egressMgr.setRoutes(cfg.egress_routes || []);
   });
 
   // 4. Declare Poller (initial fetch runs LATER, after servers listen)
@@ -168,6 +171,10 @@ async function bootstrap() {
       // a detected L4 listener deficit (bind failed, config hash unchanged →
       // 'change' never re-fires) triggers a re-apply of the route table.
       const health = await runHealthCheck({ reconcile: true });
+      // Egress self-heal: re-apply egress routes each reconcile tick so a
+      // transiently-failed bind (IP not yet present, port briefly taken) is
+      // retried — parity with the L4 reconcile that runHealthCheck performs.
+      await egressMgr.setRoutes(store.egressRoutes);
       // Opportunistic hostname report — server populates peers.hostname for
       // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
       health.hostname = os.hostname();
@@ -175,12 +182,13 @@ async function bootstrap() {
       // every heartbeat; server persists the whole payload into
       // gateway_meta.last_health and the admin UI pulls what it needs.
       health.telemetry = collectTelemetry();
+      health.telemetry.scan_egress_listeners = egressMgr.getStatus();
       health.config_hash = store.currentHash || null;
       return health;
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, hb };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, hb };
 }
 
 module.exports = { bootstrap };

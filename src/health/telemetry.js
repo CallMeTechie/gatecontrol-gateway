@@ -141,6 +141,9 @@ function collectTelemetry() {
     lan_subnets: lanSubnets(_gwIp),
     lan_discovery_categories: catalogue(),
 
+    // Scan-egress (Phase 1a: capability flag now set — EgressProxyManager exists).
+    scan_egress: true,
+
     // Update state
     state_dir_writable: _stateDirWritable(),
     pending_update: _pendingUpdate(),
