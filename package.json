@@ -17,7 +17,7 @@
     "lint": "eslint src tests"
   },
   "dependencies": {
-    "@callmetechie/gatecontrol-config-hash": "^1.0.0",
+    "@callmetechie/gatecontrol-config-hash": "^1.2.0",
     "axios": "^1.16.1",
     "express": "^4.21.0",
     "http-proxy": "^1.18.1",
