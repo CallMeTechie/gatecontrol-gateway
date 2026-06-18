@@ -171,6 +171,10 @@ async function bootstrap() {
       // a detected L4 listener deficit (bind failed, config hash unchanged →
       // 'change' never re-fires) triggers a re-apply of the route table.
       const health = await runHealthCheck({ reconcile: true });
+      // Egress self-heal: re-apply egress routes each reconcile tick so a
+      // transiently-failed bind (IP not yet present, port briefly taken) is
+      // retried — parity with the L4 reconcile that runHealthCheck performs.
+      await egressMgr.setRoutes(store.egressRoutes);
       // Opportunistic hostname report — server populates peers.hostname for
       // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
       health.hostname = os.hostname();
@@ -178,6 +182,7 @@ async function bootstrap() {
       // every heartbeat; server persists the whole payload into
       // gateway_meta.last_health and the admin UI pulls what it needs.
       health.telemetry = collectTelemetry();
+      health.telemetry.scan_egress_listeners = egressMgr.getStatus();
       health.config_hash = store.currentHash || null;
       return health;
     },
