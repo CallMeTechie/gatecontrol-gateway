@@ -8,6 +8,7 @@ const { fetchConfig, checkHash } = require('./sync/syncClient');
 const { Router } = require('./proxy/router');
 const { createHttpProxy } = require('./proxy/http');
 const { TcpProxyManager } = require('./proxy/tcp');
+const { EgressProxyManager } = require('./proxy/egress');
 const { createApiServer } = require('./api/server');
 const { createConfigChangedRouter } = require('./api/routes/configChanged');
 const { createWolRouter } = require('./api/routes/wol');
@@ -57,6 +58,7 @@ async function bootstrap() {
   const store = new ConfigStore();
   const router = new Router();
   const tcpMgr = new TcpProxyManager({ bindIp: config.tunnelIp });
+  const egressMgr = new EgressProxyManager();
 
   const discoveryClient = makeDiscoveryClient({ serverUrl: config.serverUrl, apiToken: config.apiToken });
   const scanMgr = new ScanManager({
@@ -69,6 +71,7 @@ async function bootstrap() {
     logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length }, 'Applying new config');
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
+    await egressMgr.setRoutes(cfg.egress_routes || []);
   });
 
   // 4. Declare Poller (initial fetch runs LATER, after servers listen)
@@ -180,7 +183,7 @@ async function bootstrap() {
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, hb };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, hb };
 }
 
 module.exports = { bootstrap };
