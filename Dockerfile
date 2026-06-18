@@ -40,7 +40,7 @@ RUN wget -O /tmp/ipt.tar.bz2 "https://www.netfilter.org/projects/iptables/files/
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # hadolint ignore=DL3018
-RUN apk add --no-cache wireguard-tools iproute2 libcap tini && \
+RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils && \
     addgroup -S gateway && adduser -S -G gateway -H -s /sbin/nologin gateway && \
     mkdir -p /config /var/log/gateway && \
     chown -R gateway:gateway /var/log/gateway
