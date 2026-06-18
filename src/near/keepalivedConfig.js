@@ -1,7 +1,7 @@
 'use strict';
 
 /** Render a keepalived.conf for one or more egress VIP instances (VRRP unicast). */
-function buildKeepalivedConf({ iface, routerIdBase = 50, healthCheckCmd, notifyDir, instances }) {
+function buildKeepalivedConf({ iface, healthCheckCmd, notifyDir, instances }) {
   if (!iface) throw new Error('iface required');
   const head =
 `global_defs {
