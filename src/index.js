@@ -38,6 +38,7 @@ async function main() {
       if (ctx?.apiServer) await new Promise(r => ctx.apiServer.close(r));
       if (ctx?.httpProxyServer) await new Promise(r => ctx.httpProxyServer.close(r));
       if (ctx?.tcpMgr) await ctx.tcpMgr.stopAll();
+      if (ctx?.egressMgr) await ctx.egressMgr.stopAll();
       await wireguard.bringDown();
     } catch (err) {
       logger.warn({ err: err.message }, 'Shutdown error');
