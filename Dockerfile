@@ -28,7 +28,8 @@ FROM alpine:${ALPINE_VERSION} AS ipt-legacy
 RUN apk add --no-cache build-base autoconf automake libtool linux-headers \
     bison flex pkgconf libmnl-dev
 ARG IPTABLES_VER=1.8.10
-RUN wget -O /tmp/ipt.tar.bz2 "https://www.netfilter.org/projects/iptables/files/iptables-${IPTABLES_VER}.tar.bz2" \
+# hadolint ignore=DL3003,DL3047
+RUN wget -q -O /tmp/ipt.tar.bz2 "https://www.netfilter.org/projects/iptables/files/iptables-${IPTABLES_VER}.tar.bz2" \
  && mkdir -p /tmp/ipt && tar -xjf /tmp/ipt.tar.bz2 -C /tmp/ipt --strip-components=1 \
  && cd /tmp/ipt \
  && ./configure --enable-static --disable-shared --disable-nftables --prefix=/opt/ipt \
