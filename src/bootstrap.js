@@ -60,6 +60,27 @@ async function bootstrap() {
   const tcpMgr = new TcpProxyManager({ bindIp: config.tunnelIp });
   const egressMgr = new EgressProxyManager();
 
+  const { NearManager } = require('./near/nearManager');
+  const fsp = require('node:fs/promises');
+  const { execFile } = require('node:child_process');
+  const nearIO = {
+    writeFile: fsp.writeFile, chmod: fsp.chmod, mkdir: fsp.mkdir,
+    exec: (bin, args) => new Promise(r => execFile(bin, args, { timeout: 6000 }, (e, so) => r({ ok: !e, stdout: so || '' }))),
+  };
+  // LAN-Kontext aus den bestehenden Discovery-Helfern (NICHT 'eth0' hartkodieren — Review-I2/I3):
+  const { primaryLanIp: _primaryLanIp } = require('./discovery/lanInterfaces');
+  const _gwIp = defaultGatewayIp();
+  const _primarySubnet = lanSubnets(_gwIp).find(s => s.primary);
+  // Hub = WG-Server-Peer-IP (fix pro Topologie); überschreibbar via env, Default 10.8.0.1.
+  const HUB_TUNNEL_IP = process.env.GC_HUB_TUNNEL_IP || '10.8.0.1';
+  const nearMgr = new NearManager({
+    io: nearIO,
+    iface: _primarySubnet?.iface || 'eth0',     // eth0 nur als Last-Resort-Fallback
+    selfLanIp: _primaryLanIp(_gwIp),
+    peerLanIps: [],                              // füllt der Server-Push (cfg.near_peers)
+    hubTunnelIp: HUB_TUNNEL_IP,
+  });
+
   const discoveryClient = makeDiscoveryClient({ serverUrl: config.serverUrl, apiToken: config.apiToken });
   const scanMgr = new ScanManager({
     config, discoveryClient, runScan,
@@ -72,6 +93,8 @@ async function bootstrap() {
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
     await egressMgr.setRoutes(cfg.egress_routes || []);
+    nearMgr.peerLanIps = cfg.near_peers || nearMgr.peerLanIps;
+    await nearMgr.apply(cfg.egress_routes || []);
   });
 
   // 4. Declare Poller (initial fetch runs LATER, after servers listen)
@@ -183,12 +206,13 @@ async function bootstrap() {
       // gateway_meta.last_health and the admin UI pulls what it needs.
       health.telemetry = collectTelemetry();
       health.telemetry.scan_egress_listeners = egressMgr.getStatus();
+      try { health.telemetry.scan_egress_near = await nearMgr.getStatus(store.egressRoutes); } catch (_e) { /* best-effort */ }
       health.config_hash = store.currentHash || null;
       return health;
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, hb };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, nearMgr, hb };
 }
 
 module.exports = { bootstrap };

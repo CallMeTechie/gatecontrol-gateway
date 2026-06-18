@@ -22,10 +22,26 @@ ARG GH_PACKAGES_TOKEN=""
 RUN NODE_AUTH_TOKEN=${GH_PACKAGES_TOKEN} npm ci --omit=dev --ignore-scripts
 COPY src ./src
 
+# --- Stage: statisches legacy iptables (DSM-Kernel = x_tables; nft scheitert) ---
+FROM alpine:${ALPINE_VERSION} AS ipt-legacy
+# hadolint ignore=DL3018
+RUN apk add --no-cache build-base autoconf automake libtool linux-headers \
+    bison flex pkgconf libmnl-dev
+ARG IPTABLES_VER=1.8.10
+# hadolint ignore=DL3003,DL3047
+RUN wget -q -O /tmp/ipt.tar.bz2 "https://www.netfilter.org/projects/iptables/files/iptables-${IPTABLES_VER}.tar.bz2" \
+ && mkdir -p /tmp/ipt && tar -xjf /tmp/ipt.tar.bz2 -C /tmp/ipt --strip-components=1 \
+ && cd /tmp/ipt \
+ && ./configure --enable-static --disable-shared --disable-nftables --prefix=/opt/ipt \
+ && make -j"$(nproc)" LDFLAGS="-static" && make install \
+ && /opt/ipt/sbin/xtables-legacy-multi iptables --version
+# NOTE: --enable-static-iptables is NOT a real iptables-1.8.x flag (ignored). The static
+# binary comes from LDFLAGS="-static" (musl static) + --enable-static --disable-shared.
+
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # hadolint ignore=DL3018
-RUN apk add --no-cache wireguard-tools iproute2 libcap tini && \
+RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils && \
     addgroup -S gateway && adduser -S -G gateway -H -s /sbin/nologin gateway && \
     mkdir -p /config /var/log/gateway && \
     chown -R gateway:gateway /var/log/gateway
@@ -34,6 +50,13 @@ COPY --from=wg-build /wireguard-go /usr/local/bin/wireguard-go
 COPY --from=node-build /build/node_modules /app/node_modules
 COPY --from=node-build /build/src /app/src
 COPY --chown=gateway:gateway package.json /app/package.json
+
+# legacy iptables (statisch) — DSM-Kernel spricht nur x_tables, nicht nft.
+COPY --from=ipt-legacy /opt/ipt/sbin/xtables-legacy-multi /usr/local/bin/xtables-legacy-multi
+RUN ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/iptables \
+ && ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/iptables-save \
+ && ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/iptables-restore \
+ && iptables --version
 
 # Grant NET_ADMIN cap to wireguard-go binary (so we can drop CAP_NET_ADMIN from container)
 # Note: Container must still have CAP_NET_ADMIN in cap_add (setcap only works if FS supports it)
