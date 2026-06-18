@@ -8,6 +8,7 @@ class ConfigStore extends EventEmitter {
     this.peerId = null;
     this.httpRoutes = [];
     this.l4Routes = [];
+    this.egressRoutes = [];
     this.currentHash = null;
   }
 
@@ -41,6 +42,7 @@ class ConfigStore extends EventEmitter {
     this.peerId = cfg.peer_id;
     this.httpRoutes = cfg.routes || [];
     this.l4Routes = cfg.l4_routes || [];
+    this.egressRoutes = cfg.egress_routes || [];
     this.currentHash = newHash;
 
     const diff = { l4Added, l4Removed, l4Changed, unchanged: false };

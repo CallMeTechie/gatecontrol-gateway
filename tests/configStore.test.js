@@ -56,3 +56,18 @@ describe('ConfigStore', () => {
     assert.equal(diff.l4Changed[0].id, 1);
   });
 });
+
+describe('ConfigStore egress_routes', () => {
+  it('stores egress_routes from config', () => {
+    const store = new ConfigStore();
+    store.replaceConfig({ routes: [], l4_routes: [], egress_routes: [{ id: 7, lan_bind_ip: '192.168.2.60', lan_listen_port: 445, tunnel_target_host: '10.8.0.1', tunnel_target_port: 41445, allowed_source_ips: ['192.168.2.45/32'] }] }, 'h1');
+    assert.equal(store.egressRoutes.length, 1);
+    assert.equal(store.egressRoutes[0].id, 7);
+  });
+
+  it('defaults egressRoutes to [] when absent', () => {
+    const store = new ConfigStore();
+    store.replaceConfig({ routes: [], l4_routes: [] }, 'h2');
+    assert.deepEqual(store.egressRoutes, []);
+  });
+});
