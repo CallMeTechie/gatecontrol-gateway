@@ -9,8 +9,14 @@ describe('keepalived config generator', () => {
     instances: [{ name: 'EGRESS_NAS1', vrid: 51, priority: 150, vip: '192.168.2.250',
                   unicastSrc: '192.168.2.228', unicastPeers: ['192.168.2.151'] }],
   });
-  it('declares the vrrp_script health check', () => {
+  it('declares the vrrp_script health check with FAULT-mode (no weight)', () => {
     assert.match(conf, /vrrp_script\s+chk_tunnel\s*\{[^}]*script\s+"\/run\/keepalived\/health\.sh"/s);
+    // FAULT-mode: no weight line → script failure puts instance into FAULT state
+    // (releases VIP regardless of nopreempt) instead of only dropping priority.
+    assert.doesNotMatch(conf, /weight/);
+    assert.match(conf, /interval\s+\d+/);
+    assert.match(conf, /rise\s+\d+/);
+    assert.match(conf, /fall\s+\d+/);
   });
   it('declares the instance with the VIP, vrid, priority, iface', () => {
     assert.match(conf, /vrrp_instance\s+EGRESS_NAS1\s*\{/);

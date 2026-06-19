@@ -197,6 +197,10 @@ async function bootstrap() {
       // transiently-failed bind (IP not yet present, port briefly taken) is
       // retried — parity with the L4 reconcile that runHealthCheck performs.
       await egressMgr.setRoutes(store.egressRoutes);
+      // Near self-heal: re-apply keepalived/VIP/REDIRECT each reconcile tick so a
+      // dead keepalived (crash/kill) is restarted — parity with the egress/L4 reconcile.
+      // The NearManager churn-guard makes this cheap when unchanged + running.
+      try { await nearMgr.apply(store.egressRoutes); } catch (_e) { /* best-effort, like getStatus */ }
       // Opportunistic hostname report — server populates peers.hostname for
       // internal DNS on every heartbeat. Sticky-admin is enforced server-side.
       health.hostname = os.hostname();
