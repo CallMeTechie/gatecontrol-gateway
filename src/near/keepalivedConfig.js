@@ -1,7 +1,7 @@
 'use strict';
 
 /** Render a keepalived.conf for one or more egress VIP instances (VRRP unicast). */
-function buildKeepalivedConf({ iface, healthCheckCmd, notifyDir, instances }) {
+function buildKeepalivedConf({ iface, healthCheckCmd, instances }) {
   if (!iface) throw new Error('iface required');
   const head =
 `global_defs {
@@ -38,27 +38,10 @@ ${peers}
     track_script {
         chk_tunnel
     }
-    notify_master "${notifyDir}/${i.name}_master.sh"
-    notify_backup "${notifyDir}/${i.name}_backup.sh"
-    notify_fault  "${notifyDir}/${i.name}_backup.sh"
 }
 `;
   }).join('\n');
   return head + blocks;
 }
 
-/** Render the master notify script: bring VIP-bound REDIRECT up (idempotent). */
-function renderMasterScript({ vip, dport, toPort }) {
-  return `#!/bin/sh
-iptables -t nat -C PREROUTING -d ${vip} -p tcp --dport ${dport} -j REDIRECT --to-ports ${toPort} 2>/dev/null \
-  || iptables -t nat -A PREROUTING -d ${vip} -p tcp --dport ${dport} -j REDIRECT --to-ports ${toPort}
-`;
-}
-/** Render the backup/fault notify script: tear the REDIRECT down (idempotent). */
-function renderBackupScript({ vip, dport, toPort }) {
-  return `#!/bin/sh
-iptables -t nat -D PREROUTING -d ${vip} -p tcp --dport ${dport} -j REDIRECT --to-ports ${toPort} 2>/dev/null || true
-`;
-}
-
-module.exports = { buildKeepalivedConf, renderMasterScript, renderBackupScript };
+module.exports = { buildKeepalivedConf };

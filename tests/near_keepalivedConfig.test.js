@@ -6,7 +6,6 @@ const { buildKeepalivedConf } = require('../src/near/keepalivedConfig');
 describe('keepalived config generator', () => {
   const conf = buildKeepalivedConf({
     iface: 'eth0', routerIdBase: 50, healthCheckCmd: '/run/keepalived/health.sh',
-    notifyDir: '/run/keepalived',
     instances: [{ name: 'EGRESS_NAS1', vrid: 51, priority: 150, vip: '192.168.2.250',
                   unicastSrc: '192.168.2.228', unicastPeers: ['192.168.2.151'] }],
   });
@@ -20,11 +19,12 @@ describe('keepalived config generator', () => {
     assert.match(conf, /interface\s+eth0/);
     assert.match(conf, /192\.168\.2\.250/);
   });
-  it('wires notify scripts and unicast peers', () => {
-    assert.match(conf, /notify_master\s+"\/run\/keepalived\/EGRESS_NAS1_master\.sh"/);
-    assert.match(conf, /notify_backup\s+"\/run\/keepalived\/EGRESS_NAS1_backup\.sh"/);
+  it('wires unicast peers and track_script (no notify lines)', () => {
     assert.match(conf, /unicast_src_ip\s+192\.168\.2\.228/);
     assert.match(conf, /unicast_peer\s*\{[^}]*192\.168\.2\.151/s);
     assert.match(conf, /track_script\s*\{[^}]*chk_tunnel/s);
+    assert.doesNotMatch(conf, /notify_master/);
+    assert.doesNotMatch(conf, /notify_backup/);
+    assert.doesNotMatch(conf, /notify_fault/);
   });
 });
