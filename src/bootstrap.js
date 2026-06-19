@@ -77,7 +77,7 @@ async function bootstrap() {
     io: nearIO,
     iface: _primarySubnet?.iface || 'eth0',     // eth0 nur als Last-Resort-Fallback
     selfLanIp: _primaryLanIp(_gwIp),
-    peerLanIps: [],                              // füllt der Server-Push (cfg.near_peers)
+    peerLanIps: [],                              // fallback only; server delivers near_peers per-route inside egress_routes
     hubTunnelIp: HUB_TUNNEL_IP,
   });
 
@@ -93,7 +93,6 @@ async function bootstrap() {
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
     await egressMgr.setRoutes(cfg.egress_routes || []);
-    nearMgr.peerLanIps = cfg.near_peers || nearMgr.peerLanIps;
     await nearMgr.apply(cfg.egress_routes || []);
   });
 
