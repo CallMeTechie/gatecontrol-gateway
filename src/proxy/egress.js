@@ -111,14 +111,16 @@ class EgressProxyManager {
     }
   }
 
+  // _bindChanged: fields that determine the kernel listen socket (require a rebind).
   _bindChanged(a, b) {
     return a.lan_bind_ip !== b.lan_bind_ip || a.lan_listen_port !== b.lan_listen_port;
   }
 
+  // _softChanged: fields read per-connection in _handleConnection (apply in place, no rebind).
   _softChanged(a, b) {
     return a.tunnel_target_host !== b.tunnel_target_host
       || a.tunnel_target_port !== b.tunnel_target_port
-      || JSON.stringify(a.allowed_source_ips || []) !== JSON.stringify(b.allowed_source_ips || []);
+      || JSON.stringify([...(a.allowed_source_ips || [])].sort()) !== JSON.stringify([...(b.allowed_source_ips || [])].sort());
   }
 
   async _startListener(route) {
