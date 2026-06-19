@@ -15,7 +15,6 @@ vrrp_script chk_tunnel {
     timeout 3
     rise 2
     fall 2
-    weight -60
 }
 `;
   const blocks = (instances || []).map((i) => {
