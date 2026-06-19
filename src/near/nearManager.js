@@ -45,13 +45,12 @@ class NearManager {
   }
 
   async _ensureRedirect(vip, toPort) {
-    const args = buildRedirectRuleArgs(vip, 445, toPort);
-    const c = await this.io.exec('iptables', ['-C', ...args]);
-    if (!c.ok) await this.io.exec('iptables', ['-A', ...args]);
+    const c = await this.io.exec('iptables', buildRedirectRuleArgs('-C', vip, 445, toPort));
+    if (!c.ok) await this.io.exec('iptables', buildRedirectRuleArgs('-A', vip, 445, toPort));
   }
 
   async _delRedirect(vip, toPort) {
-    await this.io.exec('iptables', ['-D', ...buildRedirectRuleArgs(vip, 445, toPort)]);
+    await this.io.exec('iptables', buildRedirectRuleArgs('-D', vip, 445, toPort));
   }
 
   /** Write the plan to /run/keepalived and (re)load keepalived. Owns the REDIRECT directly. */

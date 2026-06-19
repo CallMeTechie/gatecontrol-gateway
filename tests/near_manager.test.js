@@ -21,8 +21,8 @@ function makeIO({ pgrepsRunning = [] } = {}) {
         const yes = pgrepsRunning[pgrepIdx++] ?? false;
         return { ok: true, stdout: yes ? 'yes' : 'no' };
       }
-      // iptables -C → not found so -A will be issued
-      if (bin === 'iptables' && Array.isArray(args) && args[0] === '-C') {
+      // iptables -C → not found so -A will be issued (table-first: -t nat -C ...)
+      if (bin === 'iptables' && Array.isArray(args) && args[2] === '-C') {
         return { ok: false };
       }
       return { ok: true };
@@ -64,9 +64,9 @@ describe('NearManager.apply', () => {
     const mgr = new NearManager({ io, iface: 'eth0', selfLanIp: '192.168.2.228', peerLanIps: [], hubTunnelIp: '10.8.0.1' });
     await mgr.apply([ROUTE]);
 
-    const iptablesAdd = io.calls.find(c => c.bin === 'iptables' && c.args[0] === '-A');
+    const iptablesAdd = io.calls.find(c => c.bin === 'iptables' && c.args[2] === '-A');
     assert.ok(iptablesAdd, 'expected iptables -A call for REDIRECT');
-    assert.deepEqual(iptablesAdd.args, ['-A', '-t', 'nat', 'PREROUTING', '-d', '192.168.2.250', '-p', 'tcp', '--dport', '445', '-j', 'REDIRECT', '--to-ports', '14450']);
+    assert.deepEqual(iptablesAdd.args, ['-t', 'nat', '-A', 'PREROUTING', '-d', '192.168.2.250', '-p', 'tcp', '--dport', '445', '-j', 'REDIRECT', '--to-ports', '14450']);
 
     const started = io.calls.find(c => c.bin === 'keepalived');
     assert.ok(started, 'expected keepalived start call');
@@ -96,9 +96,9 @@ describe('NearManager.apply', () => {
     await mgr.apply([ROUTE]);
     await mgr.apply([]);
 
-    const iptablesDel = io.calls.find(c => c.bin === 'iptables' && c.args[0] === '-D');
+    const iptablesDel = io.calls.find(c => c.bin === 'iptables' && c.args[2] === '-D');
     assert.ok(iptablesDel, 'expected iptables -D call');
-    assert.ok(iptablesDel.args.includes('14450'), 'expected port 14450 in -D args');
+    assert.deepEqual(iptablesDel.args, ['-t', 'nat', '-D', 'PREROUTING', '-d', '192.168.2.250', '-p', 'tcp', '--dport', '445', '-j', 'REDIRECT', '--to-ports', '14450']);
 
     const pkill = io.calls.find(c =>
       c.bin === 'sh' && c.args.some(a => typeof a === 'string' && a.includes('pkill keepalived'))

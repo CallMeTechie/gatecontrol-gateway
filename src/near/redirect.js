@@ -9,10 +9,11 @@ function assertIpv4(ip) {
 }
 function assertPort(p) { if (!Number.isInteger(p) || p < 1 || p > 65535) throw new Error(`bad port: ${p}`); }
 
-/** argv for `iptables` (prepend -A/-D). NAT PREROUTING REDIRECT <vip>:<dport> -> <toPort>. */
-function buildRedirectRuleArgs(vip, dport, toPort) {
+/** Full argv for `iptables`. Table (-t nat) is placed before the verb so the kernel accepts it.
+ *  Valid kernel order: iptables -t nat -A|-C|-D PREROUTING ... (table must precede verb). */
+function buildRedirectRuleArgs(verb, vip, dport, toPort) {
   assertIpv4(vip); assertPort(dport); assertPort(toPort);
-  return ['-t','nat','PREROUTING','-d',vip,'-p','tcp','--dport',String(dport),'-j','REDIRECT','--to-ports',String(toPort)];
+  return ['-t','nat',verb,'PREROUTING','-d',vip,'-p','tcp','--dport',String(dport),'-j','REDIRECT','--to-ports',String(toPort)];
 }
 /** argv for `ip addr [add|del] <args>`. */
 function buildAliasArgs(vip, prefix, iface) {
@@ -34,8 +35,8 @@ function _run(bin, args) {
     });
   });
 }
-const addRedirect    = (vip, dport, toPort) => _run('iptables', ['-A', ...buildRedirectRuleArgs(vip, dport, toPort)]);
-const removeRedirect = (vip, dport, toPort) => _run('iptables', ['-D', ...buildRedirectRuleArgs(vip, dport, toPort)]);
+const addRedirect    = (vip, dport, toPort) => _run('iptables', buildRedirectRuleArgs('-A', vip, dport, toPort));
+const removeRedirect = (vip, dport, toPort) => _run('iptables', buildRedirectRuleArgs('-D', vip, dport, toPort));
 const addAlias       = (vip, prefix, iface) => _run('ip', ['addr','add', ...buildAliasArgs(vip, prefix, iface)]);
 const delAlias       = (vip, prefix, iface) => _run('ip', ['addr','del', ...buildAliasArgs(vip, prefix, iface)]);
 
