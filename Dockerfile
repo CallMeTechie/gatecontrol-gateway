@@ -28,8 +28,14 @@ FROM alpine:${ALPINE_VERSION} AS ipt-legacy
 RUN apk add --no-cache build-base autoconf automake libtool linux-headers \
     bison flex pkgconf libmnl-dev
 ARG IPTABLES_VER=1.8.10
+# Supply-chain pin: verified SHA-256 of iptables-1.8.10.tar.xz (netfilter published
+# .sha256sum, cross-checked against the served tarball). If IPTABLES_VER is bumped,
+# this MUST be updated too — a mismatch fails the build loudly.
+ARG IPTABLES_SHA256=5cc255c189356e317d070755ce9371eb63a1b783c34498fb8c30264f3cc59c9c
 # hadolint ignore=DL3003,DL3047
 RUN wget -q -O /tmp/ipt.tar.xz "https://www.netfilter.org/projects/iptables/files/iptables-${IPTABLES_VER}.tar.xz" \
+ && printf '%s  /tmp/ipt.tar.xz\n' "${IPTABLES_SHA256}" > /tmp/ipt.sha256 \
+ && sha256sum -c /tmp/ipt.sha256 \
  && mkdir -p /tmp/ipt && tar -xJf /tmp/ipt.tar.xz -C /tmp/ipt --strip-components=1 \
  && cd /tmp/ipt \
  && ./configure --enable-static --disable-shared --disable-nftables --prefix=/opt/ipt \
