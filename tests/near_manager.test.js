@@ -59,6 +59,19 @@ describe('NearManager.plan', () => {
 });
 
 describe('NearManager.apply', () => {
+  it('skips apply (no exec / no write) when selfLanIp is null and there are near routes', async () => {
+    const io = makeIO({ pgrepsRunning: [] });
+    const mgr = new NearManager({ io, iface: 'eth0', selfLanIp: null, peerLanIps: [], hubTunnelIp: '10.8.0.1' });
+    await mgr.apply([ROUTE]);
+
+    const problematicCalls = io.calls.filter(c =>
+      c.bin === 'keepalived' || c.bin === 'iptables' ||
+      (c.bin === 'sh' && c.args.some(a => typeof a === 'string' && (a.includes('pkill') || a.includes('HUP') || a.includes('pgrep'))))
+    );
+    assert.equal(problematicCalls.length, 0, `expected no keepalived/iptables/sh exec calls, got: ${JSON.stringify(problematicCalls)}`);
+    assert.deepEqual(Object.keys(io.files), [], 'expected no config writeFile');
+  });
+
   it('adds iptables REDIRECT and starts keepalived on first apply', async () => {
     const io = makeIO({ pgrepsRunning: [false] });
     const mgr = new NearManager({ io, iface: 'eth0', selfLanIp: '192.168.2.228', peerLanIps: [], hubTunnelIp: '10.8.0.1' });

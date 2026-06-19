@@ -55,8 +55,12 @@ class NearManager {
 
   /** Write the plan to /run/keepalived and (re)load keepalived. Owns the REDIRECT directly. */
   async apply(egressRoutes) {
-    const p = this.plan(egressRoutes);
     const near = (egressRoutes || []).filter(r => r.vip_ip);
+    if (near.length > 0 && !this.selfLanIp) {
+      logger.warn({}, 'near: skipping apply — no LAN IP (selfLanIp) resolved');
+      return;
+    }
+    const p = this.plan(egressRoutes);
     const sig = JSON.stringify({
       conf: p.conf,
       health: p.healthScript,

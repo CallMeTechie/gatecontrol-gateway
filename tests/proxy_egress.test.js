@@ -80,14 +80,61 @@ describe('EgressProxyManager', () => {
     blocker.close();
   });
 
-  it('transitions on target change without rejecting (dual-bind overlap)', async () => {
+  it('transitions when lan_listen_port changes (bind change → dual-bind, new port appears)', async () => {
+    // Grab two fixed free ports so we can assert a real rebind.
+    const [portP, portQ] = await Promise.all([0, 1].map(() => new Promise(r => {
+      const s = net.createServer();
+      s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); });
+    })));
     const mgr = new EgressProxyManager();
-    await mgr.setRoutes([route({ id: 1 })]);
-    const oldPort = mgr.listListenerPorts()[0];
-    // Change the tunnel target → triggers a dual-bind transition to a new listener.
-    await mgr.setRoutes([route({ id: 1, tunnel_target_port: upstreamPort, lan_listen_port: 0, allowed_source_ips: ['127.0.0.1/32', '10.0.0.0/8'] })]);
-    const newPort = mgr.listListenerPorts().find(p => p !== oldPort);
-    assert.ok(newPort, 'new listener should exist after transition');
+    await mgr.setRoutes([route({ id: 1, lan_listen_port: portP })]);
+    assert.ok(mgr.listListenerPorts().includes(portP), 'listener on portP');
+    // Change bind port → must trigger a transition (new listener on portQ).
+    await mgr.setRoutes([route({ id: 1, lan_listen_port: portQ })]);
+    assert.ok(mgr.listListenerPorts().includes(portQ), 'listener transitioned to portQ');
+    await mgr.stopAll();
+  });
+
+  it('updates allowlist in place on same-port edit (no EADDRINUSE, new connections see new config)', async () => {
+    // Grab a fixed free port to reproduce EADDRINUSE (port 0 dodges it).
+    const fixedPort = await new Promise(r => {
+      const s = net.createServer();
+      s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); });
+    });
+    const mgr = new EgressProxyManager();
+
+    // Initial config: 127.0.0.1 is allowed.
+    await mgr.setRoutes([route({ id: 1, lan_listen_port: fixedPort, allowed_source_ips: ['127.0.0.1/32'] })]);
+
+    // Confirm connection from 127.0.0.1 is forwarded.
+    const reply = await new Promise((resolve, reject) => {
+      const client = net.connect(fixedPort, '127.0.0.1', () => client.write('pre'));
+      client.on('data', d => { resolve(d.toString()); client.end(); });
+      client.on('error', reject);
+    });
+    assert.match(reply, /^echo:pre/, 'initial allowlist: loopback must be forwarded');
+
+    // Edit: exclude 127.0.0.1 from allowlist — same bind address+port.
+    await mgr.setRoutes([route({ id: 1, lan_listen_port: fixedPort, allowed_source_ips: ['10.0.0.1/32'] })]);
+
+    // (a) No EADDRINUSE — listener still bound.
+    const status = mgr.getStatus().find(s => s.id === 1);
+    assert.equal(status.bound, true, 'listener must still be bound (no EADDRINUSE)');
+    assert.equal(status.bind_error, null, 'bind_error must be null after in-place update');
+
+    // (b) Same listener, same port — no rebind.
+    assert.ok(mgr.listListenerPorts().includes(fixedPort), 'fixedPort must still be in use');
+
+    // (c) New connection from 127.0.0.1 must now be dropped (in-place allowlist took effect).
+    const gotData = await new Promise(resolve => {
+      let received = false;
+      const client = net.connect(fixedPort, '127.0.0.1', () => client.write('post'));
+      client.on('data', () => { received = true; });
+      client.on('close', () => resolve(received));
+      client.on('error', () => resolve(received));
+    });
+    assert.equal(gotData, false, 'loopback must be rejected after in-place allowlist update');
+
     await mgr.stopAll();
   });
 });
