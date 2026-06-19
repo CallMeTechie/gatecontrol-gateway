@@ -92,8 +92,11 @@ class EgressProxyManager {
         const existing = this._listeners.get(route.id);
         if (!existing) {
           await this._startListener(route);
-        } else if (this._changed(existing.route, route)) {
+        } else if (this._bindChanged(existing.route, route)) {
           await this._transitionListener(route, existing);
+        } else if (this._softChanged(existing.route, route)) {
+          Object.assign(existing.route, route);
+          logger.info({ egressId: route.id }, 'Egress route updated in place (no rebind)');
         }
       } catch (err) {
         this._status.set(route.id, {
@@ -108,10 +111,12 @@ class EgressProxyManager {
     }
   }
 
-  _changed(a, b) {
-    return a.lan_bind_ip !== b.lan_bind_ip
-      || a.lan_listen_port !== b.lan_listen_port
-      || a.tunnel_target_host !== b.tunnel_target_host
+  _bindChanged(a, b) {
+    return a.lan_bind_ip !== b.lan_bind_ip || a.lan_listen_port !== b.lan_listen_port;
+  }
+
+  _softChanged(a, b) {
+    return a.tunnel_target_host !== b.tunnel_target_host
       || a.tunnel_target_port !== b.tunnel_target_port
       || JSON.stringify(a.allowed_source_ips || []) !== JSON.stringify(b.allowed_source_ips || []);
   }
