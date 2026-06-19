@@ -77,7 +77,7 @@ async function bootstrap() {
     io: nearIO,
     iface: _primarySubnet?.iface || 'eth0',     // eth0 nur als Last-Resort-Fallback
     selfLanIp: _primaryLanIp(_gwIp),
-    peerLanIps: [],                              // füllt der Server-Push (cfg.near_peers)
+    peerLanIps: [],                              // fallback only; server delivers near_peers per-route inside egress_routes
     hubTunnelIp: HUB_TUNNEL_IP,
   });
 
