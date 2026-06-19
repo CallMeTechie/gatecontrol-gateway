@@ -93,7 +93,6 @@ async function bootstrap() {
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
     await egressMgr.setRoutes(cfg.egress_routes || []);
-    nearMgr.peerLanIps = cfg.near_peers || nearMgr.peerLanIps;
     await nearMgr.apply(cfg.egress_routes || []);
   });
 

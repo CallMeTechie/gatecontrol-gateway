@@ -29,4 +29,15 @@ describe('NearManager.plan', () => {
     assert.ok(plan.scripts['EGRESS_7_backup.sh'].includes('-D'));
     assert.match(plan.healthScript, /10\.8\.0\.1/);
   });
+
+  it('uses per-route near_peers for unicast_peer even when manager peerLanIps is empty', () => {
+    const io = fakeIO();
+    // Production bootstrap constructs with peerLanIps: [] — server delivers near_peers inside each route
+    const mgr = new NearManager({ io, iface: 'eth0', selfLanIp: '192.168.2.228', peerLanIps: [], hubTunnelIp: '10.8.0.1' });
+    const plan = mgr.plan([
+      { id: 7, vip_ip: '192.168.2.250', vip_prefix: 24, lan_listen_port: 14450, near_peers: ['192.168.2.151'] },
+    ]);
+    assert.match(plan.conf, /unicast_src_ip\s+192\.168\.2\.228/);
+    assert.match(plan.conf, /unicast_peer\s*\{[^}]*192\.168\.2\.151/s);
+  });
 });

@@ -28,7 +28,7 @@ class NearManager {
       vip: r.vip_ip,
       vipPrefix: r.vip_prefix || 24,   // Review-I1: VIP must carry its prefix (not /32)
       unicastSrc: this.selfLanIp,
-      unicastPeers: this.peerLanIps,
+      unicastPeers: (Array.isArray(r.near_peers) && r.near_peers.length) ? r.near_peers : this.peerLanIps,
     }));
     const conf = buildKeepalivedConf({
       iface: this.iface, healthCheckCmd: `${RUN_DIR}/health.sh`, notifyDir: RUN_DIR, instances,
