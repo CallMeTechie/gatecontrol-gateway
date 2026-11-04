@@ -1,18 +1,39 @@
 GateControl Home Gateway — Raspberry Pi
 =======================================
 
+Am einfachsten: In GateControl beim Einrichten des Gateways die Datei
+gatecontrol-setup.zip herunterladen und ihren Inhalt direkt auf das Laufwerk
+"bootfs" entpacken (Ordner "gatecontrol" mit gateway.env und settings.txt;
+vorhandene Dateien ersetzen). SD-Karte in den Pi, Strom an – fertig.
+
+Von Hand:
 1. In GateControl das Gateway anlegen und die Datei gateway.env
    (bzw. gateway-<Nummer>.env) herunterladen.
 2. Die Datei in DIESEN Ordner kopieren (Laufwerk "bootfs", Ordner
    "gatecontrol"). Der Name darf gateway.env oder gateway-<Nummer>.env sein.
-3. SD-Karte in den Pi stecken, Netzwerkkabel anschließen, Strom an.
+3. Optional settings.txt in diesem Ordner anpassen (siehe unten).
+4. SD-Karte in den Pi stecken, Netzwerkkabel anschließen (oder WLAN in
+   settings.txt eintragen), Strom an.
 
 Beim Start übernimmt der Pi die Datei, löscht sie von der SD-Karte und
 startet das Gateway. Nach einigen Minuten erscheint es in GateControl als
 "online". Das Ergebnis steht danach auch in STATUS.txt in diesem Ordner.
 
-Neu einrichten: einfach wieder eine gateway.env hierher kopieren und den Pi
-neu starten.
+Einstellungen in settings.txt (NAME=WERT, ohne Anführungszeichen):
+  HOSTNAME            Gerätename im Netz
+  ZIGBEE              auto | on | off (RaspBee II / ConBee, deCONZ)
+  TIMEZONE            Zeitzone, z. B. Europe/Berlin
+  WIFI_SSID           WLAN-Name (leer = kein WLAN; LAN-Kabel hat Vorrang)
+  WIFI_PSK            WLAN-Passwort, 8–63 Zeichen (leer = offenes Netz)
+  WIFI_COUNTRY        Land für den Funk, Standard DE
+  WIFI_HIDDEN         1 = verstecktes Netz
+  SSH_AUTHORIZED_KEY  öffentlicher SSH-Schlüssel (eine Zeile) → Anmeldung
+                      als "gcadmin" nur mit diesem Schlüssel; ohne: SSH aus
 
-Einstellungen (Zigbee/RaspBee II, Hostname): settings.txt in diesem Ordner.
+WIFI_PSK und SSH_AUTHORIZED_KEY werden beim Start aus settings.txt gelöscht
+(sie bleiben auf dem Pi gespeichert). Ungültige Werte stehen in STATUS.txt.
+
+Neu einrichten: einfach wieder eine gateway.env bzw. die neue ZIP hierher
+kopieren und den Pi neu starten.
+
 Anleitung: https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/deployment/raspberry-pi.md

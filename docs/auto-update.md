@@ -1,6 +1,6 @@
 # GateControl Gateway — Auto-Update
 
-The gateway supports server-triggered self-update via a file flag watched on the host. When the GateControl server schedules an update (via `POST /api/self-update`), it writes `/state/pending-update`. A host-side watcher detects the flag and runs `deploy/update.sh`.
+The gateway supports server-triggered self-update via a file flag watched on the host. When the GateControl server schedules an update (via `POST /api/self-update`), the container writes `/state/pending-update` — on the host that is `gateway-state/pending-update` next to `docker-compose.yml` (bind mount, see below). A host-side watcher detects the flag and runs `deploy/update.sh`.
 
 ---
 
@@ -30,17 +30,32 @@ The `.path` unit uses `inotify` to react to the flag within milliseconds.
 
 ### Install
 
-```bash
-# Copy units (adjust ExecStart path inside .service if gateway is not at /opt/gatecontrol-gateway)
-cp deploy/systemd/gatecontrol-gateway-update.service /etc/systemd/system/
-cp deploy/systemd/gatecontrol-gateway-update.path    /etc/systemd/system/
+Expected layout (as in [Linux / Docker](deployment/linux-docker.md)):
 
-# If the gateway lives elsewhere, edit ExecStart before enabling:
-# nano /etc/systemd/system/gatecontrol-gateway-update.service
+```
+/opt/gatecontrol-gateway/
+  docker-compose.yml
+  config/gateway.env
+  gateway-state/          # = /state in the container (flag, last-pull, update.log)
+  deploy/update.sh
+```
+
+```bash
+cd /opt/gatecontrol-gateway
+mkdir -p gateway-state deploy
+wget https://raw.githubusercontent.com/CallMeTechie/gatecontrol-gateway/main/deploy/update.sh -O deploy/update.sh
+chmod +x deploy/update.sh
+
+# systemd units (deploy/systemd/ in this repository)
+for u in gatecontrol-gateway-update.service gatecontrol-gateway-update.path; do
+  wget "https://raw.githubusercontent.com/CallMeTechie/gatecontrol-gateway/main/deploy/systemd/$u" -O "/etc/systemd/system/$u"
+done
 
 systemctl daemon-reload
 systemctl enable --now gatecontrol-gateway-update.path
 ```
+
+The `.path` unit watches the **host** path `/opt/gatecontrol-gateway/gateway-state/pending-update` (not `/state/…` — that path only exists inside the container). The `.service` sets `GC_GW_COMPOSE_DIR=/opt/gatecontrol-gateway` and `GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state`, so `update.sh` finds `docker-compose.yml` and reads/writes the same flag, `last-pull` and `update.log` the container sees. If the gateway lives elsewhere, change `PathExists=` in the `.path` unit and both `Environment=` lines plus `ExecStart=` in the `.service` before enabling.
 
 ### Verify
 
@@ -70,12 +85,12 @@ DSM does not support systemd. Use the built-in Task Scheduler with a short polli
    - **Schedule**: Repeat every **1 minute** (or 2 minutes to reduce overhead)
    - **Run command**:
      ```bash
-     /opt/gatecontrol-gateway/deploy/update.sh
+     GC_GW_COMPOSE_DIR=/opt/gatecontrol-gateway GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state /opt/gatecontrol-gateway/deploy/update.sh
      ```
-     Adjust the path if the repo is cloned elsewhere.
+     Adjust the paths if the gateway lives elsewhere (e.g. `/volume1/docker/gatecontrol-gateway`). `GATEWAY_STATE_DIR` must point to the host directory mounted as `/state` — without it the script looks for the flag in `/state`, which only exists inside the container.
 3. Save and enable the task.
 
-The script is safe to run on every invocation — if no `/state/pending-update` flag exists it exits immediately (after acquiring the lock, which takes < 1 ms). The flock lock also prevents overlap if a run takes longer than one polling interval.
+The script is safe to run on every invocation — if no `pending-update` flag exists in the state directory it exits immediately (after acquiring the lock, which takes < 1 ms). The flock lock also prevents overlap if a run takes longer than one polling interval.
 
 ---
 
@@ -84,7 +99,7 @@ The script is safe to run on every invocation — if no `/state/pending-update` 
 `update.sh` uses an exclusive non-blocking `flock` on `.update.lock` (next to `docker-compose.yml`). Key behaviors:
 
 - **Only one update at a time**: a second invocation while an update is running exits immediately without writing to `last-pull`.
-- **Consume-on-lock**: the flag (`/state/pending-update`) is read and then deleted inside the locked section. A new flag written by the server while an update is in progress will persist and trigger the next run — no update request is silently dropped.
+- **Consume-on-lock**: the flag (`gateway-state/pending-update`, `/state/pending-update` inside the container) is read and then deleted inside the locked section. A new flag written by the server while an update is in progress will persist and trigger the next run — no update request is silently dropped.
 - **request_id passthrough**: the `request_id` from the flag JSON is carried through to `last-pull`, letting the server match the telemetry to the original update request regardless of clock skew.
 
 ---
@@ -114,7 +129,7 @@ If the new container fails its health check within `GC_GW_HEALTH_CEILING` second
 
 1. Writes a `docker-compose.rollback.yml` override file that pins `image:` to the previous container's repo digest (e.g. `ghcr.io/callmetechie/gatecontrol-gateway@sha256:...`).
 2. Runs `docker compose -f docker-compose.yml -f docker-compose.rollback.yml up -d --force-recreate` to restore the old image.
-3. Records `"ok":false` in `/state/last-pull`, which the server telemetry endpoint reports upstream.
+3. Records `"ok":false` in `gateway-state/last-pull`, which the server telemetry endpoint reports upstream.
 
 On the next **successful** update the rollback override file is deleted, and the pinned digest is no longer in effect.
 

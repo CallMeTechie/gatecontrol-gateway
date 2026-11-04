@@ -38,8 +38,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
+      - name: nmcli für den Keyfile-Test (nur entpackt, kein NetworkManager-Dienst)
+        run: |
+          d="$RUNNER_TEMP/nm"
+          mkdir -p "$d" && cd "$d"
+          apt-get download network-manager libnm0
+          for f in *.deb; do dpkg -x "$f" root; done
+          lib="$(dirname "$(find "$d/root/usr/lib" -name 'libnm.so.0' | head -n1)")"
+          printf '#!/bin/sh\nLD_LIBRARY_PATH=%s exec %s "$@"\n' "$lib" "$d/root/usr/bin/nmcli" >"$d/nmcli"
+          chmod +x "$d/nmcli"
+          "$d/nmcli" --version
+          echo "GC_TEST_NMCLI=$d/nmcli" >> "$GITHUB_ENV"
       - name: rpi/check-config.sh
-        run: sudo --preserve-env=PATH rpi/check-config.sh
+        run: sudo --preserve-env=PATH,GC_TEST_NMCLI rpi/check-config.sh
 
   lint:
     runs-on: ubuntu-latest

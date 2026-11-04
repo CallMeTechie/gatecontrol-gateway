@@ -1,6 +1,6 @@
 #!/bin/bash
 # Schnelle statische Prüfung der Raspberry-Pi-Image-Konfiguration (für PRs,
-# ohne Image-Bau): shellcheck, Python-Tests, Erststart-Tests,
+# ohne Image-Bau): shellcheck, Python-Tests, Erststart- und settings.txt-Tests,
 # systemd-analyze verify, docker compose config, Pins in versions.env.
 #
 #   rpi/check-config.sh          (Erststart-Tests brauchen root → sudo)
@@ -32,6 +32,7 @@ step "shellcheck"
 mapfile -t sh_files < <(
   ls rpi/*.sh rpi/tests/*.sh rpi/stage-gatecontrol/*.sh rpi/stage-gatecontrol/*/*.sh
   echo "$R/usr/local/sbin/gatecontrol-start"
+  echo "$R/usr/local/sbin/gatecontrol-settings"
   echo "$R/usr/local/lib/gatecontrol/common.sh"
   echo "$R/etc/update-motd.d/60-gatecontrol"
 )
@@ -48,9 +49,11 @@ step "Python (hwdetect, Imager-Repository)"
 python3 -m py_compile "$R/usr/local/sbin/gatecontrol-hwdetect" rpi/make-imager-repo.py
 python3 -m unittest discover -s rpi/tests -p 'test_*.py' || die "Python-Tests"
 
-step "Erststart-Logik (gatecontrol-start)"
+step "Erststart-Logik (gatecontrol-start) und settings.txt (gatecontrol-settings)"
 if [ "$(id -u)" = 0 ]; then
   bash rpi/tests/test-gatecontrol-start.sh || die "Erststart-Tests"
+  # GC_TEST_NMCLI (optional): nmcli mit --offline für den Keyfile-Parser-Test
+  bash rpi/tests/test-gatecontrol-settings.sh || die "settings.txt-Tests"
 else
   echo "übersprungen (braucht root: sudo rpi/check-config.sh)"
 fi

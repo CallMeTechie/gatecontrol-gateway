@@ -16,14 +16,35 @@ GC_ISSUE_DIR="${GC_ISSUE_DIR:-/run/issue.d}"
 gc_log() { printf 'GateControl: %s\n' "$*"; }
 
 # gc_setting KEY [DEFAULT] — Wert aus settings.txt (KEY=VALUE, # = Kommentar,
-# Windows-Zeilenenden und Anführungszeichen werden toleriert).
+# Windows-Zeilenenden, UTF-8-BOM und Anführungszeichen werden toleriert).
 gc_setting() {
   local key="$1" def="${2:-}" val=""
   if [ -r "$GC_SETTINGS" ]; then
-    val="$(tr -d '\r' <"$GC_SETTINGS" | sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" | tail -n1 \
+    val="$(tr -d '\r' <"$GC_SETTINGS" | sed -e '1s/^\xEF\xBB\xBF//' \
+      | sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" | tail -n1 \
       | sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")"
   fi
   printf '%s' "${val:-$def}"
+}
+
+# gc_setting_raw KEY — Wert genau so, wie er hinter "KEY=" steht (letzte
+# Fundstelle; nur Zeilenende-CR und BOM werden entfernt, sonst nichts – für
+# WLAN-Name/-Passwort, die Leerzeichen und Anführungszeichen enthalten dürfen).
+# Rückgabe 1, wenn der Schlüssel fehlt (unterscheidet "fehlt" von "leer").
+gc_setting_raw() {
+  local key="$1" line val="" rc=1
+  [ -r "$GC_SETTINGS" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    line="${line#$'\xEF\xBB\xBF'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$line" == "$key="* ]]; then
+      val="${line#"$key="}"
+      rc=0
+    fi
+  done <"$GC_SETTINGS"
+  printf '%s' "$val"
+  return "$rc"
 }
 
 # gc_env_value FILE KEY — Wert einer KEY=VALUE-Zeile (erste Fundstelle).
@@ -42,11 +63,17 @@ gc_status() {
   printf '\n  GateControl Gateway: %s\n  %s\n\n' "$state" "$text" >"$GC_ISSUE_DIR/50-gatecontrol.issue" 2>/dev/null || true
   command -v agetty >/dev/null 2>&1 && agetty --reload >/dev/null 2>&1 || true
   if [ -d "$GC_BOOT_DIR" ]; then
-    local new
+    local new settings=""
+    # Ergebnis von gatecontrol-settings (WLAN, Zeitzone, SSH; ohne Geheimnisse)
+    if [ -s "$GC_RUN/settings.status" ]; then
+      settings="
+Einstellungen (settings.txt):
+$(sed 's/^/  - /' "$GC_RUN/settings.status")"
+    fi
     new="GateControl Gateway — Status: ${state}
-${text}
+${text}${settings}
 Hostname: $(hostname)
-Ausführliches Protokoll: journalctl -u gatecontrol-gateway -b"
+Ausführliches Protokoll: journalctl -u gatecontrol-gateway -u gatecontrol-settings -b"
     if [ "$(cat "$GC_BOOT_DIR/STATUS.txt" 2>/dev/null)" != "$new" ]; then
       printf '%s\n' "$new" >"$GC_BOOT_DIR/STATUS.txt" 2>/dev/null && sync -f "$GC_BOOT_DIR/STATUS.txt" 2>/dev/null || true
     fi

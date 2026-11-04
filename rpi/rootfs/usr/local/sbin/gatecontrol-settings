@@ -1,0 +1,490 @@
+#!/bin/bash
+# GateControl Gateway (Raspberry-Pi-Image) — Einstellungen von der SD-Karte.
+#
+# Läuft bei jedem Boot früh (gatecontrol-settings.service: nach dem Einhängen
+# von / und /boot/firmware, VOR NetworkManager und ssh) und kann von Hand
+# wiederholt werden:  sudo gatecontrol-settings
+#
+# Liest bootfs/gatecontrol/settings.txt (KEY=VALUE, # = Kommentar, CRLF/BOM ok):
+#   TIMEZONE            IANA-Zeitzone, z. B. Europe/Berlin
+#   WIFI_SSID           WLAN-Name → NetworkManager-Verbindung "gatecontrol-wifi"
+#   WIFI_PSK            WLAN-Passwort: 8–63 Zeichen oder 64 Hex (leer = offenes Netz)
+#   WIFI_COUNTRY        Funkland, ISO 3166 alpha-2 (Standard DE)
+#   WIFI_HIDDEN         0|1 – verstecktes Netz
+#   SSH_AUTHORIZED_KEY  öffentlicher OpenSSH-Schlüssel → Benutzer gcadmin
+#                       (sudo, kein Passwort), SSH nur mit Schlüssel
+# HOSTNAME und ZIGBEE werten gatecontrol-start bzw. gatecontrol-hwdetect aus.
+#
+# WIFI_PSK und SSH_AUTHORIZED_KEY werden danach aus der Datei auf der FAT-
+# Partition entfernt (Rest bleibt erhalten). Bei späteren Starts ohne
+# WIFI_PSK bleibt eine bereits eingerichtete Verbindung für dieselbe SSID
+# unverändert. Ungültige Werte werden im Journal und in STATUS.txt benannt,
+# der Rest wird weiter verarbeitet – das Skript hält den Start nie auf.
+#
+# Sicherheit: Die Datei wird nie als Shell-Code ausgewertet (kein source/
+# eval); Werte werden geprüft, nur gequotet verwendet und für den
+# NetworkManager-Keyfile kodiert (SSID als Byte-Liste, PSK mit Escapes).
+set -uo pipefail
+export LC_ALL=C   # Längen in Byte, Zeichenklassen = ASCII
+
+# shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
+. "${GC_LIB:-/usr/local/lib/gatecontrol}/common.sh"
+
+# Überschreibbar nur für die Tests (rpi/tests/)
+GC_VARLIB="${GC_VARLIB:-/var/lib}"
+GC_STATE="${GC_STATE:-$GC_VARLIB/gatecontrol}"
+GC_ZONEINFO="${GC_ZONEINFO:-/usr/share/zoneinfo}"
+GC_PROC_CMDLINE="${GC_PROC_CMDLINE:-/proc/cmdline}"
+
+WIFI_ID=gatecontrol-wifi
+NM_DIR="$GC_ETC/NetworkManager/system-connections"
+WIFI_FILE="$NM_DIR/$WIFI_ID.nmconnection"
+WIFI_STATE="$GC_STATE/wifi.state"
+ADMIN_USER=gcadmin
+SSH_STATE="$GC_STATE/ssh.state"
+SSHD_DROPIN="$GC_ETC/ssh/sshd_config.d/01-gatecontrol.conf"
+SUDOERS_FILE="$GC_ETC/sudoers.d/010_gatecontrol-gcadmin"
+
+STATUS_LINES=()
+CHANGED=0
+ERRORS=0
+note() { gc_log "$*"; STATUS_LINES+=("$*"); }
+fail() { gc_log "FEHLER: $*"; STATUS_LINES+=("FEHLER: $*"); ERRORS=$((ERRORS + 1)); }
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+# Für Meldungen: ungültige Eingaben nur entschärft und gekürzt zeigen.
+shown() { printf '%s' "$1" | tr -cd 'A-Za-z0-9/_+.-' | cut -c1-40; }
+
+nm_active() { systemctl is-active --quiet NetworkManager.service 2>/dev/null; }
+
+# write_atomic DEST MODE — stdin nach DEST (temporäre Datei im selben
+# Verzeichnis, dann rename). Temporäre Namen beginnen mit "." und enden nicht
+# auf .conf – NetworkManager, sudo und sshd lesen sie nie.
+write_atomic() {
+  local dest="$1" mode="$2" tmp
+  tmp="$(mktemp "$(dirname "$dest")/.gc-tmp.XXXXXX")" || return 1
+  if cat >"$tmp" && chmod "$mode" "$tmp" && chown root:root "$tmp" && mv -f "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# ─── Zeitzone ──────────────────────────────────────────────────────────────
+
+apply_timezone() {
+  local tz zf
+  tz="$(trim "$(gc_setting_raw TIMEZONE)")"
+  [ -n "$tz" ] || return 0
+  zf="$GC_ZONEINFO/$tz"
+  # Nur Namen wie Europe/Berlin, Etc/GMT+1, UTC – kein "..", keine absoluten Pfade.
+  if [ "${#tz}" -gt 64 ] || ! [[ "$tz" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] \
+     || [ ! -f "$zf" ] || [ "$(head -c4 "$zf" 2>/dev/null)" != TZif ]; then
+    fail "TIMEZONE \"$(shown "$tz")\" ist keine bekannte Zeitzone (Beispiel: Europe/Berlin) – Zeitzone nicht geändert"
+    return 1
+  fi
+  if [ "$(readlink "$GC_ETC/localtime" 2>/dev/null)" != "$zf" ]; then
+    rm -f "$GC_ETC/.localtime.gc"
+    if ! { ln -s "$zf" "$GC_ETC/.localtime.gc" && mv -fT "$GC_ETC/.localtime.gc" "$GC_ETC/localtime"; }; then
+      fail "Zeitzone $tz konnte nicht gesetzt werden"
+      return 1
+    fi
+    printf '%s\n' "$tz" | write_atomic "$GC_ETC/timezone" 0644 || true
+    # Läuft das System schon (Aufruf von Hand), timedated Bescheid geben.
+    if systemctl is-active --quiet dbus.service 2>/dev/null && [ "$GC_ETC" = /etc ]; then
+      timedatectl set-timezone "$tz" >/dev/null 2>&1 || true
+    fi
+    CHANGED=1
+    gc_log "Zeitzone gesetzt: $tz"
+  fi
+  STATUS_LINES+=("Zeitzone: $tz")
+}
+
+# ─── WLAN ──────────────────────────────────────────────────────────────────
+
+valid_country() {
+  [[ "$1" =~ ^[A-Z]{2}$ ]] || return 1
+  [ -r "$GC_ZONEINFO/iso3166.tab" ] || return 0
+  grep -q "^$1[[:space:]]" "$GC_ZONEINFO/iso3166.tab"
+}
+
+# SSID als Liste der Byte-Werte ("67;97;102;195;169;"): von NetworkManager
+# (Keyfile) für beliebige Bytes unterstützt – damit braucht es für ";",
+# "\", Leerzeichen, Anführungszeichen und Umlaute keine Escape-Regeln.
+nm_ssid() {
+  printf '%s' "$1" | od -An -tu1 -v | awk '{ for (i = 1; i <= NF; i++) printf "%s;", $i }'
+}
+
+# PSK für das Keyfile (GKeyFile-String): "\" → "\\", Leerzeichen → "\s"
+# (sonst gingen führende/abschließende Leerzeichen verloren). ";" bleibt
+# unverändert – "\;" wäre in einem String eine ungültige Escape-Sequenz.
+nm_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s// /\\s}"
+  printf '%s' "$s"
+}
+
+# write_wifi SSID SECURITY(psk|open) PSK HIDDEN(0|1)
+write_wifi() {
+  local ssid="$1" sec="$2" psk="$3" hidden="$4" uuid
+  uuid="$(cat /proc/sys/kernel/random/uuid)" || return 1
+  [ -d "$NM_DIR" ] || install -d -m 0700 -o root -g root "$NM_DIR" || return 1
+  {
+    echo "# Erzeugt von gatecontrol-settings aus bootfs/gatecontrol/settings.txt."
+    echo "# Wird durch eine neue settings.txt mit WIFI_SSID ersetzt."
+    echo "[connection]"
+    echo "id=$WIFI_ID"
+    echo "uuid=$uuid"
+    echo "type=wifi"
+    echo "autoconnect=true"
+    echo "autoconnect-retries=0"
+    echo
+    echo "[wifi]"
+    echo "mode=infrastructure"
+    echo "ssid=$(nm_ssid "$ssid")"
+    if [ "$hidden" = 1 ]; then echo "hidden=true"; fi
+    echo
+    if [ "$sec" = psk ]; then
+      echo "[wifi-security]"
+      echo "key-mgmt=wpa-psk"
+      echo "psk=$(nm_escape "$psk")"
+      echo
+    fi
+    # LAN behält Vorrang: NetworkManager gibt Ethernet Metrik 100, hier 600.
+    echo "[ipv4]"
+    echo "method=auto"
+    echo "route-metric=600"
+    echo
+    echo "[ipv6]"
+    echo "addr-gen-mode=default"
+    echo "method=auto"
+    echo "route-metric=600"
+  } | write_atomic "$WIFI_FILE" 0600
+}
+
+set_wifi_hidden() {  # nur das hidden-Flag einer bestehenden Verbindung ändern
+  awk -v h="$1" '/^hidden=/ { next } { print } /^\[wifi\]$/ && h == 1 { print "hidden=true" }' \
+    "$WIFI_FILE" | write_atomic "$WIFI_FILE" 0600
+}
+
+write_wifi_state() {  # ssid_sha256 security hidden country (nur bei Änderung schreiben)
+  local new
+  new="$(printf 'ssid_sha256=%s\nsecurity=%s\nhidden=%s\ncountry=%s' "$@")"
+  [ "$(cat "$WIFI_STATE" 2>/dev/null)" = "$new" ] && return 0
+  printf '%s\n' "$new" | write_atomic "$WIFI_STATE" 0600
+}
+
+# Funkland setzen und WLAN entsperren (Raspberry Pi OS sperrt WLAN per rfkill,
+# bis ein Land gesetzt ist). raspi-config trägt das Land dauerhaft in
+# cmdline.txt ein (cfg80211.ieee80211_regdom) und setzt es sofort per iw.
+apply_country() {
+  local c="$1" f
+  if [ "$(gc_env_value "$WIFI_STATE" country)" = "$c" ] \
+     && grep -qw "cfg80211.ieee80211_regdom=$c" "$GC_PROC_CMDLINE" 2>/dev/null; then
+    return 0
+  fi
+  modprobe cfg80211 >/dev/null 2>&1 || true   # damit "iw reg set" schon beim ersten Start greift
+  if command -v raspi-config >/dev/null 2>&1; then
+    raspi-config nonint do_wifi_country "$c" >/dev/null 2>&1 \
+      || gc_log "Hinweis: raspi-config do_wifi_country $c meldete einen Fehler"
+  elif command -v iw >/dev/null 2>&1; then
+    iw reg set "$c" >/dev/null 2>&1 || true
+  fi
+  # Unabhängig von raspi-config: WLAN entsperren (auch wenn das Gerät erst
+  # später erscheint – systemd-rfkill und NetworkManager lesen diesen Stand).
+  if nm_active; then
+    nmcli radio wifi on >/dev/null 2>&1 || true
+  else
+    rfkill unblock wifi >/dev/null 2>&1 || true
+    f="$GC_VARLIB/NetworkManager/NetworkManager.state"
+    if [ -f "$f" ] && grep -q '^WirelessEnabled=' "$f"; then
+      sed -i 's/^WirelessEnabled=.*/WirelessEnabled=true/' "$f"
+    fi
+  fi
+  for f in "$GC_VARLIB"/systemd/rfkill/*:wlan; do
+    [ -e "$f" ] && echo 0 >"$f"
+  done
+  gc_log "WLAN-Land gesetzt: $c"
+  return 0
+}
+
+apply_wifi() {
+  local wchanged=0 ssid psk psk_set=0 country hidden_raw hidden sec fp old_fp what
+  ssid="$(gc_setting_raw WIFI_SSID)"
+  psk="$(gc_setting_raw WIFI_PSK)" || psk_set=1     # 1 = Schlüssel fehlt
+  if [ -z "$ssid" ]; then
+    [ "$psk_set" = 0 ] && [ -n "$psk" ] && fail "WIFI_PSK ohne WIFI_SSID – ignoriert"
+    if [ -f "$WIFI_FILE" ]; then STATUS_LINES+=("WLAN: Verbindung $WIFI_ID von früher bleibt bestehen"); fi
+    return 0
+  fi
+
+  if [ "${#ssid}" -gt 32 ]; then
+    fail "WIFI_SSID ist länger als 32 Byte – WLAN nicht geändert"; return 1
+  fi
+  if [[ "$ssid" =~ [[:cntrl:]] ]] || ! printf '%s' "$ssid" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+    fail "WIFI_SSID enthält Steuerzeichen oder ist kein gültiges UTF-8 – WLAN nicht geändert"; return 1
+  fi
+
+  country="$(trim "$(gc_setting_raw WIFI_COUNTRY)")"
+  country="${country^^}"
+  [ -n "$country" ] || country=DE
+  if ! valid_country "$country"; then
+    fail "WIFI_COUNTRY \"$(shown "$country")\" ist kein Ländercode nach ISO 3166 (z. B. DE, AT, CH) – verwende DE"
+    country=DE
+  fi
+
+  hidden_raw="$(trim "$(gc_setting_raw WIFI_HIDDEN)")"
+  case "$hidden_raw" in
+    "" | 0) hidden=0 ;;
+    1) hidden=1 ;;
+    *) fail "WIFI_HIDDEN muss 0 oder 1 sein – verwende 0"; hidden=0 ;;
+  esac
+
+  fp="$(printf '%s' "$ssid" | sha256sum | cut -d' ' -f1)"
+  old_fp="$(gc_env_value "$WIFI_STATE" ssid_sha256)"
+
+  if [ "$psk_set" = 0 ]; then
+    if [ -z "$psk" ]; then
+      sec=open
+    elif [[ "$psk" =~ ^[0-9A-Fa-f]{64}$ ]] || [[ "$psk" =~ ^[[:print:]]{8,63}$ ]]; then
+      sec=psk
+    else
+      fail "WIFI_PSK muss 8–63 Zeichen (Buchstaben, Ziffern, Sonderzeichen; keine Umlaute) oder 64 Hex-Zeichen lang sein – WLAN nicht geändert"
+      return 1
+    fi
+    write_wifi "$ssid" "$sec" "$psk" "$hidden" || { fail "WLAN-Verbindung konnte nicht geschrieben werden"; return 1; }
+    CHANGED=1; wchanged=1
+    gc_log "WLAN-Verbindung $WIFI_ID für \"$ssid\" geschrieben"
+  elif [ "$fp" = "$old_fp" ]; then
+    # Späterer Start: Passwort wurde schon übernommen und von der Karte entfernt.
+    if [ ! -f "$WIFI_FILE" ]; then
+      note "WLAN: Verbindung $WIFI_ID wurde auf dem Pi gelöscht – zum Neu-Einrichten WIFI_SSID und WIFI_PSK erneut eintragen"
+      return 0
+    fi
+    sec="$(gc_env_value "$WIFI_STATE" security)"
+    if [ "$hidden" != "$(gc_env_value "$WIFI_STATE" hidden)" ]; then
+      set_wifi_hidden "$hidden" || { fail "WIFI_HIDDEN konnte nicht übernommen werden"; return 1; }
+      CHANGED=1; wchanged=1
+    fi
+  else
+    # Neue SSID ohne WIFI_PSK-Zeile = offenes Netz
+    sec=open
+    write_wifi "$ssid" open "" "$hidden" || { fail "WLAN-Verbindung konnte nicht geschrieben werden"; return 1; }
+    CHANGED=1; wchanged=1
+    gc_log "WLAN-Verbindung $WIFI_ID für \"$ssid\" (offenes Netz) geschrieben"
+  fi
+
+  apply_country "$country"
+  write_wifi_state "$fp" "$sec" "$hidden" "$country" || fail "WLAN-Status konnte nicht gespeichert werden"
+
+  if [ "$wchanged" = 1 ] && nm_active; then   # Aufruf von Hand bei laufendem System
+    nmcli connection reload >/dev/null 2>&1 || true
+    nmcli --wait 30 connection up id "$WIFI_ID" >/dev/null 2>&1 \
+      || gc_log "Hinweis: WLAN \"$ssid\" noch nicht verbunden (in Reichweite? Passwort richtig?)"
+  fi
+
+  what="mit Passwort (WPA2-PSK)"
+  [ "$sec" = open ] && what="offenes Netz"
+  [ "$hidden" = 1 ] && what="$what, verstecktes Netz"
+  STATUS_LINES+=("WLAN: \"$ssid\" (Land $country, $what; LAN-Kabel hat Vorrang)")
+}
+
+# ─── SSH ───────────────────────────────────────────────────────────────────
+
+ensure_admin_user() {
+  if ! getent passwd "$ADMIN_USER" >/dev/null 2>&1; then
+    useradd --create-home --shell /bin/bash --comment "GateControl Admin" --groups sudo "$ADMIN_USER" || return 1
+    gc_log "Benutzer $ADMIN_USER angelegt"
+  fi
+  usermod --append --groups sudo "$ADMIN_USER" || return 1
+  # Kein (gültiges) Passwort: Anmeldung nur mit Schlüssel, sudo ohne Passwort.
+  usermod --password '*' "$ADMIN_USER" || return 1
+}
+
+# validate_ssh_key LINE → setzt KEY_DESC ("ED25519 SHA256:…") oder meldet den Fehler
+validate_ssh_key() {
+  local key="$1" type blob comment tmp info bits want got
+  KEY_DESC=""
+  if [ "${#key}" -gt 16384 ] || [[ "$key" =~ [[:cntrl:]] ]]; then
+    fail "SSH_AUTHORIZED_KEY muss genau eine Zeile ohne Steuerzeichen sein – SSH nicht geändert"; return 1
+  fi
+  read -r type blob comment <<<"$key"
+  case "$type" in
+    ssh-ed25519) want=ED25519 ;;
+    ecdsa-sha2-nistp256 | ecdsa-sha2-nistp384 | ecdsa-sha2-nistp521) want=ECDSA ;;
+    ssh-rsa) want=RSA ;;
+    *)
+      fail "SSH_AUTHORIZED_KEY: erlaubt sind ssh-ed25519, ecdsa-sha2-nistp256/384/521 und ssh-rsa (ab 3072 Bit), ohne Optionen davor (z. B. command=) – SSH nicht geändert"
+      return 1 ;;
+  esac
+  if ! [[ "$blob" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]; then
+    fail "SSH_AUTHORIZED_KEY: Schlüsseldaten sind kein Base64 – SSH nicht geändert"; return 1
+  fi
+  if ! command -v ssh-keygen >/dev/null 2>&1; then
+    fail "SSH_AUTHORIZED_KEY: ssh-keygen fehlt, Schlüssel kann nicht geprüft werden"; return 1
+  fi
+  tmp="$(mktemp)" || return 1
+  printf '%s %s\n' "$type" "$blob" >"$tmp"
+  info="$(ssh-keygen -l -E sha256 -f "$tmp" 2>/dev/null)"
+  rm -f "$tmp"
+  # Ausgabe: "<Bits> SHA256:<Hash> no comment (<TYP>)"
+  bits="${info%% *}"
+  got="${info##*(}"
+  got="${got%)}"
+  if [ -z "$info" ] || ! [[ "$bits" =~ ^[0-9]+$ ]] || [ "$got" != "$want" ]; then
+    fail "SSH_AUTHORIZED_KEY ist kein gültiger $type-Schlüssel (beschädigt oder Typ passt nicht) – SSH nicht geändert"; return 1
+  fi
+  if [ "$want" = RSA ] && [ "$bits" -lt 3072 ]; then
+    fail "SSH_AUTHORIZED_KEY: RSA-Schlüssel hat nur $bits Bit, nötig sind mindestens 3072 (besser ssh-ed25519) – SSH nicht geändert"; return 1
+  fi
+  KEY_DESC="$got $(printf '%s' "$info" | awk '{ print $2 }')"
+  KEY_LINE="$type $blob${comment:+ $comment}"
+}
+
+apply_ssh() {
+  local key pw home uid gid sshd_unit=ssh.service
+  key="$(gc_setting_raw SSH_AUTHORIZED_KEY)"
+  key="$(trim "$key")"
+  if [ -z "$key" ]; then
+    # Ohne Schlüssel bleibt SSH, wie es ist (im Image aus).
+    if [ -s "$SSH_STATE" ]; then
+      STATUS_LINES+=("SSH: Benutzer $ADMIN_USER, nur mit Schlüssel ($(gc_env_value "$SSH_STATE" key))")
+    fi
+    return 0
+  fi
+  validate_ssh_key "$key" || return 1
+
+  ensure_admin_user || { fail "Benutzer $ADMIN_USER konnte nicht angelegt werden – SSH nicht geändert"; return 1; }
+  pw="$(getent passwd "$ADMIN_USER")"
+  uid="$(printf '%s' "$pw" | cut -d: -f3)"
+  gid="$(printf '%s' "$pw" | cut -d: -f4)"
+  home="$(printf '%s' "$pw" | cut -d: -f6)"
+  if ! [[ "$uid" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || [ -z "$home" ] || [ "$home" = / ]; then
+    fail "Benutzer $ADMIN_USER ist unvollständig – SSH nicht geändert"; return 1
+  fi
+  [ -d "$home" ] || install -d -m 0700 -o "$uid" -g "$gid" "$home"
+  if ! { install -d -m 0700 -o "$uid" -g "$gid" "$home/.ssh" \
+         && printf '%s\n' "$KEY_LINE" | write_atomic "$home/.ssh/authorized_keys" 0600 \
+         && chown "$uid:$gid" "$home/.ssh/authorized_keys"; }; then
+    fail "authorized_keys konnte nicht geschrieben werden – SSH nicht geändert"
+    return 1
+  fi
+
+  # sudo ohne Passwort (der Benutzer hat keins)
+  [ -d "$GC_ETC/sudoers.d" ] || install -d -m 0755 "$GC_ETC/sudoers.d"
+  printf '# GateControl: Administrator für SSH-Zugang (gatecontrol-settings)\n%s ALL=(ALL:ALL) NOPASSWD: ALL\n' "$ADMIN_USER" \
+    | write_atomic "$SUDOERS_FILE" 0440 || fail "sudo-Regel für $ADMIN_USER konnte nicht geschrieben werden"
+  if command -v visudo >/dev/null 2>&1 && ! visudo -cqf "$SUDOERS_FILE" >/dev/null 2>&1; then
+    rm -f "$SUDOERS_FILE"
+    fail "sudo-Regel für $ADMIN_USER ungültig – entfernt"
+  fi
+
+  # sshd: nur Schlüssel. 01-… wird vor 50-cloud-init.conf gelesen; bei sshd
+  # gilt der erste Wert, also gewinnt diese Datei auch gegen Imager-Vorgaben.
+  [ -d "$GC_ETC/ssh/sshd_config.d" ] || install -d -m 0755 "$GC_ETC/ssh/sshd_config.d"
+  cat <<'EOF' | write_atomic "$SSHD_DROPIN" 0644 || { fail "sshd-Einstellungen konnten nicht geschrieben werden"; return 1; }
+# GateControl (gatecontrol-settings): SSH nur mit Schlüssel, kein root-Login.
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AuthenticationMethods publickey
+EOF
+  # Hostschlüssel fehlen im Image (werden pro Gerät erzeugt).
+  if ! compgen -G "$GC_ETC/ssh/ssh_host_*_key" >/dev/null; then
+    if [ "$GC_ETC" = /etc ]; then ssh-keygen -q -A; else ssh-keygen -q -A -f "${GC_ETC%/etc}"; fi \
+      || fail "SSH-Hostschlüssel konnten nicht erzeugt werden"
+  fi
+  if [ -f "$GC_ETC/ssh/sshd_config" ] && command -v sshd >/dev/null 2>&1 \
+     && ! sshd -t -f "$GC_ETC/ssh/sshd_config" >/dev/null 2>&1; then
+    fail "sshd-Konfiguration fehlerhaft (sshd -t) – bitte per Bildschirm prüfen"
+  fi
+
+  systemctl enable --no-reload "$sshd_unit" >/dev/null 2>&1 || fail "ssh.service konnte nicht aktiviert werden"
+  if systemctl is-active --quiet "$sshd_unit" 2>/dev/null; then
+    systemctl reload-or-restart "$sshd_unit" >/dev/null 2>&1 || true
+  else
+    systemctl start --no-block "$sshd_unit" >/dev/null 2>&1 || true
+  fi
+  printf 'key=%s\n' "$KEY_DESC" | write_atomic "$SSH_STATE" 0600 || true
+  CHANGED=1
+  gc_log "SSH aktiviert: Benutzer $ADMIN_USER, Schlüssel $KEY_DESC"
+  STATUS_LINES+=("SSH: Benutzer $ADMIN_USER, nur mit Schlüssel ($KEY_DESC)")
+}
+
+# ─── Geheimnisse von der FAT-Partition entfernen ───────────────────────────
+
+# WIFI_PSK- und SSH_AUTHORIZED_KEY-Zeilen durch einen Hinweis ersetzen, alles
+# andere (inkl. Zeilenenden) unverändert lassen; atomar neu schreiben.
+scrub_secrets() {
+  local f="$GC_SETTINGS" tmp line probe cr n=0
+  [ -f "$f" ] || return 0
+  tmp="$(mktemp "$(dirname "$f")/.settings.XXXXXX")" || return 1
+  shopt -s nocasematch
+  while IFS= read -r line || [ -n "$line" ]; do
+    probe="${line%$'\r'}"
+    probe="${probe#$'\xEF\xBB\xBF'}"
+    probe="${probe#"${probe%%[![:space:]]*}"}"
+    if [[ "$probe" =~ ^(WIFI_PSK|SSH_AUTHORIZED_KEY)[[:space:]]*= ]]; then
+      cr=""
+      [[ "$line" == *$'\r' ]] && cr=$'\r'
+      printf '# %s wurde übernommen und aus Sicherheitsgründen von der SD-Karte entfernt.%s\n' \
+        "${BASH_REMATCH[1]^^}" "$cr"
+      n=$((n + 1))
+    else
+      printf '%s\n' "$line"
+    fi
+  done <"$f" >"$tmp"
+  shopt -u nocasematch
+  if [ "$n" = 0 ]; then rm -f "$tmp"; return 0; fi
+  if mv -f "$tmp" "$f"; then
+    sync -f "$f" 2>/dev/null || sync
+    gc_log "WLAN-Passwort/SSH-Schlüssel aus settings.txt auf der SD-Karte entfernt"
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+main() {
+  [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen (sudo gatecontrol-settings)" >&2; exit 1; }
+  install -d -m 0755 "$GC_RUN"
+  rm -f "$GC_RUN/settings.status"
+  if [ ! -r "$GC_SETTINGS" ]; then
+    gc_log "keine settings.txt auf der Boot-Partition – nichts zu tun"
+    exit 0
+  fi
+  install -d -m 0700 -o root -g root "$GC_STATE"
+
+  apply_timezone || true
+  apply_wifi || true
+  apply_ssh || true
+  if ! scrub_secrets; then
+    fail "WIFI_PSK/SSH_AUTHORIZED_KEY konnten nicht von der SD-Karte entfernt werden – bitte am PC löschen"
+  fi
+
+  if [ "${#STATUS_LINES[@]}" -gt 0 ]; then
+    printf '%s\n' "${STATUS_LINES[@]}" >"$GC_RUN/settings.status"
+  fi
+  # STATUS.txt nur bei Änderungen/Fehlern sofort schreiben (schont die SD-
+  # Karte); gatecontrol-start ergänzt den Stand ohnehin bei jedem Start.
+  if [ "$CHANGED" = 1 ] || [ "$ERRORS" -gt 0 ]; then
+    if [ "$ERRORS" -gt 0 ]; then
+      gc_status "EINSTELLUNGEN MIT FEHLERN" "settings.txt enthält ungültige Werte (siehe unten); alles andere wurde übernommen. Das Gateway startet trotzdem."
+    else
+      gc_status "STARTET" "Einstellungen aus settings.txt übernommen – Netzwerk und Gateway starten."
+    fi
+  fi
+  exit 0
+}
+
+KEY_DESC=""
+KEY_LINE=""
+main "$@"
