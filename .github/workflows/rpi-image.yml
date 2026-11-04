@@ -8,6 +8,10 @@ name: Raspberry Pi Image
 # Kein Bau bei PRs — dort prüft test.yml (Job rpi-image-config) nur die Konfiguration.
 
 on:
+  # TEMPORÄR: Probe-Bau auf dem Feature-Branch (workflow_dispatch geht erst,
+  # wenn die Datei auf main liegt). Vor dem Merge wieder entfernen.
+  push:
+    branches: [feat/raspberry-pi-image]
   workflow_dispatch:
     inputs:
       tag:
@@ -94,6 +98,9 @@ jobs:
         run: |
           sudo rpi/verify-image.sh "$BASE/out/$NAME.img.xz" "$VERSION"
           cat "$BASE/out/$NAME.img.extract"
+          # Build-Container und verify-image.sh laufen als root — die
+          # folgenden Schritte (Python, Upload) als runner.
+          sudo chown -R "$(id -u):$(id -g)" "$BASE/out"
 
       - name: deCONZ-Container auf arm64 (Ports 8090/8091, RAM)
         continue-on-error: true
@@ -104,7 +111,8 @@ jobs:
           cd "$D"
           # Ohne Funkmodul: /dev/null als Gerät — deCONZ startet trotzdem REST-API/Phoscon.
           GC_ZIGBEE_DEVICE=/dev/null docker compose up -d deconz
-          for _ in $(seq 1 60); do curl -fsS -o /dev/null http://127.0.0.1:8090/api/config && break; sleep 2; done
+          # warten, bis deCONZ lauscht (die ersten Versuche scheitern erwartungsgemäß)
+          for _ in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:8090/api/config && break; sleep 2; done
           curl -fsS http://127.0.0.1:8090/api/config | jq -c '{name, swversion, websocketport}'
           sudo ss -ltnp | grep -E ':(8090|8091)\b'
           sleep 20
