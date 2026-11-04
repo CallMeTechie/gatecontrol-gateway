@@ -104,6 +104,82 @@ function diskUsage() {
   }
 }
 
+// ─── Hardware profile ────────────────────────────────────────────────────
+// Lets the server later recommend features per gateway (weak hardware gets a
+// hint, never a ban). Inside the container /proc/device-tree is masked, so a
+// host that knows more (the Raspberry Pi image: gatecontrol-hwdetect) drops
+// /state/hardware.json; everything in it is treated as untrusted input and
+// clamped. Without that file the profile comes from what the container sees.
+
+const HOST_PROFILE_MAX_BYTES = 8192;
+
+function _str(v, max = 120) {
+  return typeof v === 'string' && v.length > 0 ? v.slice(0, max) : null;
+}
+
+function _readHostProfile() {
+  try {
+    const file = path.join(STATE_DIR, 'hardware.json');
+    if (fs.statSync(file).size > HOST_PROFILE_MAX_BYTES) return null;
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return j && typeof j === 'object' && !Array.isArray(j) ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Board/product name as far as the container can see it (Pi: /proc/cpuinfo "Model"). */
+function _visibleModel() {
+  try {
+    const m = /^Model\s*:\s*(.+)$/m.exec(fs.readFileSync('/proc/cpuinfo', 'utf8'));
+    if (m) return m[1].trim();
+  } catch { /* not a Pi / not Linux */ }
+  for (const f of ['/sys/firmware/devicetree/base/model', '/sys/class/dmi/id/product_name']) {
+    try {
+      const v = fs.readFileSync(f, 'utf8').replace(/\0/g, '').trim();
+      if (v) return v;
+    } catch { /* masked or absent */ }
+  }
+  return null;
+}
+
+function _storage(dir) {
+  try {
+    if (typeof fs.statfsSync !== 'function') return null;
+    const st = fs.statfsSync(dir);
+    return { total: st.blocks * st.bsize, free: st.bavail * st.bsize };
+  } catch {
+    return null;
+  }
+}
+
+function hardwareProfile() {
+  const host = _readHostProfile();
+  const radios = Array.isArray(host?.radios)
+    ? host.radios.slice(0, 8).filter(r => r && typeof r === 'object').map(r => ({
+      kind: _str(r.kind, 32),
+      type: _str(r.type, 32),
+      device: _str(r.device, 128),
+      firmware: _str(r.firmware, 32),
+      detected: r.detected === true,
+      enabled: r.enabled === true,
+    }))
+    : [];
+  return {
+    model: _str(host?.model) || _str(_visibleModel()),
+    arch: process.arch,
+    cpu_cores: os.cpus().length,
+    mem_total: os.totalmem(),
+    // /state is the host's gateway-state dir — its filesystem is where the
+    // gateway (and future add-ons) keep data, e.g. /opt on the Pi image.
+    storage: _storage(STATE_DIR),
+    radios,
+    platform: _str(host?.source, 32),
+    image_version: _str(host?.image_version, 32),
+    host_os: _str(host?.os),
+  };
+}
+
 function collectTelemetry() {
   const memTotal = os.totalmem();
   const memFree = os.freemem();
@@ -125,6 +201,7 @@ function collectTelemetry() {
     mem_free: memFree,
     mem_used: memTotal - memFree,
     disk: diskUsage(),
+    hardware: hardwareProfile(),
 
     // LAN context
     dns_resolvers: dns.getServers(),
@@ -154,4 +231,4 @@ function collectTelemetry() {
   };
 }
 
-module.exports = { collectTelemetry, defaultGatewayIp };
+module.exports = { collectTelemetry, defaultGatewayIp, hardwareProfile };

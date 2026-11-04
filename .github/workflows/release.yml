@@ -12,6 +12,9 @@ permissions:
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      released: ${{ steps.release.outcome == 'success' }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -128,6 +131,7 @@ jobs:
           output-file: sbom.cdx.json
 
       - name: GitHub Release
+        id: release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main'
         with:
@@ -158,3 +162,18 @@ jobs:
           # Override entrypoint — real entrypoint needs /config/gateway.env which we don't have
           docker run --rm --platform ${{ matrix.platform }} --entrypoint node \
             ghcr.io/callmetechie/gatecontrol-gateway:latest -e "console.log('ok')"
+
+  # Raspberry-Pi-Image (pi-gen, ~45-60 min auf nativem arm64-Runner) — nur wenn
+  # wirklich ein Release entstanden ist. Läuft als eigener Job hier im Release-
+  # Workflow, weil der mit GITHUB_TOKEN gepushte Tag keine anderen Workflows
+  # auslöst. Ein Fehlschlag hier macht das Docker-Release nicht ungültig;
+  # nachholen über Actions → "Raspberry Pi Image" (tag = vX.Y.Z, upload = an).
+  rpi-image:
+    needs: build-and-release
+    if: needs.build-and-release.result == 'success' && needs.build-and-release.outputs.released == 'true'
+    uses: ./.github/workflows/rpi-image.yml
+    with:
+      tag: ${{ needs.build-and-release.outputs.tag }}
+      upload: true
+    permissions:
+      contents: write

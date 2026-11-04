@@ -51,6 +51,10 @@ journalctl -u gatecontrol-gateway-update.service -f
 
 The `.path` unit re-arms automatically after the flag is removed (consumed on lock), so every new flag triggers a fresh run.
 
+### Raspberry Pi image
+
+The [Raspberry Pi image](deployment/raspberry-pi.md) ships this already set up: `update.sh` at `/opt/gatecontrol-gateway/update.sh` and the units `gatecontrol-gateway-update.path` (watches `/opt/gatecontrol-gateway/gateway-state/pending-update` on the host) + `gatecontrol-gateway-update.timer` (every 5 min as a safety net), both with `GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state`. Nothing to install.
+
 ---
 
 ## Synology DSM — Task Scheduler (polling)

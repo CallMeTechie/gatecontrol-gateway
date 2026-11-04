@@ -1,0 +1,18 @@
+GateControl Home Gateway — Raspberry Pi
+=======================================
+
+1. In GateControl das Gateway anlegen und die Datei gateway.env
+   (bzw. gateway-<Nummer>.env) herunterladen.
+2. Die Datei in DIESEN Ordner kopieren (Laufwerk "bootfs", Ordner
+   "gatecontrol"). Der Name darf gateway.env oder gateway-<Nummer>.env sein.
+3. SD-Karte in den Pi stecken, Netzwerkkabel anschließen, Strom an.
+
+Beim Start übernimmt der Pi die Datei, löscht sie von der SD-Karte und
+startet das Gateway. Nach einigen Minuten erscheint es in GateControl als
+"online". Das Ergebnis steht danach auch in STATUS.txt in diesem Ordner.
+
+Neu einrichten: einfach wieder eine gateway.env hierher kopieren und den Pi
+neu starten.
+
+Einstellungen (Zigbee/RaspBee II, Hostname): settings.txt in diesem Ordner.
+Anleitung: https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/deployment/raspberry-pi.md

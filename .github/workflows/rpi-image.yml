@@ -1,0 +1,160 @@
+name: Raspberry Pi Image
+
+# Baut das Raspberry-Pi-Image (Raspberry Pi OS Lite 64 bit + Gateway) mit
+# pi-gen und hängt es an ein Release an.
+#  - automatisch: aus release.yml (workflow_call) nach erfolgreichem Image-Push
+#  - von Hand:    Actions → "Raspberry Pi Image" → Run workflow
+#                 (tag leer = Probe-Bau des gewählten Branches, nichts wird angehängt)
+# Kein Bau bei PRs — dort prüft test.yml (Job rpi-image-config) nur die Konfiguration.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release-Tag (z. B. v1.17.0) – leer = Probe-Bau des gewählten Branches ohne Upload'
+        required: false
+        default: ''
+      upload:
+        description: 'Image an das Release mit diesem Tag anhängen'
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      upload:
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rpi-image-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    # Nativer arm64-Runner: pi-gen unterstützt nur native Builds (kein QEMU).
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.sha }}
+
+      - name: Version bestimmen
+        id: v
+        run: |
+          if [ -n "$TAG" ]; then
+            [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Tag muss vX.Y.Z sein: $TAG" >&2; exit 1; }
+            VERSION="${TAG#v}"
+          else
+            VERSION="$(jq -r .version package.json)-dev.$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "name=gatecontrol-gateway-$VERSION-rpi-arm64" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Arbeitsverzeichnis mit genug Platz wählen
+        id: disk
+        run: |
+          df -h / /mnt 2>/dev/null || df -h /
+          if [ -d /mnt ] && [ "$(df --output=avail -B1G /mnt | tail -1)" -gt "$(df --output=avail -B1G "$RUNNER_TEMP" | tail -1)" ]; then
+            BASE=/mnt/gc-rpi
+          else
+            BASE="$RUNNER_TEMP/gc-rpi"
+          fi
+          sudo mkdir -p "$BASE/work" "$BASE/out"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Image bauen (pi-gen im Debian-Container)
+        env:
+          BASE: ${{ steps.disk.outputs.base }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -a; . rpi/versions.env; set +a
+          START=$(date +%s)
+          docker run --rm --privileged \
+            -v "$PWD:/src:ro" -v "$BASE/work:/work" -v "$BASE/out:/out" \
+            -e PI_GEN_WORKDIR=/work/pi-gen \
+            "$BUILD_CONTAINER" bash /src/rpi/ci-build.sh "$VERSION" /out
+          echo "BUILD_SECONDS=$(( $(date +%s) - START ))" >> "$GITHUB_ENV"
+          sudo rm -rf "$BASE/work"
+          ls -la "$BASE/out"
+
+      - name: Image prüfen (Loop-Mount)
+        env:
+          BASE: ${{ steps.disk.outputs.base }}
+          NAME: ${{ steps.v.outputs.name }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          sudo rpi/verify-image.sh "$BASE/out/$NAME.img.xz" "$VERSION"
+          cat "$BASE/out/$NAME.img.extract"
+          # Build-Container und verify-image.sh laufen als root — die
+          # folgenden Schritte (Python, Upload) als runner.
+          sudo chown -R "$(id -u):$(id -g)" "$BASE/out"
+
+      - name: deCONZ-Container auf arm64 (Ports 8090/8091, RAM)
+        continue-on-error: true
+        run: |
+          set -a; . rpi/versions.env; set +a
+          D="$(mktemp -d)"; mkdir -p "$D/config" "$D/deconz" "$D/gateway-state"
+          sed "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" rpi/rootfs/opt/gatecontrol-gateway/docker-compose.yml > "$D/docker-compose.yml"
+          cd "$D"
+          # Ohne Funkmodul: /dev/null als Gerät — deCONZ startet trotzdem REST-API/Phoscon.
+          GC_ZIGBEE_DEVICE=/dev/null docker compose up -d deconz
+          # warten, bis deCONZ lauscht (die ersten Versuche scheitern erwartungsgemäß)
+          for _ in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:8090/api/config && break; sleep 2; done
+          curl -fsS http://127.0.0.1:8090/api/config | jq -c '{name, swversion, websocketport}'
+          sudo ss -ltnp | grep -E ':(8090|8091)\b'
+          sleep 20
+          docker stats --no-stream --format 'deCONZ RAM: {{.MemUsage}}'
+          docker run --rm --entrypoint node ghcr.io/callmetechie/gatecontrol-gateway:latest -e "console.log('gateway node rss MB', Math.round(process.memoryUsage().rss/1048576))"
+          docker compose down
+
+      - name: Imager-Repository-Datei erzeugen
+        env:
+          BASE: ${{ steps.disk.outputs.base }}
+          NAME: ${{ steps.v.outputs.name }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG:-v$VERSION}/$NAME.img.xz"
+          python3 rpi/make-imager-repo.py --version "$VERSION" \
+            --image "$BASE/out/$NAME.img.xz" --extract "$BASE/out/$NAME.img.extract" \
+            --url "$URL" --release-date "$(date -u +%F)" --out "$BASE/out/gatecontrol-rpi-imager.json"
+          rm -f "$BASE/out/$NAME.img.extract"
+          SIZE=$(stat -c %s "$BASE/out/$NAME.img.xz")
+          {
+            echo "### Raspberry-Pi-Image $VERSION"
+            echo "- Datei: \`$NAME.img.xz\` ($(numfmt --to=iec "$SIZE"))"
+            echo "- Bauzeit pi-gen: $((BUILD_SECONDS / 60)) min $((BUILD_SECONDS % 60)) s"
+            echo "- SHA-256: \`$(cut -d' ' -f1 "$BASE/out/$NAME.img.xz.sha256")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: An Release anhängen
+        if: inputs.upload && inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.disk.outputs.base }}
+          NAME: ${{ steps.v.outputs.name }}
+        run: |
+          gh release upload "$TAG" --clobber --repo "$GITHUB_REPOSITORY" \
+            "$BASE/out/$NAME.img.xz" "$BASE/out/$NAME.img.xz.sha256" \
+            "$BASE/out/$NAME.img.xz.info" "$BASE/out/gatecontrol-rpi-imager.json"
+
+      - name: Probe-Bau als Workflow-Artefakt (3 Tage)
+        if: inputs.tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.v.outputs.name }}
+          path: |
+            ${{ steps.disk.outputs.base }}/out/*.img.xz
+            ${{ steps.disk.outputs.base }}/out/*.sha256
+            ${{ steps.disk.outputs.base }}/out/*.info
+            ${{ steps.disk.outputs.base }}/out/gatecontrol-rpi-imager.json
+          retention-days: 3
+          compression-level: 0

@@ -1,0 +1,328 @@
+#!/usr/bin/python3 -I
+"""GateControl Gateway (Raspberry-Pi-Image): Hardware-/Funkmodul-Erkennung.
+
+Läuft bei jedem Boot VOR docker.service, damit die serielle Schnittstelle
+noch frei ist (ein deCONZ-Container vom letzten Start würde sie sonst
+belegen). Ergebnis:
+
+  /run/gatecontrol/zigbee.env                      GC_ZIGBEE_DEVICE=…, GC_ZIGBEE_TYPE=…
+  /opt/gatecontrol-gateway/gateway-state/hardware.json   Hardware-Profil für die
+                                                   Gateway-Telemetrie (Modell, RAM,
+                                                   Kerne, Speicher, Funkmodule)
+
+Erkennung RaspBee II / RaspBee / ConBee II/III: Es wird das deCONZ-
+Serial-Protokoll gesprochen (SLIP-Rahmen, Kommando VERSION 0x0D). Nur ein
+Gerät, das darauf korrekt antwortet, gilt auf /dev/ttyAMA0 als erkannt –
+ein freier UART ohne Modul bleibt still. USB-Sticks werden zusätzlich am
+Namen in /dev/serial/by-id erkannt.
+
+Einstellungen: /boot/firmware/gatecontrol/settings.txt
+  ZIGBEE=auto|on|off   (Standard auto)
+  ZIGBEE_DEVICE=/dev/… (optional, erzwingt das Gerät)
+"""
+
+import glob
+import json
+import os
+import platform
+import re
+import select
+import sys
+import termios
+import time
+
+GC_DIR = "/opt/gatecontrol-gateway"
+RUN_DIR = "/run/gatecontrol"
+BOOT_CANDIDATES = ("/boot/firmware", "/boot")
+DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9/_.:-]{1,120}$")
+
+SLIP_END, SLIP_ESC, SLIP_ESC_END, SLIP_ESC_ESC = 0xC0, 0xDB, 0xDC, 0xDD
+CMD_VERSION = 0x0D
+BAUD = {38400: termios.B38400, 115200: termios.B115200}
+
+# Plattform-Byte der deCONZ-Firmwareversion (Bits 8..15)
+PLATFORMS = {0x05: "raspbee-conbee-1", 0x07: "raspbee2-conbee2", 0x09: "conbee3"}
+
+
+def log(msg):
+    print(f"gatecontrol-hwdetect: {msg}", flush=True)
+
+
+def boot_dir():
+    for d in BOOT_CANDIDATES:
+        if os.path.isfile(os.path.join(d, "config.txt")):
+            return d
+    return BOOT_CANDIDATES[0]
+
+
+def read_settings(path):
+    out = {}
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as fh:
+            for line in fh:
+                line = line.strip().replace("\r", "")
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                out[key.strip().upper()] = val.strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+# ─── deCONZ serial protocol ────────────────────────────────────────────────
+
+def _crc(data):
+    return (~sum(data) + 1) & 0xFFFF
+
+
+def build_version_request(seq=1):
+    frame = bytes([CMD_VERSION, seq & 0xFF, 0x00, 0x09, 0x00, 0, 0, 0, 0])
+    crc = _crc(frame)
+    frame += bytes([crc & 0xFF, crc >> 8])
+    out = bytearray([SLIP_END])
+    for b in frame:
+        if b == SLIP_END:
+            out += bytes([SLIP_ESC, SLIP_ESC_END])
+        elif b == SLIP_ESC:
+            out += bytes([SLIP_ESC, SLIP_ESC_ESC])
+        else:
+            out.append(b)
+    out.append(SLIP_END)
+    return bytes(out)
+
+
+def slip_frames(buf):
+    """Yield decoded SLIP frames from a byte buffer."""
+    cur, esc = bytearray(), False
+    for b in buf:
+        if b == SLIP_END:
+            if cur:
+                yield bytes(cur)
+            cur, esc = bytearray(), False
+        elif esc:
+            cur.append(SLIP_END if b == SLIP_ESC_END else SLIP_ESC if b == SLIP_ESC_ESC else b)
+            esc = False
+        elif b == SLIP_ESC:
+            esc = True
+        else:
+            cur.append(b)
+
+
+def parse_version_response(frame):
+    """Return the firmware version (int) of a valid VERSION response, else None."""
+    if len(frame) < 11 or frame[0] != CMD_VERSION:
+        return None
+    body, crc = frame[:-2], frame[-2] | (frame[-1] << 8)
+    if _crc(body) != crc or body[2] != 0x00:
+        return None
+    length = body[3] | (body[4] << 8)
+    if length != len(body) or length < 9:
+        return None
+    return int.from_bytes(body[5:9], "little")
+
+
+def probe_deconz(device, bauds=(38400, 115200), timeout=1.5):
+    """Speak the deCONZ protocol on `device`; return firmware version or None."""
+    for baud in bauds:
+        try:
+            fd = os.open(device, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        except OSError as err:
+            log(f"{device}: nicht zu öffnen ({err.strerror})")
+            return None
+        try:
+            attrs = termios.tcgetattr(fd)
+            attrs[0] = 0                                   # iflag
+            attrs[1] = 0                                   # oflag
+            attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+            attrs[3] = 0                                   # lflag (raw)
+            attrs[4] = attrs[5] = BAUD[baud]
+            attrs[6][termios.VMIN] = 0
+            attrs[6][termios.VTIME] = 0
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+            termios.tcflush(fd, termios.TCIOFLUSH)
+            for attempt in range(2):
+                os.write(fd, build_version_request(seq=attempt + 1))
+                buf = bytearray()
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    ready, _, _ = select.select([fd], [], [], 0.1)
+                    if not ready:
+                        continue
+                    try:
+                        chunk = os.read(fd, 256)
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        continue
+                    buf += chunk
+                    for frame in slip_frames(buf):
+                        ver = parse_version_response(frame)
+                        if ver is not None:
+                            return ver
+                    if len(buf) > 4096:
+                        buf = buf[-512:]
+        except (OSError, termios.error) as err:
+            log(f"{device}: Fehler bei {baud} Baud ({err})")
+        finally:
+            os.close(fd)
+    return None
+
+
+def platform_name(version):
+    return PLATFORMS.get((version >> 8) & 0xFF, "deconz-unknown")
+
+
+# ─── Candidates ────────────────────────────────────────────────────────────
+
+def usb_candidates():
+    """ConBee II/III sticks by their stable by-id name → resolved device."""
+    out = []
+    for link in sorted(glob.glob("/dev/serial/by-id/*")):
+        name = os.path.basename(link).lower()
+        if "conbee" in name or "raspbee" in name or "dresden_elektronik" in name:
+            out.append(os.path.realpath(link))
+    return out
+
+
+def detect_zigbee(settings):
+    mode = settings.get("ZIGBEE", "auto").strip().lower() or "auto"
+    if mode not in ("auto", "on", "off"):
+        log(f"ZIGBEE={mode} unbekannt – verwende auto")
+        mode = "auto"
+    forced = settings.get("ZIGBEE_DEVICE", "").strip()
+    if forced and not DEVICE_RE.match(forced):
+        log(f"ZIGBEE_DEVICE={forced!r} ungültig – ignoriert")
+        forced = ""
+    result = {"kind": "zigbee", "mode": mode, "type": None, "device": None,
+              "firmware": None, "detected": False, "enabled": False}
+    if mode == "off":
+        log("Zigbee abgeschaltet (ZIGBEE=off)")
+        return result
+
+    # udev legt /dev/serial/by-id evtl. erst kurz nach dem Start an
+    for _ in range(10):
+        if forced or usb_candidates() or os.path.exists("/dev/ttyAMA0"):
+            break
+        time.sleep(0.5)
+
+    usb = usb_candidates()
+    candidates = [forced] if forced else usb + ["/dev/ttyAMA0"]
+    for dev in candidates:
+        if not os.path.exists(dev):
+            continue
+        is_usb = dev in usb
+        ver = probe_deconz(dev, bauds=(115200, 38400) if is_usb else (38400, 115200))
+        if ver is not None:
+            result.update(type=platform_name(ver), device=dev, firmware=f"0x{ver:08x}",
+                          detected=True, enabled=True)
+            log(f"deCONZ-Funkmodul erkannt: {dev} ({result['type']}, Firmware {result['firmware']})")
+            return result
+        if is_usb:
+            # Stick am Namen erkannt, antwortet aber (noch) nicht – z. B.
+            # Firmware-Update nötig. deCONZ trotzdem starten, es zeigt den Grund.
+            result.update(type="conbee-usb", device=dev, detected=True, enabled=True)
+            log(f"ConBee-USB-Stick erkannt ({dev}), antwortet aber nicht auf VERSION")
+            return result
+
+    if mode == "on":
+        dev = forced or (usb[0] if usb else "/dev/ttyAMA0")
+        result.update(type="forced", device=dev, enabled=True)
+        log(f"Kein Modul erkannt, deCONZ wird trotzdem gestartet (ZIGBEE=on, {dev})")
+    else:
+        log("Kein RaspBee/ConBee erkannt – deCONZ wird nicht gestartet")
+    return result
+
+
+# ─── Hardware profile ──────────────────────────────────────────────────────
+
+def _read(path, limit=256):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(limit).decode("utf-8", "replace").strip("\x00\n ")
+    except OSError:
+        return None
+
+
+def os_pretty_name():
+    try:
+        with open("/etc/os-release", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("PRETTY_NAME="):
+                    return line.split("=", 1)[1].strip().strip('"')[:120]
+    except OSError:
+        pass
+    return None
+
+
+def mem_total():
+    try:
+        with open("/proc/meminfo", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def storage(path):
+    try:
+        st = os.statvfs(path)
+        return {"path": path, "total": st.f_blocks * st.f_frsize, "free": st.f_bavail * st.f_frsize}
+    except OSError:
+        return None
+
+
+def hardware_profile(zigbee):
+    return {
+        "schema": 1,
+        "source": "rpi-image",
+        "image_version": (_read("/etc/gatecontrol/image-release", 64) or None),
+        "model": _read("/proc/device-tree/model", 128),
+        "os": os_pretty_name(),
+        "kernel": platform.release()[:64],
+        "arch": platform.machine()[:32],
+        "cpu_cores": os.cpu_count(),
+        "mem_total": mem_total(),
+        "storage": storage(GC_DIR),
+        "radios": [zigbee] if zigbee.get("device") else [],
+        "detected_at": int(time.time() * 1000),
+    }
+
+
+def write_atomic(path, text, mode=0o644):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def main():
+    settings = read_settings(os.path.join(boot_dir(), "gatecontrol", "settings.txt"))
+    try:
+        zigbee = detect_zigbee(settings)
+    except Exception as err:  # Erkennung darf den Start nie verhindern
+        log(f"Erkennung fehlgeschlagen: {err}")
+        zigbee = {"kind": "zigbee", "mode": "auto", "type": None, "device": None,
+                  "firmware": None, "detected": False, "enabled": False}
+
+    os.makedirs(RUN_DIR, mode=0o755, exist_ok=True)
+    lines = ["# geschrieben von gatecontrol-hwdetect"]
+    if zigbee["enabled"] and zigbee["device"] and DEVICE_RE.match(zigbee["device"]):
+        lines += [f"GC_ZIGBEE_DEVICE={zigbee['device']}", f"GC_ZIGBEE_TYPE={zigbee['type']}"]
+    write_atomic(os.path.join(RUN_DIR, "zigbee.env"), "\n".join(lines) + "\n")
+
+    state_dir = os.path.join(GC_DIR, "gateway-state")
+    try:
+        os.makedirs(state_dir, mode=0o755, exist_ok=True)
+        write_atomic(os.path.join(state_dir, "hardware.json"),
+                     json.dumps(hardware_profile(zigbee), indent=1) + "\n")
+    except OSError as err:
+        log(f"hardware.json nicht geschrieben: {err}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

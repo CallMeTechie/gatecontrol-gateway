@@ -1,0 +1,21 @@
+[Unit]
+Description=GateControl Home Gateway (Einrichtung von der SD-Karte + Docker-Stack)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/deployment/raspberry-pi.md
+Requires=docker.service
+Wants=network-online.target gatecontrol-hwdetect.service
+After=network-online.target docker.service gatecontrol-hwdetect.service boot-firmware.mount cloud-config.service
+# Ohne Netz (Image-Download) wiederholt systemd den Start alle 30 s.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gatecontrol-start
+Restart=on-failure
+RestartSec=30
+TimeoutStartSec=30min
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

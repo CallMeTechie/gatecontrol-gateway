@@ -1,0 +1,3 @@
+# Dummy-WireGuard-Schlüssel (Base64 von "privatekey") in einer Test-Fixture aus
+# Commit 095a988 – im Folge-Commit durch zur Laufzeit erzeugte Werte ersetzt.
+095a98870e7e0e6be33dbbedd3079e003632b649:rpi/tests/test-gatecontrol-start.sh:generic-api-key:33

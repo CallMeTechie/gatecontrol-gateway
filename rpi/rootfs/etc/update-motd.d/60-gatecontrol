@@ -1,0 +1,17 @@
+#!/bin/sh
+# GateControl Gateway: Status beim Login anzeigen.
+status_file=/run/gatecontrol/status
+echo
+if [ -r "$status_file" ]; then
+  state=$(sed -n 1p "$status_file")
+  text=$(sed -n 2p "$status_file")
+  echo "  GateControl Gateway: $state"
+  echo "  $text"
+else
+  echo "  GateControl Gateway: Start läuft noch oder ist fehlgeschlagen."
+fi
+echo
+echo "  Protokoll:      journalctl -u gatecontrol-gateway -b"
+echo "  Container:      sudo docker compose --project-directory /opt/gatecontrol-gateway ps"
+echo "  Neu einrichten: gateway.env nach /boot/firmware/gatecontrol/ kopieren, dann sudo gatecontrol-start"
+echo
