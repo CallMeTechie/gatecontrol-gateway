@@ -1,0 +1,190 @@
+#!/bin/bash
+# GateControl Gateway (Raspberry-Pi-Image) — Erststart und Start des Stacks.
+#
+# Läuft bei jedem Boot (gatecontrol-gateway.service) und kann jederzeit von
+# Hand wiederholt werden:  sudo gatecontrol-start
+#
+#  1. Liegt eine gateway.env (oder gateway-<id>.env) auf der Boot-Partition
+#     (/boot/firmware/gatecontrol/ oder direkt /boot/firmware/), wird sie
+#     geprüft, nach /opt/gatecontrol-gateway/config/gateway.env übernommen
+#     (0600 root) und von der FAT-Partition gelöscht. So funktioniert auch
+#     eine Neu-Einrichtung: neue Datei auf die SD-Karte, Pi starten.
+#  2. Ohne gateway.env: Hinweis in Journal, Konsole, Login und STATUS.txt —
+#     es startet nichts.
+#  3. Hostname setzen (settings.txt HOSTNAME → GC_HOSTNAME in der env →
+#     Name aus dem Raspberry Pi Imager bleibt → gc-<Peer-Name>).
+#  4. Compose-Profil "zigbee" (deCONZ) je nach Erkennung durch
+#     gatecontrol-hwdetect, dann docker compose up.
+set -euo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
+. "${GC_LIB:-/usr/local/lib/gatecontrol}/common.sh"
+
+CONFIG_DIR="$GC_DIR/config"
+ENV_FILE="$CONFIG_DIR/gateway.env"
+ROLLBACK="$GC_DIR/docker-compose.rollback.yml"
+
+# Alle gateway*.env auf der Boot-Partition, neueste zuerst.
+boot_env_files() {
+  local d
+  for d in "$GC_BOOT_DIR" "$GC_BOOT"; do
+    [ -d "$d" ] || continue
+    find "$d" -maxdepth 1 -type f -iname 'gateway*.env' -printf '%T@ %p\n' 2>/dev/null
+  done | sort -rn | cut -d' ' -f2-
+}
+
+valid_env() {
+  grep -qE '^GC_SERVER_URL=https?://[^[:space:]]+$' "$1" \
+    && grep -qE '^GC_API_TOKEN=gc_gw_[a-f0-9]{64}$' "$1" \
+    && grep -qE '^GC_GATEWAY_TOKEN=[a-f0-9]{64}$' "$1" \
+    && grep -qE '^GC_TUNNEL_IP=[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "$1" \
+    && grep -qE '^WG_PRIVATE_KEY=.+' "$1" \
+    && grep -qE '^WG_ENDPOINT=.+' "$1"
+}
+
+# Rückgabe: 0 = neue env übernommen, 1 = keine gefunden, 2 = ungültig
+import_env() {
+  local src tmp rc=0
+  src="$(boot_env_files | head -n1)"
+  [ -n "$src" ] || return 1
+
+  install -d -m 0700 -o root -g root "$CONFIG_DIR"
+  tmp="$(mktemp "$CONFIG_DIR/.gateway.env.XXXXXX")"   # mktemp legt 0600 an
+  # Windows-Zeilenenden und UTF-8-BOM entfernen (Editor auf dem PC)
+  tr -d '\r' <"$src" | sed '1s/^\xEF\xBB\xBF//' >"$tmp"
+
+  if valid_env "$tmp"; then
+    mv -f "$tmp" "$ENV_FILE"
+    gc_log "gateway.env von der Boot-Partition übernommen ($(basename "$src"))"
+  else
+    mv -f "$tmp" "$ENV_FILE.rejected"
+    gc_log "FEHLER: $(basename "$src") ist keine gültige GateControl-gateway.env (abgelegt unter $ENV_FILE.rejected)"
+    rc=2
+  fi
+  chown root:root "$CONFIG_DIR"/gateway.env* 2>/dev/null || true
+  chmod 0600 "$CONFIG_DIR"/gateway.env* 2>/dev/null || true
+
+  # Geheimnisse nicht auf der (unverschlüsselten, am PC lesbaren) FAT-
+  # Partition liegen lassen — auch ältere Kopien entfernen.
+  boot_env_files | while IFS= read -r f; do rm -f -- "$f"; done
+  sync -f "$GC_BOOT" 2>/dev/null || sync
+  return "$rc"
+}
+
+sanitize_hostname() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
+    | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-63 | sed 's/-$//'
+}
+
+apply_hostname() {
+  local want explicit=0 cur peer
+  want="$(gc_setting HOSTNAME)"
+  [ -n "$want" ] || want="$(gc_env_value "$ENV_FILE" GC_HOSTNAME)"
+  [ -n "$want" ] && explicit=1
+  cur="$(hostname)"
+  if [ "$explicit" = 0 ]; then
+    # Im Imager gesetzter Name hat Vorrang vor dem Automatik-Namen.
+    [ "$cur" = "raspberrypi" ] || [ "$cur" = "localhost" ] || return 0
+    peer="$(sed -n 's/^# Peer: \(.*\) (ID: [0-9]*)$/\1/p' "$ENV_FILE" | head -n1)"
+    peer="$(sanitize_hostname "$peer")"
+    if [ -n "$peer" ]; then want="gc-$peer"; else want="gatecontrol-gw"; fi
+  fi
+  want="$(sanitize_hostname "$want" | cut -c1-63)"
+  [ -n "$want" ] || return 0
+  [ "$want" = "$cur" ] && return 0
+
+  if ! hostnamectl set-hostname "$want" 2>/dev/null; then
+    printf '%s\n' "$want" >"$GC_ETC/hostname"
+    hostname "$want"
+  fi
+  if grep -q '^127\.0\.1\.1' "$GC_ETC/hosts"; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$want/" "$GC_ETC/hosts"
+  else
+    printf '127.0.1.1\t%s\n' "$want" >>"$GC_ETC/hosts"
+  fi
+  # cloud-init soll den Namen bei späteren Starts nicht zurücksetzen.
+  if [ -d "$GC_ETC/cloud/cloud.cfg.d" ]; then
+    printf '# GateControl: Hostname wird von gatecontrol-start verwaltet\npreserve_hostname: true\n' \
+      >"$GC_ETC/cloud/cloud.cfg.d/99-gatecontrol-hostname.cfg"
+  fi
+  systemctl try-restart avahi-daemon.service >/dev/null 2>&1 || true
+  gc_log "Hostname gesetzt: $want"
+}
+
+write_compose_env() {
+  local dev="" type="" tz="" tmp
+  if [ -r "$GC_RUN/zigbee.env" ]; then
+    dev="$(gc_env_value "$GC_RUN/zigbee.env" GC_ZIGBEE_DEVICE)"
+    type="$(gc_env_value "$GC_RUN/zigbee.env" GC_ZIGBEE_TYPE)"
+  fi
+  [[ "$dev" =~ ^/dev/[A-Za-z0-9/_.:-]+$ ]] || dev=""
+  tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+  [[ "$tz" =~ ^[A-Za-z0-9/_+-]{1,64}$ ]] || tz=""
+  tmp="$(mktemp "$GC_DIR/.env.XXXXXX")"
+  {
+    echo "# Automatisch geschrieben von gatecontrol-start — Änderungen gehen beim nächsten Start verloren."
+    echo "# Zigbee an/aus: /boot/firmware/gatecontrol/settings.txt (ZIGBEE=auto|on|off)"
+    if [ -n "$dev" ]; then
+      echo "COMPOSE_PROFILES=zigbee"
+      echo "GC_ZIGBEE_DEVICE=$dev"
+    fi
+    if [ -n "$tz" ]; then echo "TZ=$tz"; fi
+  } >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$GC_DIR/.env"
+  ZIGBEE_DEVICE="$dev"
+  ZIGBEE_TYPE="$type"
+}
+
+compose() {
+  local args=(-f docker-compose.yml)
+  # Hat update.sh nach einem fehlgeschlagenen Update auf das alte Image
+  # zurückgerollt, muss der Start dabei bleiben (sonst käme das kaputte
+  # :latest wieder hoch).
+  [ -f "$ROLLBACK" ] && args+=(-f "$(basename "$ROLLBACK")")
+  (cd "$GC_DIR" && docker compose "${args[@]}" "$@")
+}
+
+main() {
+  [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen (sudo gatecontrol-start)" >&2; exit 1; }
+  install -d -m 0755 "$GC_RUN" "$GC_DIR/gateway-state" "$GC_DIR/deconz"
+  install -d -m 0700 -o root -g root "$CONFIG_DIR"
+
+  local imported=0 rc=0
+  import_env || rc=$?
+  [ "$rc" = 0 ] && imported=1
+
+  if [ ! -s "$ENV_FILE" ]; then
+    if [ "$rc" = 2 ]; then
+      gc_status "FEHLER" "Die gateway.env auf der SD-Karte war ungültig. Bitte in GateControl neu herunterladen, nach 'bootfs/gatecontrol/' kopieren und den Pi neu starten."
+    else
+      gc_status "WARTET AUF EINRICHTUNG" "Keine gateway.env gefunden. In GateControl die Gateway-Konfiguration herunterladen, auf die SD-Karte (Laufwerk 'bootfs', Ordner 'gatecontrol') kopieren und den Pi neu starten — oder danach 'sudo gatecontrol-start' ausführen."
+    fi
+    exit 0
+  fi
+
+  apply_hostname
+  write_compose_env
+
+  if [ -n "$ZIGBEE_DEVICE" ]; then
+    gc_log "Zigbee: ${ZIGBEE_TYPE:-?} an $ZIGBEE_DEVICE — deCONZ wird gestartet (Phoscon: http://$(hostname).local:8090)"
+    compose up -d --remove-orphans
+  else
+    # deCONZ eines früheren Starts entfernen (Modul abgezogen / ZIGBEE=off)
+    compose rm -s -f deconz >/dev/null 2>&1 || true
+    compose up -d --remove-orphans gateway
+  fi
+  if [ "$imported" = 1 ]; then
+    compose up -d --force-recreate gateway
+  fi
+
+  local msg
+  msg="Gateway läuft (Hostname $(hostname))."
+  [ -n "$ZIGBEE_DEVICE" ] && msg="$msg deCONZ/Phoscon: Port 8090."
+  [ "$rc" = 2 ] && msg="$msg ACHTUNG: eine neue gateway.env war ungültig, die bisherige wird weiter verwendet."
+  gc_status "OK" "$msg"
+}
+
+ZIGBEE_DEVICE=""
+ZIGBEE_TYPE=""
+main "$@"

@@ -29,6 +29,18 @@ jobs:
             shellcheck -S warning "${files[@]}"
           fi
 
+  rpi-image-config:
+    # Schneller Struktur-Test des Raspberry-Pi-Images (kein Image-Bau; der
+    # läuft im Release bzw. per Hand über rpi-image.yml).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+      - name: rpi/check-config.sh
+        run: sudo --preserve-env=PATH rpi/check-config.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:

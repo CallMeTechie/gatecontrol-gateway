@@ -1,0 +1,12 @@
+[Unit]
+Description=GateControl Gateway: Selbst-Update (update.sh)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/auto-update.md
+Requires=docker.service
+After=docker.service gatecontrol-gateway.service
+ConditionPathExists=/opt/gatecontrol-gateway/config/gateway.env
+
+[Service]
+Type=oneshot
+Environment=GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state
+ExecStart=/opt/gatecontrol-gateway/update.sh
+TimeoutStartSec=20min

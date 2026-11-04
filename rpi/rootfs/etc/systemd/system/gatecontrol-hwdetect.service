@@ -1,0 +1,16 @@
+[Unit]
+Description=GateControl: Hardware und Funkmodule erkennen (RaspBee II / ConBee)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/deployment/raspberry-pi.md
+# Vor Docker, damit die serielle Schnittstelle noch nicht von einem
+# deCONZ-Container des letzten Starts belegt ist.
+Before=docker.service gatecontrol-gateway.service
+After=local-fs.target systemd-udevd.service boot-firmware.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gatecontrol-hwdetect
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,14 @@
+[Unit]
+Description=GateControl Gateway: Update-Anforderung zusätzlich alle 5 Minuten prüfen
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/auto-update.md
+
+[Timer]
+# Sicherheitsnetz zur .path-Unit (z. B. falls sie nach Fehlern ihr
+# Start-Limit erreicht hat). update.sh beendet sich sofort, wenn kein
+# Update-Flag vorliegt.
+OnBootSec=5min
+OnUnitInactiveSec=5min
+Unit=gatecontrol-gateway-update.service
+
+[Install]
+WantedBy=timers.target

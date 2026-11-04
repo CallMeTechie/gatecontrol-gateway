@@ -1,0 +1,11 @@
+// GateControl Gateway: zusätzlich zu den Debian-Sicherheitsupdates
+// (Standard aus 50unattended-upgrades) auch Docker Engine automatisch
+// aktualisieren. Dank "live-restore" in /etc/docker/daemon.json laufen die
+// Container dabei weiter. Kernel/Firmware aus dem Raspberry-Pi-Archiv
+// werden NICHT automatisch eingespielt (siehe docs/deployment/raspberry-pi.md).
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Docker,label=Docker CE";
+};
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";

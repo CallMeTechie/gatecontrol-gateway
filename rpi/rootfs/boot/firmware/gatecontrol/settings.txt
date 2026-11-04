@@ -1,0 +1,14 @@
+# GateControl Gateway — Einstellungen
+# Wird bei jedem Start gelesen. Format: NAME=WERT, Zeilen mit # sind Kommentare.
+
+# Zigbee-Funkmodul (RaspBee II auf der GPIO-Leiste oder ConBee am USB):
+#   auto = beim Start erkennen; deCONZ/Phoscon nur starten, wenn ein Modul antwortet
+#   on   = deCONZ immer starten (falls die Erkennung das Modul nicht findet)
+#   off  = deCONZ nie starten
+ZIGBEE=auto
+
+# Gerät erzwingen (leer = automatisch; RaspBee II: /dev/ttyAMA0)
+#ZIGBEE_DEVICE=/dev/ttyAMA0
+
+# Hostname. Leer = Name aus dem Raspberry Pi Imager, sonst gc-<Name des Gateways>.
+#HOSTNAME=gatecontrol-gw

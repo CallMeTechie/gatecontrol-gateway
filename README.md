@@ -29,7 +29,7 @@ See [Deployment Docs](docs/deployment/) for platform-specific instructions:
 - [Linux / Pi / VM](docs/deployment/linux-docker.md) — Tier 1
 - [Synology DSM 7.2+](docs/deployment/synology.md) — Tier 1
 - [Proxmox VE LXC](#proxmox-ve-lxc-installer) — Tier 1, native (no Docker layer)
-- [Raspberry Pi tips](docs/deployment/raspberry-pi.md) — SSD, NTP, log-rotation
+- [Raspberry Pi — fertiges Image](docs/deployment/raspberry-pi.md) — Tier 1, SD-Karten-Image (Pi 3 B+/4/5) mit Auto-Update und optional deCONZ für RaspBee II
 - [Migration from docker-wireguard-go](docs/deployment/migration-from-dwg.md)
 
 **Unsupported:** VM in NAT-mode (WoL broken). Bridge-mode required.
