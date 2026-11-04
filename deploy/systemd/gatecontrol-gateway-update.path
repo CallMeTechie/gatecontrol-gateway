@@ -1,8 +1,12 @@
 [Unit]
 Description=Watch for GateControl Gateway pending-update flag
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/auto-update.md
 
 [Path]
-PathExists=/state/pending-update
+# The container writes the flag to /state/pending-update; on the host that is
+# the bind-mounted ./gateway-state/ next to docker-compose.yml. Adjust both
+# paths here and in the .service if the gateway is not at /opt/gatecontrol-gateway.
+PathExists=/opt/gatecontrol-gateway/gateway-state/pending-update
 Unit=gatecontrol-gateway-update.service
 
 [Install]

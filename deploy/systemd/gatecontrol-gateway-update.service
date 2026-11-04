@@ -1,6 +1,14 @@
 [Unit]
 Description=GateControl Gateway self-update (oneshot)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/auto-update.md
+After=docker.service
 
 [Service]
 Type=oneshot
+# Host paths: the compose project and its bind-mounted state directory
+# (= /state inside the container). Without them update.sh would look for the
+# flag in /state, which does not exist on the host.
+Environment=GC_GW_COMPOSE_DIR=/opt/gatecontrol-gateway
+Environment=GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state
 ExecStart=/opt/gatecontrol-gateway/deploy/update.sh
+TimeoutStartSec=20min
