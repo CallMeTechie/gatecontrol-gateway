@@ -174,8 +174,11 @@ set_wifi_hidden() {  # nur das hidden-Flag einer bestehenden Verbindung ändern
     "$WIFI_FILE" | write_atomic "$WIFI_FILE" 0600
 }
 
-write_wifi_state() {  # ssid_sha256 security hidden country
-  printf 'ssid_sha256=%s\nsecurity=%s\nhidden=%s\ncountry=%s\n' "$@" | write_atomic "$WIFI_STATE" 0600
+write_wifi_state() {  # ssid_sha256 security hidden country (nur bei Änderung schreiben)
+  local new
+  new="$(printf 'ssid_sha256=%s\nsecurity=%s\nhidden=%s\ncountry=%s' "$@")"
+  [ "$(cat "$WIFI_STATE" 2>/dev/null)" = "$new" ] && return 0
+  printf '%s\n' "$new" | write_atomic "$WIFI_STATE" 0600
 }
 
 # Funkland setzen und WLAN entsperren (Raspberry Pi OS sperrt WLAN per rfkill,
@@ -213,7 +216,7 @@ apply_country() {
 }
 
 apply_wifi() {
-  local ssid psk psk_set=0 country hidden_raw hidden sec fp old_fp what
+  local wchanged=0 ssid psk psk_set=0 country hidden_raw hidden sec fp old_fp what
   ssid="$(gc_setting_raw WIFI_SSID)"
   psk="$(gc_setting_raw WIFI_PSK)" || psk_set=1     # 1 = Schlüssel fehlt
   if [ -z "$ssid" ]; then
@@ -257,7 +260,7 @@ apply_wifi() {
       return 1
     fi
     write_wifi "$ssid" "$sec" "$psk" "$hidden" || { fail "WLAN-Verbindung konnte nicht geschrieben werden"; return 1; }
-    CHANGED=1
+    CHANGED=1; wchanged=1
     gc_log "WLAN-Verbindung $WIFI_ID für \"$ssid\" geschrieben"
   elif [ "$fp" = "$old_fp" ]; then
     # Späterer Start: Passwort wurde schon übernommen und von der Karte entfernt.
@@ -268,20 +271,20 @@ apply_wifi() {
     sec="$(gc_env_value "$WIFI_STATE" security)"
     if [ "$hidden" != "$(gc_env_value "$WIFI_STATE" hidden)" ]; then
       set_wifi_hidden "$hidden" || { fail "WIFI_HIDDEN konnte nicht übernommen werden"; return 1; }
-      CHANGED=1
+      CHANGED=1; wchanged=1
     fi
   else
     # Neue SSID ohne WIFI_PSK-Zeile = offenes Netz
     sec=open
     write_wifi "$ssid" open "" "$hidden" || { fail "WLAN-Verbindung konnte nicht geschrieben werden"; return 1; }
-    CHANGED=1
+    CHANGED=1; wchanged=1
     gc_log "WLAN-Verbindung $WIFI_ID für \"$ssid\" (offenes Netz) geschrieben"
   fi
 
   apply_country "$country"
   write_wifi_state "$fp" "$sec" "$hidden" "$country" || fail "WLAN-Status konnte nicht gespeichert werden"
 
-  if [ "$CHANGED" = 1 ] && nm_active; then   # Aufruf von Hand bei laufendem System
+  if [ "$wchanged" = 1 ] && nm_active; then   # Aufruf von Hand bei laufendem System
     nmcli connection reload >/dev/null 2>&1 || true
     nmcli --wait 30 connection up id "$WIFI_ID" >/dev/null 2>&1 \
       || gc_log "Hinweis: WLAN \"$ssid\" noch nicht verbunden (in Reichweite? Passwort richtig?)"
