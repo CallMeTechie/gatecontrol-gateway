@@ -18,6 +18,9 @@ not() { ! "$@"; }
 
 TOKEN_API="gc_gw_$(printf 'a%.0s' {1..64})"
 TOKEN_GW="$(printf 'b%.0s' {1..64})"
+# Schlüssel zur Laufzeit erzeugen (keine schlüsselähnlichen Literale im Repo)
+WG_DUMMY_PRIV="$(head -c 32 /dev/urandom | base64)"
+WG_DUMMY_PUB="$(head -c 32 /dev/urandom | base64)"
 valid_env() {
   cat <<EOF
 # GateControl Home Gateway — Pairing Config
@@ -30,10 +33,10 @@ GC_GATEWAY_TOKEN=$TOKEN_GW
 GC_TUNNEL_IP=10.8.0.42
 GC_PROXY_PORT=8080
 GC_API_PORT=9876
-WG_PRIVATE_KEY=cHJpdmF0ZWtleQ==
-WG_PUBLIC_KEY=cHVibGlja2V5
+WG_PRIVATE_KEY=$WG_DUMMY_PRIV
+WG_PUBLIC_KEY=$WG_DUMMY_PUB
 WG_ENDPOINT=gc.example.com:51820
-WG_SERVER_PUBLIC_KEY=c2VydmVya2V5
+WG_SERVER_PUBLIC_KEY=$WG_DUMMY_PUB
 WG_ADDRESS=10.8.0.42/32
 EOF
 }
