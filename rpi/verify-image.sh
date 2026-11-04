@@ -12,12 +12,12 @@ EXPECT_VERSION="${2:-}"
 [ "$(id -u)" = 0 ] || { echo "Loop-Mount braucht root (sudo)" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
-LOOP=""
+LOOPS=()
 cleanup() {
   set +e
   mountpoint -q "$WORK/root/boot/firmware" && umount "$WORK/root/boot/firmware"
   mountpoint -q "$WORK/root" && umount "$WORK/root"
-  [ -n "$LOOP" ] && losetup -d "$LOOP"
+  for l in "${LOOPS[@]}"; do losetup -d "$l"; done
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -31,11 +31,25 @@ else
   IMG="$IMG_IN"
 fi
 
-LOOP="$(losetup --show -f -P -r "$IMG")"
-for _ in 1 2 3 4 5; do [ -b "${LOOP}p2" ] && break; sleep 1; done
+# Je Partition ein eigenes Loop-Device mit Offset — funktioniert auch in
+# Containern ohne udev, wo /dev/loopNpM nicht angelegt wird.
+part_loop() {  # part_loop <nr> → Loop-Device der Partition (MBR, wie pi-gen sie anlegt)
+  local start size
+  read -r start size < <(python3 -I -c '
+import struct, sys
+with open(sys.argv[1], "rb") as f:
+    mbr = f.read(512)
+assert mbr[510:512] == b"\x55\xaa", "kein MBR"
+e = mbr[446 + 16 * (int(sys.argv[2]) - 1):][:16]
+print(*struct.unpack("<II", e[8:16]))' "$IMG" "$1")
+  [ "${size:-0}" -gt 0 ] || { echo "Partition $1 nicht gefunden" >&2; exit 1; }
+  losetup --show -f -r -o $((start * 512)) --sizelimit $((size * 512)) "$IMG"
+}
+ROOT_LOOP="$(part_loop 2)"; LOOPS+=("$ROOT_LOOP")
+BOOT_LOOP="$(part_loop 1)"; LOOPS+=("$BOOT_LOOP")
 mkdir -p "$WORK/root"
-mount -o ro "${LOOP}p2" "$WORK/root"
-mount -o ro "${LOOP}p1" "$WORK/root/boot/firmware"
+mount -o ro "$ROOT_LOOP" "$WORK/root"
+mount -o ro "$BOOT_LOOP" "$WORK/root/boot/firmware"
 R="$WORK/root"
 B="$R/boot/firmware"
 

@@ -8,10 +8,6 @@ name: Raspberry Pi Image
 # Kein Bau bei PRs — dort prüft test.yml (Job rpi-image-config) nur die Konfiguration.
 
 on:
-  # TEMPORÄR: Probe-Bau auf dem Feature-Branch (workflow_dispatch geht erst,
-  # wenn die Datei auf main liegt). Vor dem Merge wieder entfernen.
-  push:
-    branches: [feat/raspberry-pi-image]
   workflow_dispatch:
     inputs:
       tag:
