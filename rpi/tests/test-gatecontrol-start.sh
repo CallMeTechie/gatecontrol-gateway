@@ -147,6 +147,15 @@ expect "kompletter Stack gestartet" grep -q 'compose -f docker-compose.yml up -d
 expect "Hostname aus settings.txt" grep -qx 'mein-gw' "$T/hostname"
 expect "Status nennt Port 8090" grep -q '8090' "$T/run/status"
 
+echo "== settings.txt mit BOM in Zeile 1 + Ergebnis von gatecontrol-settings in STATUS.txt"
+printf '\xEF\xBB\xBFHOSTNAME=bom-gw\r\nZIGBEE=auto\r\n' >"$T/boot/gatecontrol/settings.txt"
+printf 'WLAN: "Netz" (Land DE, offenes Netz; LAN-Kabel hat Vorrang)\n' >"$T/run/settings.status"
+expect "Exit 0" run_start
+expect "Hostname trotz BOM" grep -qx 'bom-gw' "$T/hostname"
+expect "STATUS.txt: Abschnitt Einstellungen" grep -q '^Einstellungen (settings.txt):' "$T/boot/gatecontrol/STATUS.txt"
+expect "STATUS.txt: WLAN-Zeile" grep -q '^  - WLAN: "Netz"' "$T/boot/gatecontrol/STATUS.txt"
+rm -f "$T/run/settings.status"
+
 echo "== Rollback-Override von update.sh bleibt aktiv"
 echo 'services: {gateway: {image: x@sha256:00}}' >"$T/opt/docker-compose.rollback.yml"
 printf 'GC_ZIGBEE_DEVICE=/dev/evil;rm -rf /\n' >"$T/run/zigbee.env"

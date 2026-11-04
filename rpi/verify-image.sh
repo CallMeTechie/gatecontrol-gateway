@@ -67,7 +67,7 @@ no_password_hashes() {  # Feld 2 von /etc/shadow beginnt bei echten Hashes mit "
 
 echo "== Dateien"
 for f in /opt/gatecontrol-gateway/docker-compose.yml /opt/gatecontrol-gateway/update.sh \
-         /usr/local/sbin/gatecontrol-start /usr/local/sbin/gatecontrol-hwdetect \
+         /usr/local/sbin/gatecontrol-start /usr/local/sbin/gatecontrol-hwdetect /usr/local/sbin/gatecontrol-settings \
          /usr/local/lib/gatecontrol/common.sh /etc/docker/daemon.json \
          /etc/rpi/swap.conf.d/80-gatecontrol.conf /etc/systemd/journald.conf.d/40-gatecontrol.conf \
          /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/52gatecontrol-unattended-upgrades \
@@ -75,7 +75,8 @@ for f in /opt/gatecontrol-gateway/docker-compose.yml /opt/gatecontrol-gateway/up
   check "$f" test -s "$R$f"
 done
 check "update.sh = deploy/update.sh" cmp "$R/opt/gatecontrol-gateway/update.sh" "$(dirname "$0")/../deploy/update.sh"
-check "Skripte ausführbar" test -x "$R/usr/local/sbin/gatecontrol-start" -a -x "$R/usr/local/sbin/gatecontrol-hwdetect" -a -x "$R/opt/gatecontrol-gateway/update.sh"
+check "Skripte ausführbar" test -x "$R/usr/local/sbin/gatecontrol-start" -a -x "$R/usr/local/sbin/gatecontrol-hwdetect" \
+  -a -x "$R/usr/local/sbin/gatecontrol-settings" -a -x "$R/opt/gatecontrol-gateway/update.sh"
 check "config/ ist 0700" test "$(stat -c %a "$R/opt/gatecontrol-gateway/config")" = 700
 check "gateway-state/ + deconz/ vorhanden" test -d "$R/opt/gatecontrol-gateway/gateway-state" -a -d "$R/opt/gatecontrol-gateway/deconz"
 check "keine gateway.env im Image" test ! -e "$R/opt/gatecontrol-gateway/config/gateway.env"
@@ -90,16 +91,21 @@ check "docker compose-Plugin installiert" test -x "$R/usr/libexec/docker/cli-plu
 check "containerd installiert" test -x "$R/usr/bin/containerd"
 check "unattended-upgrades installiert" test -x "$R/usr/bin/unattended-upgrade"
 check "cloud-init installiert (Imager-Einstellungen)" test -x "$R/usr/bin/cloud-init"
+# Werkzeuge von gatecontrol-settings (WLAN, Funkland, SSH)
+check "NetworkManager (nmcli) installiert" test -x "$R/usr/bin/nmcli"
+check "raspi-config installiert (Funkland)" test -x "$R/usr/bin/raspi-config"
+check "ssh-keygen/sshd/visudo installiert" test -x "$R/usr/bin/ssh-keygen" -a -x "$R/usr/sbin/sshd" -a -x "$R/usr/sbin/visudo"
+check "zoneinfo + iso3166.tab" test -s "$R/usr/share/zoneinfo/Europe/Berlin" -a -s "$R/usr/share/zoneinfo/iso3166.tab"
 check "rpi-swap installiert (zram)" test -d "$R/usr/lib/systemd/zram-generator.conf.d" -o -e "$R/usr/lib/systemd/system-generators/rpi-swap-generator"
 grep -E '^(docker-ce|containerd\.io|docker-compose-plugin|cloud-init|unattended-upgrades|linux-image-rpi-v8) ' \
   <(awk '/^Package: /{p=$2} /^Version: /{print p, $2}' "$R/var/lib/dpkg/status") | sed 's/^/        /'
 
 echo "== systemd-Units aktiviert"
-for u in docker.service containerd.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
+for u in docker.service containerd.service gatecontrol-settings.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
          gatecontrol-gateway-update.path gatecontrol-gateway-update.timer apt-daily-upgrade.timer; do
   check "$u" enabled "$u"
 done
-check "ssh NICHT aktiviert (nur über Imager)" not enabled ssh.service
+check "ssh NICHT aktiviert (nur über Imager oder SSH_AUTHORIZED_KEY)" not enabled ssh.service
 check "serial-getty@ttyAMA0 maskiert" test "$(readlink "$R/etc/systemd/system/serial-getty@ttyAMA0.service")" = /dev/null
 
 echo "== Boot-Partition"
@@ -120,6 +126,8 @@ check "Overlay disable-bt" test -s "$B/overlays/disable-bt.dtbo"
 echo "== Sicherheit"
 check "kein Konto mit Passwort-Hash (keine Standard-Passwörter)" no_password_hashes "$R/etc/shadow"
 check "keine SSH-Hostkeys im Image" not compgen -G "$R/etc/ssh/ssh_host_*_key"
+check "kein Benutzer gcadmin im Image (erst mit SSH_AUTHORIZED_KEY)" not grep -q '^gcadmin:' "$R/etc/passwd"
+check "keine WLAN-Verbindung im Image" test ! -e "$R/etc/NetworkManager/system-connections/gatecontrol-wifi.nmconnection"
 
 echo
 df -h "$R" "$B" | sed 's/^/  /'

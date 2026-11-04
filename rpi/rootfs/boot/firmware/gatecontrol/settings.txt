@@ -1,5 +1,7 @@
 # GateControl Gateway — Einstellungen
-# Wird bei jedem Start gelesen. Format: NAME=WERT, Zeilen mit # sind Kommentare.
+# Wird bei jedem Start gelesen. Format: NAME=WERT (ohne Anführungszeichen),
+# Zeilen mit # sind Kommentare. GateControl erzeugt diese Datei auch fertig
+# (gatecontrol-setup.zip) – dann einfach alles nach "bootfs" entpacken.
 
 # Zigbee-Funkmodul (RaspBee II auf der GPIO-Leiste oder ConBee am USB):
 #   auto = beim Start erkennen; deCONZ/Phoscon nur starten, wenn ein Modul antwortet
@@ -12,3 +14,20 @@ ZIGBEE=auto
 
 # Hostname. Leer = Name aus dem Raspberry Pi Imager, sonst gc-<Name des Gateways>.
 #HOSTNAME=gatecontrol-gw
+
+# Zeitzone (IANA-Name). Leer = Europe/Berlin bzw. die Einstellung aus dem Imager.
+#TIMEZONE=Europe/Berlin
+
+# WLAN (leer = kein WLAN; ein LAN-Kabel hat immer Vorrang).
+# WIFI_PSK: 8–63 Zeichen oder 64 Hex-Zeichen; leer = offenes Netz.
+# WIFI_PSK wird beim Start aus dieser Datei gelöscht (bleibt nur auf dem Pi).
+#WIFI_SSID=Mein WLAN
+#WIFI_PSK=
+#WIFI_COUNTRY=DE
+#WIFI_HIDDEN=0
+
+# Fernwartung per SSH: der Inhalt von ~/.ssh/id_ed25519.pub (eine Zeile;
+# ed25519, ecdsa oder RSA ab 3072 Bit). Legt den Benutzer gcadmin an (sudo,
+# kein Passwort); SSH dann nur mit Schlüssel. Ohne Eintrag bleibt SSH aus.
+# Wird beim Start aus dieser Datei gelöscht.
+#SSH_AUTHORIZED_KEY=ssh-ed25519 AAAA… name@pc

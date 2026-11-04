@@ -1,0 +1,28 @@
+[Unit]
+Description=GateControl: Einstellungen von der SD-Karte übernehmen (WLAN, Zeitzone, SSH)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/deployment/raspberry-pi.md
+# Früh im Boot: sobald / beschreibbar und /boot/firmware eingehängt ist, aber
+# VOR NetworkManager (network-pre.target). So lädt NetworkManager die
+# WLAN-Verbindung schon beim allerersten Start, und network-online.target
+# (auf das gatecontrol-gateway.service wartet) wird auch ohne LAN-Kabel über
+# WLAN erreicht. Vor ssh.service, damit "nur Schlüssel" schon beim ersten
+# sshd-Start gilt; nach cloud-init-local, damit diese Einstellungen Vorrang
+# vor denen aus dem Raspberry Pi Imager haben.
+DefaultDependencies=no
+Wants=network-pre.target
+After=local-fs.target systemd-remount-fs.service boot-firmware.mount cloud-init-local.service
+Before=network-pre.target NetworkManager.service ssh.service gatecontrol-gateway.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/gatecontrol-settings
+# Fehler in settings.txt halten den Start nie auf (das Skript endet mit 0);
+# die Grenze greift nur, falls ein Werkzeug hängt.
+TimeoutStartSec=2min
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

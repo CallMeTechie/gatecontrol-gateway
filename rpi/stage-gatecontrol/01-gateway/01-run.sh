@@ -25,7 +25,7 @@ install -d -m 0755 "${ROOTFS_DIR}/etc/gatecontrol"
 printf '%s\n' "${GC_IMAGE_VERSION}" >"${ROOTFS_DIR}/etc/gatecontrol/image-release"
 
 on_chroot <<CHROOT
-systemctl enable gatecontrol-hwdetect.service gatecontrol-gateway.service \
+systemctl enable gatecontrol-settings.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
 	gatecontrol-gateway-update.path gatecontrol-gateway-update.timer \
 	unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
 CHROOT

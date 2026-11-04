@@ -8,8 +8,12 @@ Zigbee-Modul RaspBee II** (oder einen ConBee-USB-Stick).
 Ablauf in Kurzform:
 
 1. Image mit dem Raspberry Pi Imager auf eine microSD-Karte schreiben.
-2. `gateway.env` aus GateControl auf die SD-Karte kopieren (Laufwerk `bootfs`, Ordner `gatecontrol`).
+2. `gatecontrol-setup.zip` aus GateControl auf die SD-Karte entpacken (Laufwerk `bootfs`) –
+   oder nur die `gateway.env` in den Ordner `bootfs/gatecontrol/` kopieren.
 3. Pi starten – nach einigen Minuten ist das Gateway in GateControl „online“.
+
+WLAN, Zeitzone und SSH-Zugang lassen sich ohne Imager-Einstellungen über
+[`settings.txt`](#settingstxt-wlan-zeitzone-ssh) festlegen.
 
 Manuelle Installation auf einem vorhandenen Raspberry Pi OS: siehe
 [Linux / Docker](linux-docker.md) und die [Tipps am Ende dieser Seite](#tipps-für-eigene-installationen).
@@ -22,7 +26,7 @@ Manuelle Installation auf einem vorhandenen Raspberry Pi OS: siehe
 |---|---|
 | Modell | Raspberry Pi 3 B+, 4, 5, Zero 2 W (64-bit-fähig). Pi 1/2/Zero (32 bit) werden nicht unterstützt. |
 | Speicher | gute **A1/A2-microSD-Karte** („Application Performance Class“, 16 GB oder mehr). Alternativ USB-SSD (siehe unten). |
-| Netzwerk | LAN-Kabel empfohlen; WLAN geht (im Imager einstellen). Das Gateway muss im selben L2-Netz wie die Zielgeräte hängen (Wake-on-LAN). |
+| Netzwerk | LAN-Kabel empfohlen; WLAN geht (`settings.txt` oder Imager). Das Gateway muss im selben L2-Netz wie die Zielgeräte hängen (Wake-on-LAN). |
 | Zigbee | RaspBee II auf der GPIO-Leiste oder ConBee II/III am USB – optional. |
 
 ### Raspberry Pi 3 B+ (1 GB RAM)
@@ -84,36 +88,122 @@ Zeitzone und Hostname** einstellen. Für eine einfach ausgewählte Image-Datei
 Imager → Betriebssystem → **Eigenes Image** → die `.img.xz` auswählen (oder ein
 anderes Schreibprogramm). Dann gibt es **keine** Imager-Einstellungen:
 
-- Das Gateway läuft trotzdem (LAN-Kabel nötig, kein WLAN).
-- **SSH ist aus**, es gibt **kein Standard-Passwort**. Ein Benutzer wird beim ersten
-  Start am angeschlossenen Bildschirm mit Tastatur angelegt.
+- Das Gateway läuft trotzdem – per LAN-Kabel, oder per WLAN über `WIFI_SSID`/`WIFI_PSK`
+  in [`settings.txt`](#settingstxt-wlan-zeitzone-ssh).
+- **SSH ist aus**, es gibt **kein Standard-Passwort**. SSH-Zugang mit Schlüssel:
+  `SSH_AUTHORIZED_KEY` in `settings.txt` (Benutzer `gcadmin`). Ein Benutzer mit Passwort
+  wird sonst beim ersten Start am angeschlossenen Bildschirm mit Tastatur angelegt.
 - Ohne Bildschirm: vor dem ersten Start auf der Boot-Partition die Datei
   `user-data` (cloud-init) anpassen – Beispiele stehen in der Datei.
 
 ---
 
-## 2. gateway.env auf die SD-Karte
+## 2. Einrichtungsdateien auf die SD-Karte
 
-1. In GateControl das Gateway anlegen (Peers → „Neuer Peer“ → „Home Gateway“) und im
-   Einrichtungsdialog die Konfiguration herunterladen (`gateway-<id>.env`).
-2. Die SD-Karte nach dem Schreiben am PC (neu) einstecken. Es erscheint das Laufwerk
+1. Die SD-Karte nach dem Schreiben am PC (neu) einstecken. Es erscheint das Laufwerk
    **`bootfs`** mit dem Ordner **`gatecontrol`**.
-3. Die Datei in den Ordner **`bootfs/gatecontrol/`** kopieren. Der Name darf
-   `gateway-<id>.env` bleiben oder `gateway.env` heißen. (Direkt nach `bootfs/` geht auch.)
-4. Optional `bootfs/gatecontrol/settings.txt` anpassen (Zigbee, Hostname).
-5. Karte auswerfen, in den Pi stecken, LAN-Kabel, Strom.
+2. **Mit dem Einrichtungsassistenten** in GateControl: `gatecontrol-setup.zip` herunterladen
+   und den Inhalt **direkt auf `bootfs`** entpacken (vorhandene Dateien ersetzen). Die ZIP
+   enthält `gatecontrol/gateway.env` und `gatecontrol/settings.txt` (WLAN, Zeitzone, SSH …).
+   WLAN-Passwort und SSH-Schlüssel erzeugt der Browser in die ZIP – sie gehen nicht an
+   den Server.
+3. **Von Hand:** das Gateway anlegen (Peers → „Neuer Peer“ → „Home Gateway“), im
+   Einrichtungsdialog die Konfiguration herunterladen (`gateway-<id>.env`) und in den Ordner
+   **`bootfs/gatecontrol/`** kopieren. Der Name darf `gateway-<id>.env` bleiben oder
+   `gateway.env` heißen. (Direkt nach `bootfs/` geht auch.) Optional
+   `bootfs/gatecontrol/settings.txt` anpassen (siehe nächster Abschnitt).
+4. Karte auswerfen, in den Pi stecken, LAN-Kabel (oder WLAN eingetragen), Strom.
 
-Die Datei enthält die Zugangsdaten des Gateways. Sie wird beim Start sofort von der
-SD-Karte gelöscht; bis dahin die Karte nicht herumliegen lassen.
+`gateway.env`, WLAN-Passwort und SSH-Schlüssel werden beim Start übernommen und sofort
+von der SD-Karte gelöscht; bis dahin die Karte nicht herumliegen lassen.
+
+---
+
+## settings.txt (WLAN, Zeitzone, SSH)
+
+`bootfs/gatecontrol/settings.txt` – eine Zeile je Einstellung, `NAME=WERT` **ohne
+Anführungszeichen**, `#` = Kommentar. UTF-8; Windows-Zeilenenden (CRLF) und BOM sind in
+Ordnung. Gelesen bei jedem Start.
+
+| Schlüssel | Werte | Wirkung |
+|---|---|---|
+| `HOSTNAME` | Buchstaben, Ziffern, `-` (max. 63) | Gerätename im Netz (siehe [Erster Start](#3-erster-start)) |
+| `ZIGBEE` | `auto` \| `on` \| `off` | deCONZ-Erkennung (siehe [RaspBee II](#5-raspbee-ii-zigbee)) |
+| `TIMEZONE` | IANA-Name, z. B. `Europe/Berlin` | Zeitzone des Pi (und von deCONZ). Ohne Eintrag: `Europe/Berlin` bzw. Imager |
+| `WIFI_SSID` | WLAN-Name, beliebige Zeichen (UTF-8, max. 32 Byte) | WLAN einrichten |
+| `WIFI_PSK` | 8–63 Zeichen (ASCII) oder 64 Hex-Zeichen; leer = offenes Netz | WLAN-Passwort (WPA2-PSK; WPA2/WPA3-Mischbetrieb geht) |
+| `WIFI_COUNTRY` | ISO-3166-Ländercode, Standard `DE` | Funk-Regulierung (Kanäle, Sendeleistung) |
+| `WIFI_HIDDEN` | `0` \| `1` | `1` = verstecktes Netz (SSID wird nicht ausgestrahlt) |
+| `SSH_AUTHORIZED_KEY` | eine Zeile aus `~/.ssh/id_ed25519.pub` (ed25519, ecdsa, RSA ≥ 3072 Bit) | SSH nur mit diesem Schlüssel, Benutzer `gcadmin` |
+
+Ungültige Werte (z. B. zu kurzes Passwort, unbekannte Zeitzone, falscher Schlüsseltyp)
+werden in **`bootfs/gatecontrol/STATUS.txt`** und im Journal benannt (Status
+„EINSTELLUNGEN MIT FEHLERN“); alles andere wird trotzdem übernommen, das Gateway startet.
+Werte werden nie als Shell-Code ausgewertet.
+
+**Geheimnisse:** `WIFI_PSK` und `SSH_AUTHORIZED_KEY` werden nach dem Übernehmen aus
+`settings.txt` auf der SD-Karte entfernt (die Zeile wird durch einen Hinweis-Kommentar
+ersetzt, alles andere bleibt, damit `HOSTNAME`, `ZIGBEE` usw. weiter gelten). Auf dem Pi
+liegt das WLAN-Passwort nur in der NetworkManager-Verbindung (`0600`, root).
+
+### WLAN
+
+- `gatecontrol-settings` legt die NetworkManager-Verbindung **`gatecontrol-wifi`** an
+  (`/etc/NetworkManager/system-connections/gatecontrol-wifi.nmconnection`, `0600` root) und
+  setzt das Funkland (`raspi-config nonint do_wifi_country`, entsperrt WLAN per rfkill).
+- Das passiert **früh im Boot, vor NetworkManager** (`gatecontrol-settings.service`, vor
+  `network-pre.target`). NetworkManager verbindet sich deshalb schon beim allerersten Start
+  mit dem WLAN, und `gatecontrol-gateway` (wartet auf `network-online.target`, höchstens
+  ca. 60 s) startet über WLAN – auch ohne Kabel.
+- **LAN hat Vorrang:** Die WLAN-Verbindung hat Routen-Metrik 600, Ethernet 100. Steckt ein
+  Kabel, läuft der Verkehr darüber; WLAN bleibt als Ersatz verbunden.
+- **Neu einrichten:** eine neue `settings.txt` mit `WIFI_SSID` + `WIFI_PSK` ersetzt die
+  Verbindung beim nächsten Start. Ohne `WIFI_PSK` (bei späteren Starts, nachdem es entfernt
+  wurde) bleibt eine vorhandene Verbindung für dieselbe SSID unverändert; eine *neue* SSID
+  ohne `WIFI_PSK`-Zeile gilt als offenes Netz.
+- **WLAN entfernen:** `WIFI_SSID` aus `settings.txt` löschen und
+  `sudo nmcli connection delete gatecontrol-wifi` (sonst bleibt die Verbindung bestehen).
+- Reine WPA3-Netze (nur SAE, ohne WPA2-Mischbetrieb) und WPA-Enterprise werden über
+  `settings.txt` nicht unterstützt – dafür den Imager (Variante A) oder `nmcli` nehmen.
+- Im Imager eingetragenes WLAN funktioniert weiterhin; beide Verbindungen können
+  nebeneinander bestehen.
+
+### SSH
+
+Mit `SSH_AUTHORIZED_KEY` (und nur dann) richtet `gatecontrol-settings` ein:
+
+- Benutzer **`gcadmin`** (Gruppe `sudo`, `sudo` ohne Passwort über
+  `/etc/sudoers.d/010_gatecontrol-gcadmin`), **ohne Passwort** (Passwort-Feld `*`, eine
+  Passwort-Anmeldung ist unmöglich).
+- `~gcadmin/.ssh/authorized_keys` = genau dieser Schlüssel (eine neue `settings.txt`
+  ersetzt ihn).
+- `sshd` nur mit Schlüssel: `/etc/ssh/sshd_config.d/01-gatecontrol.conf` mit
+  `PubkeyAuthentication yes`, `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+  `PermitRootLogin no`, `AuthenticationMethods publickey`. Die Datei wird vor
+  `50-cloud-init.conf` gelesen und gilt damit auch gegenüber Imager-Einstellungen – ein im
+  Imager gesetztes **Passwort-Login per SSH ist danach aus**.
+- `ssh.service` wird aktiviert und gestartet (Hostschlüssel werden bei Bedarf erzeugt).
+
+Geprüft wird der Schlüssel streng: genau eine Zeile, Typ `ssh-ed25519`,
+`ecdsa-sha2-nistp256/384/521` oder `ssh-rsa` mit mindestens 3072 Bit, keine Optionen
+davor (`command=`, `from=` …), Typ und Schlüsseldaten müssen zusammenpassen
+(`ssh-keygen -l`). In `STATUS.txt` steht danach nur der Fingerprint.
+
+Anmelden: `ssh gcadmin@<hostname>.local` (bzw. die IP). Ohne `SSH_AUTHORIZED_KEY` bleibt
+SSH aus wie bisher (oder wie im Imager eingestellt).
+
+Von Hand wiederholen (z. B. nach dem Kopieren einer neuen `settings.txt` per SSH):
+`sudo gatecontrol-settings`.
 
 ---
 
 ## 3. Erster Start
 
-Beim Start laufen zwei Dienste:
+Beim Start laufen drei Dienste:
 
 | Dienst | Aufgabe |
 |---|---|
+| `gatecontrol-settings` | früh, vor NetworkManager: `settings.txt` – Zeitzone, WLAN, SSH; Passwort/Schlüssel von der Karte entfernen |
 | `gatecontrol-hwdetect` | vor Docker: Funkmodule erkennen (RaspBee II/ConBee), Hardware-Profil schreiben |
 | `gatecontrol-gateway` | `gateway.env` übernehmen, Hostname setzen, Docker-Images laden, Stack starten |
 
@@ -232,6 +322,9 @@ auf demselben Pi läuft wie das Gateway, zeigt die Route auf das Gateway selbst:
 | Problem | Prüfen |
 |---|---|
 | Gateway erscheint nicht | `bootfs/gatecontrol/STATUS.txt` am PC lesen, oder per SSH `journalctl -u gatecontrol-gateway -b` |
+| „EINSTELLUNGEN MIT FEHLERN“ | in `STATUS.txt` steht, welcher Wert in `settings.txt` ungültig war; korrigieren (Passwort/Schlüssel neu eintragen) und neu starten. `journalctl -u gatecontrol-settings -b` |
+| WLAN verbindet nicht | SSID/Passwort richtig? Land (`WIFI_COUNTRY`) passend? 5-GHz-Netz mit DFS-Kanal → 2,4 GHz testen. `nmcli device status`, `nmcli connection show gatecontrol-wifi`, `journalctl -u NetworkManager -b` |
+| SSH-Login abgelehnt | Benutzer ist `gcadmin`, nur mit dem Schlüssel aus `settings.txt`; `STATUS.txt` zeigt dessen Fingerprint (`ssh-keygen -lf ~/.ssh/id_ed25519.pub` zum Vergleich) |
 | „WARTET AUF EINRICHTUNG“ | keine `gateway.env` gefunden – Datei nach `bootfs/gatecontrol/` kopieren, Pi neu starten |
 | „FEHLER: … ungültig“ | falsche Datei (z. B. `docker-compose.yml`) oder beschädigt – in GateControl neu herunterladen |
 | Container-Status | `sudo docker compose --project-directory /opt/gatecontrol-gateway ps` bzw. `… logs -f gateway` |
@@ -260,13 +353,15 @@ weg – das schont die SD-Karte. Für dauerhafte Logs in
 | `/opt/gatecontrol-gateway/gateway-state/` | Auto-Update-Flag, `last-pull`, `update.log`, `hardware.json` |
 | `/opt/gatecontrol-gateway/deconz/` | deCONZ-Daten |
 | `/opt/gatecontrol-gateway/update.sh` | = `deploy/update.sh` |
-| `/usr/local/sbin/gatecontrol-start`, `gatecontrol-hwdetect` | Start/Einrichtung, Funkmodul-Erkennung |
+| `/usr/local/sbin/gatecontrol-start`, `gatecontrol-hwdetect`, `gatecontrol-settings` | Start/Einrichtung, Funkmodul-Erkennung, `settings.txt` (WLAN, Zeitzone, SSH) |
+| `/var/lib/gatecontrol/` | Stand von `gatecontrol-settings` (WLAN-SSID als Hash, SSH-Fingerprint – keine Geheimnisse) |
 | `/boot/firmware/gatecontrol/` | `LIESMICH.txt`, `settings.txt`, `STATUS.txt`; hierher kommt die `gateway.env` |
 
 System: Docker Engine + Compose-Plugin aus dem offiziellen Docker-Repository
 (Signaturschlüssel per Fingerprint gepinnt), Log-Rotation für alle Container
 (`json-file`, 3 × 10 MB), zram-Swap, Journal im RAM, `unattended-upgrades`, cloud-init
-für die Imager-Einstellungen. Kein Standard-Passwort, SSH nur über den Imager.
+für die Imager-Einstellungen. Kein Standard-Passwort; SSH nur über den Imager oder
+`SSH_AUTHORIZED_KEY` (dann nur mit Schlüssel).
 
 Gebaut wird mit dem offiziellen [pi-gen](https://github.com/RPi-Distro/pi-gen)
 (Commit gepinnt in `rpi/versions.env`) auf einem nativen arm64-Runner – siehe `rpi/`
