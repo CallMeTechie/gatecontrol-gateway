@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const https = require('node:https');
 const logger = require('../logger');
 
@@ -60,7 +61,38 @@ function normalizeFingerprint(raw) {
   return FINGERPRINT_RE.test(hex) ? hex : null;
 }
 
-function pinMismatchError({ host, port, expected, actual }) {
+/**
+ * Public summary of a leaf certificate (what an admin needs to decide whether
+ * to trust it): canonical SHA-256 pin, subject, issuer, expiry and whether the
+ * certificate is self-signed (issuer = subject and signed by its own key).
+ * Returns null when the peer sent no parsable certificate.
+ */
+function certificateSummary(peer) {
+  if (!peer || !Buffer.isBuffer(peer.raw) || !peer.raw.length) return null;
+  let x509;
+  try {
+    x509 = new crypto.X509Certificate(peer.raw);
+  } catch {
+    return null;
+  }
+  const oneLine = (dn) => String(dn || '').split('\n').filter(Boolean).join(', ').slice(0, 512);
+  let selfSigned = false;
+  try {
+    selfSigned = x509.checkIssued(x509) && x509.verify(x509.publicKey);
+  } catch {
+    selfSigned = false;
+  }
+  const validTo = new Date(x509.validTo);
+  return {
+    sha256: normalizeFingerprint(x509.fingerprint256),
+    subject: oneLine(x509.subject),
+    issuer: oneLine(x509.issuer),
+    validTo: Number.isNaN(validTo.getTime()) ? null : validTo.toISOString(),
+    selfSigned,
+  };
+}
+
+function pinMismatchError({ host, port, expected, actual, certificate = null }) {
   const err = new Error(
     `backend TLS certificate for ${host}:${port} does not match the pinned fingerprint`
   );
@@ -71,11 +103,21 @@ function pinMismatchError({ host, port, expected, actual }) {
   // on the error is what lets the proxy log expected-vs-seen for diagnosis.
   err.expectedFingerprint = expected;
   err.actualFingerprint = actual;
+  err.peerCertificate = certificate;
   return err;
 }
 
 class PinnedHttpsAgent extends https.Agent {
-  constructor({ host, port, fingerprint }) {
+  /**
+   * @param {object} o
+   * @param {string} o.host
+   * @param {number} o.port
+   * @param {string|null} o.fingerprint  canonical pin; null = no pin at all,
+   *   every certificate is a mismatch (used by inspectLeafCertificate)
+   * @param {number} [o.handshakeTimeoutMs]  destroy the socket when the TCP
+   *   connect + TLS handshake takes longer (default: no extra limit)
+   */
+  constructor({ host, port, fingerprint, handshakeTimeoutMs = 0 }) {
     super({
       // Same socket lifecycle as the unpinned path (http-proxy runs with
       // `agent: false`, i.e. one connection per request). Beyond parity this
@@ -97,6 +139,7 @@ class PinnedHttpsAgent extends https.Agent {
     this.pinHost = host;
     this.pinPort = port;
     this.pinFingerprint = fingerprint;
+    this.handshakeTimeoutMs = handshakeTimeoutMs;
   }
 
   /**
@@ -119,12 +162,21 @@ class PinnedHttpsAgent extends https.Agent {
     }
 
     let settled = false;
+    let timer = null;
     const settle = (err) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       if (err) socket.destroy();
       cb(err, err ? undefined : socket);
     };
+    if (this.handshakeTimeoutMs > 0) {
+      timer = setTimeout(() => {
+        const err = new Error(`TLS handshake with ${this.pinHost}:${this.pinPort} timed out`);
+        err.code = 'ETIMEDOUT';
+        settle(err);
+      }, this.handshakeTimeoutMs);
+    }
     socket.once('secureConnect', () => settle(this._verifyPeer(socket)));
     socket.once('error', (err) => settle(err));
     return undefined;
@@ -137,14 +189,56 @@ class PinnedHttpsAgent extends https.Agent {
       : null;
     // getPeerCertificate() (no `detailed`) is the leaf/end-entity certificate.
     const seen = normalizeFingerprint(peer && peer.fingerprint256);
-    if (seen !== null && seen === this.pinFingerprint) return null;
+    if (seen !== null && this.pinFingerprint !== null && seen === this.pinFingerprint) return null;
     return pinMismatchError({
       host: this.pinHost,
       port: this.pinPort,
-      expected: this.pinFingerprint,
+      expected: this.pinFingerprint || 'none',
       actual: seen || 'none',
+      certificate: certificateSummary(peer),
     });
   }
+}
+
+/**
+ * Trust on first use: read the leaf certificate of `host:port` with a bare TLS
+ * handshake and return its certificateSummary(), so a caller can show it to an
+ * admin and store `sha256` as the pin for every later request.
+ *
+ * Runs through a PinnedHttpsAgent without a pin, i.e. through the very same
+ * fail-closed path as a pinned request whose pin does not match: the socket is
+ * never handed to anybody, not a single application byte is written, and it is
+ * destroyed right after the handshake. Nothing learned here is trusted by
+ * itself — it only becomes a pin once someone explicitly stores it.
+ *
+ * Resolves `{ sha256, subject, issuer, validTo, selfSigned }`; rejects with the
+ * socket error (ECONNREFUSED, ETIMEDOUT, a TLS alert, …) otherwise.
+ */
+function inspectLeafCertificate({ host, port, timeoutMs = 10000 }) {
+  const agent = new PinnedHttpsAgent({ host, port, fingerprint: null, handshakeTimeoutMs: timeoutMs });
+  return new Promise((resolve, reject) => {
+    // A request object only to drive the agent: it never receives a socket
+    // (the null pin always mismatches), so nothing of it is ever sent.
+    const req = https.request({ host, port, method: 'HEAD', path: '/', agent });
+    req.once('error', (err) => {
+      if (err && err.code === PIN_MISMATCH_CODE && err.peerCertificate) {
+        resolve(err.peerCertificate);
+        return;
+      }
+      if (err && err.code === PIN_MISMATCH_CODE) {
+        const e = new Error(`${host}:${port} presented no certificate`);
+        e.code = 'ERR_TLS_NO_CERTIFICATE';
+        reject(e);
+        return;
+      }
+      reject(err);
+    });
+    req.once('socket', () => {
+      // unreachable: a null pin never matches, so no socket is ever handed out
+      req.destroy(new Error('TLS probe unexpectedly got a socket'));
+    });
+    req.end();
+  });
 }
 
 /**
@@ -173,6 +267,8 @@ function _resetPinnedAgents() {
 module.exports = {
   PIN_MISMATCH_CODE,
   PinnedHttpsAgent,
+  certificateSummary,
+  inspectLeafCertificate,
   getPinnedAgent,
   normalizeFingerprint,
   _resetPinnedAgents,

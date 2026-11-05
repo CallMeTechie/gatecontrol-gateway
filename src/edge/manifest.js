@@ -81,12 +81,14 @@ function validateCaps(caps, where = 'capabilities') {
   }
   if (caps.http !== undefined) {
     const h = caps.http;
-    if (!isObj(h) || typeof h.lan !== 'boolean' || Object.keys(h).some((x) => x !== 'lan' && x !== 'selfSigned')
-      || (h.selfSigned !== undefined && typeof h.selfSigned !== 'boolean')) {
-      throw new ManifestError('bad_caps', `${where}.http must be { "lan": true|false, "selfSigned"?: true|false }`);
+    // HTTPS ohne Zertifikatsprüfung gibt es nicht: selbstsignierte Geräte nur mit pinSha256
+    if (isObj(h) && h.selfSigned !== undefined) {
+      throw new ManifestError('bad_caps', `${where}.http.selfSigned is no longer supported — pin self-signed certificates with pinSha256 (gc.lan.tlsFingerprint)`);
     }
-    // selfSigned = HTTPS ohne Zertifikatsprüfung erlauben (sonst nur volle Prüfung oder pinSha256)
-    out.http = h.selfSigned === true ? { lan: h.lan, selfSigned: true } : { lan: h.lan };
+    if (!isObj(h) || typeof h.lan !== 'boolean' || Object.keys(h).some((x) => x !== 'lan')) {
+      throw new ManifestError('bad_caps', `${where}.http must be { "lan": true|false }`);
+    }
+    out.http = { lan: h.lan };
   }
   if (caps.mqtt !== undefined) {
     const m = caps.mqtt;
@@ -121,10 +123,7 @@ function intersectCaps(manifestCaps, approved) {
   }
   if (m.mdns && a.mdns) out.mdns = { services: m.mdns.services.filter((s) => a.mdns.services.includes(s)) };
   if (m.tcp && a.tcp) out.tcp = { lan: m.tcp.lan === true && a.tcp.lan === true };
-  if (m.http && a.http) {
-    out.http = { lan: m.http.lan === true && a.http.lan === true };
-    if (m.http.selfSigned === true && a.http.selfSigned === true) out.http.selfSigned = true;
-  }
+  if (m.http && a.http) out.http = { lan: m.http.lan === true && a.http.lan === true };
   if (m.mqtt && a.mqtt) out.mqtt = { topics: m.mqtt.topics.filter((t) => a.mqtt.topics.includes(t)) };
   if (m.serial && a.serial) out.serial = m.serial.filter((s) => a.serial.includes(s));
   return out;

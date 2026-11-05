@@ -120,6 +120,17 @@ function hostCall(api, args) {
   });
 }
 
+// Zusatzfelder, die der Edge-Host an einen Fehler hängen darf (hostResult.data)
+const ERROR_DATA_FIELDS = ['sha256', 'expectedSha256', 'certificate'];
+
+/** Fehler eines gc.*-Aufrufs: code + Zusatzfelder des Edge-Hosts (z. B. e.sha256 bei tls_pin_mismatch). */
+function hostError(msg) {
+  const err = Object.assign(new Error(msg.error || 'gc call failed'), { code: msg.code || 'edge_error' });
+  const data = msg.data && typeof msg.data === 'object' && !Array.isArray(msg.data) ? msg.data : null;
+  if (data) for (const k of ERROR_DATA_FIELDS) if (Object.prototype.hasOwnProperty.call(data, k)) err[k] = data[k];
+  return err;
+}
+
 function fmt(args) {
   return args.map((a) => {
     if (a instanceof Error) return a.stack || a.message;
@@ -240,11 +251,18 @@ function makeGc(info) {
       const body = o.body === undefined || o.body === null ? null
         : (Buffer.isBuffer(o.body) || o.body instanceof Uint8Array || typeof o.body === 'string') ? toB64(o.body) : toB64(JSON.stringify(o.body));
       const r = await hostCall('http.request', { method: o.method || 'GET', url: o.url, headers: o.headers || {}, b64: body, timeoutMs: o.timeoutMs,
-        pinSha256: typeof o.pinSha256 === 'string' ? o.pinSha256 : null, insecure: o.insecure === true });
+        pinSha256: typeof o.pinSha256 === 'string' ? o.pinSha256 : null,
+        // gibt es nicht mehr – nur weiterreichen, damit der Edge-Host es ablehnt (denied) statt es still zu ignorieren
+        ...(o.insecure !== undefined && o.insecure !== null && o.insecure !== false ? { insecure: true } : {}) });
       const buf = Buffer.from(String(r.b64 || ''), 'base64');
       return Object.freeze({ status: r.status, headers: r.headers || {}, body: buf, text: () => buf.toString('utf8'), json: () => JSON.parse(buf.toString('utf8')) });
     },
   });
+  /** Leaf-Zertifikat eines LAN-Geräts (nur TLS-Handshake): {sha256, subject, issuer, validTo, selfSigned}. */
+  const tlsFingerprint = (opts) => {
+    const o = opts && typeof opts === 'object' ? opts : {};
+    return hostCall('tls.fingerprint', { host: o.host, port: o.port === undefined ? 443 : o.port, timeoutMs: o.timeoutMs });
+  };
   return Object.freeze({
     id: info.id,
     version: info.version,
@@ -265,7 +283,7 @@ function makeGc(info) {
       delete: (key) => hostCall('store.delete', { key }),
     }),
     log: Object.freeze({ info: log('info'), warn: log('warn'), error: log('error') }),
-    lan: Object.freeze({ udp, mdns, tcp, http: httpApi }),
+    lan: Object.freeze({ udp, mdns, tcp, http: httpApi, tlsFingerprint }),
     mqtt: Object.freeze({
       subscribe: async (topic, fn) => {
         const r = await hostCall('mqtt.subscribe', { topic });
@@ -332,7 +350,7 @@ process.on('message', (msg) => {
       pending.delete(msg.id);
       clearTimeout(p.timer);
       if (msg.ok) p.resolve(msg.value);
-      else p.reject(Object.assign(new Error(msg.error || 'gc call failed'), { code: msg.code || 'edge_error' }));
+      else p.reject(hostError(msg));
       return;
     }
     case 'call':

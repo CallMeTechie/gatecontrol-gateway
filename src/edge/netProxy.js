@@ -12,14 +12,16 @@ const https = require('node:https');
 const os = require('node:os');
 const { LIMITS } = require('./constants');
 const { DeniedError, checkPort } = require('./lanGuard');
-const { PinnedHttpsAgent, normalizeFingerprint, PIN_MISMATCH_CODE } = require('../proxy/tlsPin');
+const { PinnedHttpsAgent, normalizeFingerprint, inspectLeafCertificate, PIN_MISMATCH_CODE } = require('../proxy/tlsPin');
 
 const HTTP_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const HOP_HEADERS = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer', 'proxy-authorization']);
 const TCP_CONNECT_TIMEOUT_MS = 10000;
+const TLS_PROBE_TIMEOUT_MS = 10000;
 
 class NetError extends Error {
-  constructor(code, message) { super(message); this.code = code; }
+  /** `data`: zusätzliche Felder, die der Edge-Teil am Fehler sieht (z. B. sha256 bei tls_pin_mismatch). */
+  constructor(code, message, data = null) { super(message); this.code = code; if (data) this.data = data; }
 }
 
 function decodeB64(b64, max) {
@@ -37,22 +39,6 @@ function lanInterfaceAddrs(guard) {
     for (const a of addrs || []) if (a.family === 'IPv4' && !a.internal && guard.allowed(a.address)) out.push(a.address);
   }
   return out;
-}
-
-/**
- * Agent ohne Zertifikatsprüfung – ausschließlich für Anfragen mit
- * `insecure: true`, die tlsOptions() nur bei genehmigter Fähigkeit
- * `http.selfSigned` erlaubt (Admin-Freigabe am Server). Kein Pooling.
- */
-class SelfSignedAgent extends https.Agent {
-  constructor() {
-    super({ keepAlive: false, maxCachedSessions: 0 });
-  }
-
-  createConnection(options, cb) {
-    // bewusst ohne Kettenprüfung (Fähigkeit http.selfSigned, siehe oben)
-    return super.createConnection({ ...options, rejectUnauthorized: false }, cb);
-  }
 }
 
 class PluginNet {
@@ -88,6 +74,7 @@ class PluginNet {
       'tcp.end': (a) => this.tcpEnd(a),
       'tcp.destroy': (a) => this.tcpDestroy(a),
       'http.request': (a) => this.httpRequest(a),
+      'tls.fingerprint': (a) => this.tlsFingerprint(a),
       'mdns.browse': (a) => this.mdnsBrowse(a),
       'mdns.stop': (a) => this.mdnsStop(a),
       'serial.open': (a) => this.serialOpen(a),
@@ -209,17 +196,17 @@ class PluginNet {
   // ─── HTTP ──────────────────────────────────────
 
   /**
-   * TLS-Prüfung einer HTTPS-Anfrage (sicher by default):
+   * TLS-Prüfung einer HTTPS-Anfrage – es gibt keinen Weg ohne Prüfung:
    *  - Standard: volle Prüfung (Kette + Name/IP-SAN), rejectUnauthorized: true;
    *  - `pinSha256`: SHA-256 des Leaf-Zertifikats (wie `backend_tls_fingerprint`
    *    der HTTPS-Routen, src/proxy/tlsPin.js) – dann ersetzt der Pin die
-   *    Kettenprüfung, und die Anfrage bekommt den Socket erst nach passendem Pin;
-   *  - `insecure: true`: keine Prüfung – nur mit der Fähigkeit
-   *    `http.selfSigned` (im Manifest verlangt UND vom Admin genehmigt).
+   *    Kettenprüfung, und die Anfrage bekommt den Socket erst nach passendem Pin.
+   *    So sprechen Edge-Teile Geräte mit selbstsigniertem Zertifikat an; den
+   *    Fingerabdruck liefert beim ersten Kontakt tlsFingerprint().
    */
-  tlsOptions(u, port, { pinSha256, insecure }, c) {
+  tlsOptions(u, port, { pinSha256 }) {
     if (u.protocol !== 'https:') {
-      if (pinSha256 || insecure) throw new NetError('bad_request', 'pinSha256/insecure only for https');
+      if (pinSha256) throw new NetError('bad_request', 'pinSha256 only for https');
       return {};
     }
     if (pinSha256 !== undefined && pinSha256 !== null) {
@@ -227,16 +214,39 @@ class PluginNet {
       if (!fp) throw new NetError('bad_request', 'pinSha256 must be the SHA-256 of the certificate (64 hex characters)');
       return { agent: new PinnedHttpsAgent({ host: u.hostname, port, fingerprint: fp }) };
     }
-    if (insecure === true) {
-      this.need(c.selfSigned === true, 'http.selfSigned');
-      return { agent: new SelfSignedAgent() };
-    }
     return { agent: false, rejectUnauthorized: true };
   }
 
-  async httpRequest({ method = 'GET', url, headers = {}, b64 = null, timeoutMs, pinSha256 = null, insecure = false }) {
+  /**
+   * gc.lan.tlsFingerprint({host, port, timeoutMs}): nur der TLS-Handshake
+   * (keine Anwendungsdaten, Socket danach geschlossen) → Zusammenfassung des
+   * Leaf-Zertifikats `{sha256, subject, issuer, validTo, selfSigned}`, damit
+   * ein Plugin den Fingerabdruck beim ersten Kontakt dem Admin zeigen und als
+   * `pinSha256` speichern kann (trust on first use). Dieselben Ziele wie
+   * gc.lan.http/tcp: Fähigkeit `http.lan` oder `tcp.lan`, nur LAN-Adressen.
+   */
+  async tlsFingerprint({ host, port = 443, timeoutMs } = {}) {
+    const c = this.caps();
+    this.need((c.http && c.http.lan === true) || (c.tcp && c.tcp.lan === true), 'http.lan or tcp.lan');
+    this.guard.check(host);
+    checkPort(port);
+    const limit = Math.max(1000, Math.min(LIMITS.httpTimeoutMaxMs, Number.isFinite(timeoutMs) ? timeoutMs : TLS_PROBE_TIMEOUT_MS));
+    try {
+      return await inspectLeafCertificate({ host, port, timeoutMs: limit });
+    } catch (e) {
+      if (e.code === 'ETIMEDOUT') throw new NetError('timeout', `TLS handshake with ${host}:${port} timed out`);
+      if (e.code === 'ERR_TLS_NO_CERTIFICATE') throw new NetError('tls_error', e.message);
+      throw new NetError('net_error', `tls: ${e.code || e.message}`);
+    }
+  }
+
+  async httpRequest({ method = 'GET', url, headers = {}, b64 = null, timeoutMs, pinSha256 = null, insecure }) {
     const c = this.caps().http;
     this.need(c && c.lan === true, 'http.lan');
+    // HTTPS ohne Zertifikatsprüfung gibt es nicht (mehr) – nie still mit Prüfung weitermachen
+    if (insecure !== undefined && insecure !== null && insecure !== false) {
+      throw new DeniedError('insecure HTTPS is not available — pin the certificate with pinSha256 (see gc.lan.tlsFingerprint)');
+    }
     let u;
     try { u = new URL(String(url)); } catch { throw new NetError('bad_request', 'invalid url'); }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new NetError('bad_request', 'only http and https');
@@ -261,7 +271,7 @@ class PluginNet {
     if (body.length) hdrs['content-length'] = String(body.length);
     const limit = Math.max(1000, Math.min(LIMITS.httpTimeoutMaxMs, Number.isFinite(timeoutMs) ? timeoutMs : LIMITS.httpTimeoutMaxMs));
     const mod = u.protocol === 'https:' ? https : http;
-    const opts = { method: m, headers: hdrs, agent: false, timeout: limit, ...this.tlsOptions(u, port, { pinSha256, insecure }, c) };
+    const opts = { method: m, headers: hdrs, agent: false, timeout: limit, ...this.tlsOptions(u, port, { pinSha256 }) };
     return new Promise((resolve, reject) => {
       const deadline = setTimeout(() => req.destroy(new NetError('timeout', 'http request timed out')), limit);
       const req = mod.request(u, opts, (res) => {
@@ -284,8 +294,11 @@ class PluginNet {
       req.on('error', (e) => {
         clearTimeout(deadline);
         if (e instanceof NetError) return reject(e);
-        if (e.code === PIN_MISMATCH_CODE) return reject(new NetError('tls_pin_mismatch', `certificate of ${u.hostname}:${port} does not match pinSha256 (seen ${e.actualFingerprint})`));
-        if (/CERT|SELF_SIGNED|UNABLE_TO|ERR_TLS/.test(String(e.code))) return reject(new NetError('tls_error', `${e.code}: certificate not trusted — use pinSha256`));
+        if (e.code === PIN_MISMATCH_CODE) {
+          return reject(new NetError('tls_pin_mismatch', `certificate of ${u.hostname}:${port} does not match pinSha256 (seen ${e.actualFingerprint})`,
+            { sha256: e.actualFingerprint, expectedSha256: e.expectedFingerprint, certificate: e.peerCertificate || null }));
+        }
+        if (/CERT|SELF_SIGNED|UNABLE_TO|ERR_TLS/.test(String(e.code))) return reject(new NetError('tls_error', `${e.code}: certificate not trusted — pin it with pinSha256 (gc.lan.tlsFingerprint)`));
         return reject(new NetError('net_error', `http: ${e.code || e.message}`));
       });
       if (body.length) req.write(body);

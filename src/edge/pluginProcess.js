@@ -201,7 +201,9 @@ class EdgeProcess extends EventEmitter {
       .then(() => this.hooks.hostCall(String(m.api || ''), m.args && typeof m.args === 'object' ? m.args : {}))
       .then((value) => reply({ t: 'hostResult', id: m.id, ok: true, value: value === undefined ? null : value }),
         (e) => reply({ t: 'hostResult', id: m.id, ok: false, error: String((e && e.message) || e).slice(0, 300),
-          code: (e && typeof e.code === 'string') ? e.code : 'edge_error' }))
+          code: (e && typeof e.code === 'string') ? e.code : 'edge_error',
+          // Zusatzfelder des Edge-Hosts (NetError.data, z. B. sha256 bei tls_pin_mismatch)
+          ...(e && e.data && typeof e.data === 'object' && !Array.isArray(e.data) ? { data: e.data } : {}) }))
       .finally(() => { this.hostCalls--; });
   }
 
