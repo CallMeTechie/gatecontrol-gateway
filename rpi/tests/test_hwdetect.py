@@ -176,6 +176,36 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(len(p["radios"]), 1)
         self.assertIsInstance(p["cpu_cores"], int)
 
+        self.assertIsInstance(p["disks"], list)
+
+    def test_disks(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            sysb = os.path.join(d, "sys")
+            for dev, rem in (("sda", "0"), ("sdb", "1"), ("mmcblk0", "1")):
+                os.makedirs(os.path.join(sysb, dev))
+                with open(os.path.join(sysb, dev, "removable"), "w", encoding="ascii") as fh:
+                    fh.write(rem + "\n")
+            usb = os.path.join(d, "devices", "usb1", "sdc")
+            os.makedirs(usb)
+            os.symlink(usb, os.path.join(sysb, "sdc"))
+            mnt = os.path.join(d, "mnt usb")
+            os.makedirs(mnt)
+            mounts = os.path.join(d, "mounts")
+            esc = mnt.replace(" ", "\\040")
+            with open(mounts, "w", encoding="utf-8") as fh:
+                fh.write("/dev/mmcblk0p2 / ext4 rw 0 0\n"
+                         "proc /proc proc rw 0 0\n"
+                         "/dev/mmcblk0p1 /boot/firmware vfat rw 0 0\n"
+                         f"/dev/sdb1 {esc} exfat rw 0 0\n"
+                         f"/dev/sda1 {d} ext4 rw 0 0\n"
+                         f"/dev/sdc1 {d}/devices ext4 rw 0 0\n"
+                         "tmpfs /tmp tmpfs rw 0 0\n")
+            got = {x["mount"]: x["removable"] for x in hw.disks(mounts, sysb)}
+            self.assertEqual(got, {"/": False, mnt: True, d: False, d + "/devices": True})
+            self.assertTrue(all(x["sizeBytes"] > 0 for x in hw.disks(mounts, sysb)))
+        self.assertEqual(hw._base_device("/dev/nvme0n1p1"), "nvme0n1")
+
 
 if __name__ == "__main__":
     unittest.main()

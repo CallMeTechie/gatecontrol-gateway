@@ -184,11 +184,14 @@ Im Heartbeat zusätzlich:
 
 ## Ortszeit
 
-Portscan-Fenster und Speedtest-Plan richten sich nach der Umgebungsvariable
-`TZ` des Gateway-Containers (Node bringt die Zeitzonendaten selbst mit). Das
-Pi-Image reicht die eingestellte Zeitzone (`TIMEZONE` in `settings.txt`) über
-`.env` durch; bei Docker/Synology `TZ=Europe/Berlin` in der Compose-Datei setzen,
-sonst gilt UTC.
+Portscan-Fenster, Speedtest-Plan und die Zeiten des DNS-Filters richten sich
+nach `features.timezone` vom Server (IANA-Name, Phase 3b; überschreibt `TZ`
+sofort und plant Portscan/Speedtest neu). Fehlt der Wert (älterer Server),
+gilt die Umgebungsvariable `TZ` des Gateway-Containers (Node bringt die
+Zeitzonendaten selbst mit): Das Pi-Image reicht die eingestellte Zeitzone
+(`TIMEZONE` in `settings.txt`) über `.env` durch, bei Docker/Synology
+`TZ=Europe/Berlin` in der Compose-Datei; sonst UTC. Telemetrie
+`timezone: { effective, source: 'server'|'env'|'default', offsetMin }`.
 
 ## Rechte und Ressourcen
 

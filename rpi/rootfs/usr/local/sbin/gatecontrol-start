@@ -112,7 +112,7 @@ apply_hostname() {
 }
 
 write_compose_env() {
-  local dev="" type="" tz="" tmp
+  local dev="" type="" tz="" cache="" tmp
   if [ -r "$GC_RUN/zigbee.env" ]; then
     dev="$(gc_env_value "$GC_RUN/zigbee.env" GC_ZIGBEE_DEVICE)"
     type="$(gc_env_value "$GC_RUN/zigbee.env" GC_ZIGBEE_TYPE)"
@@ -120,6 +120,17 @@ write_compose_env() {
   [[ "$dev" =~ ^/dev/[A-Za-z0-9/_.:-]+$ ]] || dev=""
   tz="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
   [[ "$tz" =~ ^[A-Za-z0-9/_+-]{1,64}$ ]] || tz=""
+  # Zwischenspeicher auf einem eigenen Datenträger (USB-Platte, per fstab
+  # eingehängt) statt auf der SD-Karte: CACHE_DIR in settings.txt.
+  cache="$(gc_setting CACHE_DIR '')"
+  if [ -n "$cache" ]; then
+    if [[ "$cache" =~ ^/[A-Za-z0-9/_.@+-]{1,200}$ ]] && [[ "$cache" != *..* ]] && [ -d "$cache" ]; then
+      gc_log "Zwischenspeicher: $cache"
+    else
+      gc_log "CACHE_DIR=$cache ungültig oder kein Ordner — Zwischenspeicher bleibt in $GC_DIR/gateway-cache"
+      cache=""
+    fi
+  fi
   tmp="$(mktemp "$GC_DIR/.env.XXXXXX")"
   {
     echo "# Automatisch geschrieben von gatecontrol-start — Änderungen gehen beim nächsten Start verloren."
@@ -129,6 +140,7 @@ write_compose_env() {
       echo "GC_ZIGBEE_DEVICE=$dev"
     fi
     if [ -n "$tz" ]; then echo "TZ=$tz"; fi
+    if [ -n "$cache" ]; then echo "GC_CACHE_DIR=$cache"; fi
   } >"$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$GC_DIR/.env"
@@ -147,7 +159,7 @@ compose() {
 
 main() {
   [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen (sudo gatecontrol-start)" >&2; exit 1; }
-  install -d -m 0755 "$GC_RUN" "$GC_DIR/gateway-state" "$GC_DIR/deconz"
+  install -d -m 0755 "$GC_RUN" "$GC_DIR/gateway-state" "$GC_DIR/gateway-cache" "$GC_DIR/deconz"
   install -d -m 0700 -o root -g root "$CONFIG_DIR"
 
   local imported=0 rc=0

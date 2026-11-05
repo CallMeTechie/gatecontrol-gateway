@@ -8,7 +8,8 @@ belegen). Ergebnis:
   /run/gatecontrol/zigbee.env                      GC_ZIGBEE_DEVICE=…, GC_ZIGBEE_TYPE=…
   /opt/gatecontrol-gateway/gateway-state/hardware.json   Hardware-Profil für die
                                                    Gateway-Telemetrie (Modell, RAM,
-                                                   Kerne, Speicher, Funkmodule)
+                                                   Kerne, Speicher, Datenträger,
+                                                   Funkmodule)
 
 Erkennung RaspBee II / RaspBee / ConBee II/III: Es wird das deCONZ-
 Serial-Protokoll gesprochen (SLIP-Rahmen, Kommando VERSION 0x0D). Nur ein
@@ -274,6 +275,64 @@ def storage(path):
         return None
 
 
+REAL_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "vfat", "exfat", "ntfs", "ntfs3", "fuseblk", "f2fs", "hfsplus"}
+SKIP_MOUNTS = ("/proc", "/sys", "/dev", "/run", "/boot", "/var/lib/docker", "/snap")
+
+
+def _unescape_mount(s):
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _base_device(source):
+    name = os.path.basename(source)
+    m = re.match(r"^(mmcblk\d+|nvme\d+n\d+)(p\d+)?$", name)
+    if m:
+        return m.group(1)
+    m = re.match(r"^([a-z]+)\d*$", name)
+    return m.group(1) if m else None
+
+
+def _removable(source, sys_block="/sys/class/block"):
+    dev = _base_device(source)
+    if not dev or dev.startswith("mmcblk"):  # SD-Karte = Systemträger
+        return False
+    if (_read(os.path.join(sys_block, dev, "removable"), 4) or "") == "1":
+        return True
+    try:
+        return "/usb" in os.path.realpath(os.path.join(sys_block, dev))
+    except OSError:
+        return False
+
+
+def disks(mounts="/proc/mounts", sys_block="/sys/class/block", limit=16):
+    """Eingehängte Datenträger (Vorschlag für den Zwischenspeicher, Phase 3b §3)."""
+    out, seen = [], set()
+    try:
+        with open(mounts, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read(256 * 1024).splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        source, mount, fstype = _unescape_mount(parts[0]), _unescape_mount(parts[1]), parts[2]
+        if fstype not in REAL_FS or not source.startswith("/dev/") or mount in seen:
+            continue
+        if any(mount == p or mount.startswith(p + "/") for p in SKIP_MOUNTS):
+            continue
+        try:
+            st = os.statvfs(mount)
+        except OSError:
+            continue
+        seen.add(mount)
+        out.append({"mount": mount[:256], "fs": fstype, "sizeBytes": st.f_blocks * st.f_frsize,
+                    "freeBytes": st.f_bavail * st.f_frsize, "removable": _removable(source, sys_block)})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def hardware_profile(zigbee):
     return {
         "schema": 1,
@@ -286,6 +345,7 @@ def hardware_profile(zigbee):
         "cpu_cores": os.cpu_count(),
         "mem_total": mem_total(),
         "storage": storage(GC_DIR),
+        "disks": disks(),
         "radios": [zigbee] if zigbee.get("device") else [],
         "detected_at": int(time.time() * 1000),
     }

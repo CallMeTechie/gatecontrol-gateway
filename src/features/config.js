@@ -6,6 +6,10 @@
 
 const crypto = require('node:crypto');
 const net = require('node:net');
+const { normalizeMac } = require('./macs');
+const { validTimezone } = require('./timezone');
+const { normalizeDns } = require('../dns/config');
+const { normalizeCache } = require('../cache/config');
 
 const DEFAULT_TARGETS = Object.freeze(['1.1.1.1', '9.9.9.9']);
 const SPEEDTEST_PLANS = new Set(['off', '4x', 'hourly']);
@@ -22,13 +26,6 @@ function isHostname(h) {
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const bool = (v, dflt) => (typeof v === 'boolean' ? v : dflt);
 
-/** "AA-BB-CC-DD-EE-FF" / "aabb.ccdd.eeff" / … → "aa:bb:cc:dd:ee:ff" oder null. */
-function normalizeMac(mac) {
-  if (typeof mac !== 'string') return null;
-  const hex = mac.replace(/[:\-.\s]/g, '').toLowerCase();
-  if (!/^[0-9a-f]{12}$/.test(hex)) return null;
-  return hex.match(/../g).join(':');
-}
 
 /** Öffentlich sinnvolle IPv4-Messziele: keine Null-, Loopback-, Multicast- oder Broadcast-Adressen. */
 function isUsableTarget(ip) {
@@ -44,6 +41,10 @@ function normalizeFeatures(raw) {
   const iq = isObj(f.inetq) ? f.inetq : {};
   const pr = isObj(f.presence) ? f.presence : {};
   const up = isObj(f.ups) ? f.ups : {};
+  const dns = normalizeDns(f.dns);
+  dns.enabled = present && dns.enabled;
+  const cache = normalizeCache(f.cache);
+  if (!present) Object.assign(cache, { enabled: false, requested: false, problem: null });
 
   const targets = Array.isArray(iq.targets)
     ? [...new Set(iq.targets.filter((t) => typeof t === 'string' && isUsableTarget(t)))].slice(0, MAX_TARGETS)
@@ -72,6 +73,9 @@ function normalizeFeatures(raw) {
       port: upsPort,
       name: upsName,
     },
+    timezone: present ? validTimezone(f.timezone) : null,
+    dns,
+    cache,
   };
 }
 
