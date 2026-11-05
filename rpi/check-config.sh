@@ -87,6 +87,26 @@ b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | j
 if [ "$a" = "$b" ]; then echo "ok: Gateway-Dienst hat dieselben Sicherheits-Optionen wie docker-compose.example.yml"; else
   diff <(echo "$a") <(echo "$b") || true; die "Sicherheits-Optionen weichen von docker-compose.example.yml ab"
 fi
+# Edge-Container (docs/edge.md): gleicher Dienst + gleiche Volumes wie im Beispiel,
+# feste UID 61001, keine Capabilities, no-new-privileges, read-only.
+edge_svcs=(edge)
+for svc in "${edge_svcs[@]}"; do
+  pick=".services.$svc | {image, entrypoint, network_mode, cap_drop, cap_add, read_only, user, security_opt, tmpfs, mem_limit, pids_limit, devices, volumes: [.volumes[] | {type, source, target, read_only, volume}]}"
+  a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$pick")"
+  b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
+  if [ "$a" = "$b" ]; then echo "ok: Dienst $svc wie in docker-compose.example.yml"; else
+    diff <(echo "$a") <(echo "$b") || true; die "Dienst $svc weicht von docker-compose.example.yml ab"
+  fi
+  echo "$b" | jq -e '.user == "61001:61001" and .cap_drop == ["ALL"] and .cap_add == null and .read_only == true
+    and (.security_opt | index("no-new-privileges:true")) != null and .devices == null' >/dev/null \
+    || die "Dienst $svc: Sicherheits-Optionen unvollständig (UID 61001, cap_drop ALL, read_only, no-new-privileges)"
+done
+vpick='.volumes | with_entries(.value |= {driver_opts})'
+a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$vpick")"
+b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"
+if [ "$a" = "$b" ]; then echo "ok: Volumes wie in docker-compose.example.yml"; else
+  diff <(echo "$a") <(echo "$b") || true; die "Volumes weichen von docker-compose.example.yml ab"
+fi
 rm -rf "$CDIR"
 
 echo

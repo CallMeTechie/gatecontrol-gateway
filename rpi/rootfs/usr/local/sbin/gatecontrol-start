@@ -13,8 +13,8 @@
 #     es startet nichts.
 #  3. Hostname setzen (settings.txt HOSTNAME → GC_HOSTNAME in der env →
 #     Name aus dem Raspberry Pi Imager bleibt → gc-<Peer-Name>).
-#  4. Compose-Profil "zigbee" (deCONZ) je nach Erkennung durch
-#     gatecontrol-hwdetect, dann docker compose up.
+#  4. Dienste wählen: gateway, edge (settings.txt EDGE=on|off, Standard on),
+#     deconz je nach Erkennung durch gatecontrol-hwdetect; docker compose up.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
@@ -166,14 +166,23 @@ main() {
   apply_hostname
   write_compose_env
 
+  local svc=(gateway) edge
+  # Edge-Container (Plugin-Teile, docs/edge.md): Standard an — er bleibt
+  # untätig, bis der Server Edge für dieses Gateway einschaltet.
+  edge="$(gc_setting EDGE on | tr '[:upper:]' '[:lower:]')"
+  if [ "$edge" = off ]; then
+    compose rm -s -f "${EDGE_SERVICES[@]}" >/dev/null 2>&1 || true
+  else
+    svc+=("${EDGE_SERVICES[@]}")
+  fi
   if [ -n "$ZIGBEE_DEVICE" ]; then
     gc_log "Zigbee: ${ZIGBEE_TYPE:-?} an $ZIGBEE_DEVICE — deCONZ wird gestartet (Phoscon: http://$(hostname).local:8090)"
-    compose up -d --remove-orphans
+    svc+=(deconz)
   else
     # deCONZ eines früheren Starts entfernen (Modul abgezogen / ZIGBEE=off)
     compose rm -s -f deconz >/dev/null 2>&1 || true
-    compose up -d --remove-orphans gateway
   fi
+  compose up -d --remove-orphans "${svc[@]}"
   if [ "$imported" = 1 ]; then
     compose up -d --force-recreate gateway
   fi
@@ -187,4 +196,5 @@ main() {
 
 ZIGBEE_DEVICE=""
 ZIGBEE_TYPE=""
+EDGE_SERVICES=(edge)
 main "$@"

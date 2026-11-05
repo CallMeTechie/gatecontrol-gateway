@@ -81,6 +81,9 @@ check "config/ ist 0700" test "$(stat -c %a "$R/opt/gatecontrol-gateway/config")
 check "gateway-state/ + deconz/ vorhanden" test -d "$R/opt/gatecontrol-gateway/gateway-state" -a -d "$R/opt/gatecontrol-gateway/deconz"
 check "keine gateway.env im Image" test ! -e "$R/opt/gatecontrol-gateway/config/gateway.env"
 check "deCONZ-Image mit Digest eingetragen" grep -qE 'image: deconzcommunity/deconz:[0-9.]+@sha256:[0-9a-f]{64}' "$R/opt/gatecontrol-gateway/docker-compose.yml"
+check "Edge-Dienst in der Compose-Datei (docs/edge.md)" grep -q 'src/edge/main.js' "$R/opt/gatecontrol-gateway/docker-compose.yml"
+check "Edge-Dienst als UID 61001" grep -q 'user: "61001:61001"' "$R/opt/gatecontrol-gateway/docker-compose.yml"
+check "settings.txt: EDGE dokumentiert" grep -q '^#EDGE=on' "$B/gatecontrol/settings.txt"
 if [ -n "$EXPECT_VERSION" ]; then
   check "image-release = $EXPECT_VERSION" grep -qx "$EXPECT_VERSION" "$R/etc/gatecontrol/image-release"
 fi

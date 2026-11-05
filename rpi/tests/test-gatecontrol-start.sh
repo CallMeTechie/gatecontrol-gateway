@@ -95,7 +95,7 @@ expect "env von der Boot-Partition gelöscht" test ! -e "$T/boot/gatecontrol/gat
 expect "Hostname gc-keller-pi-3" grep -qx 'gc-keller-pi-3' "$T/hostname"
 expect "/etc/hosts angepasst" grep -q $'^127.0.1.1\tgc-keller-pi-3$' "$T/etc/hosts"
 expect "cloud-init preserve_hostname" grep -q 'preserve_hostname: true' "$T/etc/cloud/cloud.cfg.d/99-gatecontrol-hostname.cfg"
-expect "nur Gateway gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway$' "$T/docker.log"
+expect "Gateway + Edge gestartet (ohne deCONZ)" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway edge$' "$T/docker.log"
 expect "deCONZ entfernt" grep -q 'compose -f docker-compose.yml rm -s -f deconz' "$T/docker.log"
 expect "Gateway nach neuer env neu erstellt" grep -q 'up -d --force-recreate gateway' "$T/docker.log"
 expect ".env ohne Zigbee-Profil" not grep -q COMPOSE_PROFILES "$T/opt/.env"
@@ -143,7 +143,7 @@ expect "Exit 0" run_start
 expect ".env: Profil zigbee" grep -qx 'COMPOSE_PROFILES=zigbee' "$T/opt/.env"
 expect ".env: Gerät" grep -qx 'GC_ZIGBEE_DEVICE=/dev/ttyAMA0' "$T/opt/.env"
 expect ".env: Zeitzone des Pi für deCONZ" grep -qx 'TZ=Europe/Berlin' "$T/opt/.env"
-expect "kompletter Stack gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans$' "$T/docker.log"
+expect "kompletter Stack gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway edge deconz$' "$T/docker.log"
 expect "Hostname aus settings.txt" grep -qx 'mein-gw' "$T/hostname"
 expect "Status nennt Port 8090" grep -q '8090' "$T/run/status"
 
@@ -155,6 +155,13 @@ expect "Hostname trotz BOM" grep -qx 'bom-gw' "$T/hostname"
 expect "STATUS.txt: Abschnitt Einstellungen" grep -q '^Einstellungen (settings.txt):' "$T/boot/gatecontrol/STATUS.txt"
 expect "STATUS.txt: WLAN-Zeile" grep -q '^  - WLAN: "Netz"' "$T/boot/gatecontrol/STATUS.txt"
 rm -f "$T/run/settings.status"
+
+echo "== EDGE=off in settings.txt"
+printf 'EDGE=Off\r\n' >"$T/boot/gatecontrol/settings.txt"
+: >"$T/docker.log"
+expect "Exit 0" run_start
+expect "Edge entfernt" grep -q 'compose -f docker-compose.yml rm -s -f edge$' "$T/docker.log"
+expect "ohne Edge gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway deconz$' "$T/docker.log"
 
 echo "== Rollback-Override von update.sh bleibt aktiv"
 echo 'services: {gateway: {image: x@sha256:00}}' >"$T/opt/docker-compose.rollback.yml"

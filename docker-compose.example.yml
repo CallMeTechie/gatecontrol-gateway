@@ -41,6 +41,17 @@ services:
     volumes:
       - ./config:/config:ro      # Place gateway.env here
       - ./gateway-state:/state          # rw: self-update flag + last-pull marker (#2b)
+      # Edge-Container (docs/edge.md): Zugangsdaten + Netzgrenzen-Marker hin,
+      # Zusammenfassung für die Telemetrie zurück. Ohne Edge-Dienst weglassen.
+      - type: volume
+        source: edge-run
+        target: /run/gc-edge
+        volume: { nocopy: true }
+      - type: volume
+        source: edge-status
+        target: /run/gc-edge-status
+        read_only: true
+        volume: { nocopy: true }
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
@@ -57,3 +68,64 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Edge-Container für Plugin-Teile im Heimnetz (docs/edge.md). Dasselbe Image
+  # wie das Gateway, anderer Befehl; läuft ohne Rechte als Benutzer 61001 und
+  # bleibt untätig, bis der Server Edge für dieses Gateway einschaltet.
+  # Wer Edge nicht nutzen will, kann den Dienst (und die Volumes) weglassen.
+  edge:
+    image: ghcr.io/callmetechie/gatecontrol-gateway:latest
+    entrypoint: ["/sbin/tini", "--", "node", "src/edge/main.js"]
+    restart: unless-stopped
+    network_mode: host        # LAN-Geräte (UDP/Multicast/mDNS) wie das Gateway
+    user: "61001:61001"       # feste UID: die Netzgrenze (Owner-Match) hängt daran
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 512m
+    pids_limit: 256
+    volumes:
+      - type: volume
+        source: edge-run
+        target: /run/gc-edge
+        read_only: true
+        volume: { nocopy: true }
+      - type: volume
+        source: edge-status
+        target: /run/gc-edge-status
+        volume: { nocopy: true }
+      - edge-state:/state-edge
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "node", "src/edge/healthcheck.js"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # tmpfs, geteilt: der Gateway-Container (root) schreibt, das setgid-Bit gibt
+  # jeder Datei die Gruppe 61001 → der Edge-Container kann lesen, nicht ändern.
+  edge-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=61001,mode=2750"
+  # tmpfs, geteilt: der Edge-Host schreibt seine Zusammenfassung, das Gateway liest.
+  edge-status:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=61001,gid=61001,mode=0755"
+  # Pakete der Edge-Teile + gc.store (übernimmt Besitzer 61001 aus dem Image)
+  edge-state:

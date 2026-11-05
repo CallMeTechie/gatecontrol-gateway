@@ -52,6 +52,15 @@ RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils &
     mkdir -p /config /var/log/gateway && \
     chown -R gateway:gateway /var/log/gateway
 
+# Edge-Container (docs/edge.md): gleiches Image, anderer Befehl
+# (node src/edge/main.js), eigener Benutzer mit FESTER UID/GID 61001 – die
+# Netzgrenze des Gateway-Containers (Owner-Match) und die Volumes hängen an
+# dieser Zahl. /state-edge ist der Einhängepunkt des Edge-Volumes; ein neues
+# benanntes Volume übernimmt Besitzer und Rechte dieses Ordners.
+RUN addgroup -g 61001 gcedge && \
+    adduser -u 61001 -G gcedge -D -H -h /state-edge -s /sbin/nologin gcedge && \
+    install -d -m 0700 -o gcedge -g gcedge /state-edge
+
 COPY --from=wg-build /wireguard-go /usr/local/bin/wireguard-go
 COPY --from=node-build /build/node_modules /app/node_modules
 COPY --from=node-build /build/src /app/src
