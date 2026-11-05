@@ -21,9 +21,13 @@ async function main() {
   const mdns = new MdnsService({ logger });
   const host = new EdgeHost({ paths: p, logger, mdns });
   await host.start();
+  // Die Zeitgeber des Hosts sind unref() (Tests); der Container-Prozess soll
+  // aber auch ohne Verbindung und ohne Zugangsdatei weiterlaufen.
+  const keepAlive = setInterval(() => {}, 60 * 60 * 1000);
   logger.info({ uid: process.getuid && process.getuid() }, 'edge: host running');
   const shutdown = async (signal) => {
     logger.info({ signal }, 'edge: shutting down');
+    clearInterval(keepAlive);
     try { await host.stop(); } catch (e) { logger.warn({ err: e.message }, 'edge: shutdown error'); }
     process.exit(0);
   };

@@ -150,3 +150,27 @@ test('Gateway-Seite: Zugangsdatei nur mit Edge-Volume, Adressen aufgelöst, Stat
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('Start ohne Zugangsdatei: Host wartet und verbindet, sobald sie da ist', async () => {
+  const { EdgeHost } = require('../src/edge/host');
+  const EventEmitter = require('node:events');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-edge-start-'));
+  const channel = Object.assign(new EventEmitter(), { connected: false, reconnects: 0, start() {}, stop() {}, send() { return false; }, reconnect() { this.reconnects++; } });
+  let creds = null;
+  const host = new EdgeHost({ paths: { runDir: dir, statusDir: null, stateDir: dir, packagesDir: path.join(dir, 'p'), dataDir: path.join(dir, 'd') },
+    channel, loadCredentials: () => creds, fenceCheck: async () => ({ active: true, backend: 'test', reason: null }), hardware: () => null });
+  try {
+    await host.start();
+    assert.strictEqual(channel.reconnects, 0);
+    creds = { serverUrl: 'https://gc.example.com', apiToken: 't', serverAddrs: ['192.0.2.7'], tunnelIp: null };
+    await new Promise((r) => setTimeout(r, 2500));
+    assert.strictEqual(channel.reconnects, 1, 'neue Zugangsdatei → sofort verbinden');
+    creds = { ...creds, serverAddrs: ['192.0.2.8'] };
+    channel.connected = true;
+    await host.tick();
+    assert.strictEqual(channel.reconnects, 1, 'nur neue Adresse bei bestehender Verbindung → kein Abbruch');
+  } finally {
+    await host.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

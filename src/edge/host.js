@@ -94,7 +94,22 @@ class EdgeHost extends EventEmitter {
     this.statusTimer = setInterval(() => this.sendStatus(), this.timing.statusEveryMs);
     this.fenceTimer = setInterval(() => this.tick().catch((e) => this.logger.warn({ err: e.message }, 'edge: tick failed')), this.timing.fenceCheckMs);
     for (const t of [this.statusTimer, this.fenceTimer]) if (t.unref) t.unref();
+    if (!this.creds || !this.fence.active) this.fastStart();
     this.writeStatusFile();
+  }
+
+  /**
+   * Beim gemeinsamen Start mit dem Gateway-Container fehlen Zugangsdatei und
+   * Marker oft noch: dann alle 2 s nachsehen (höchstens 2 min) statt erst
+   * beim nächsten 30-s-Takt.
+   */
+  fastStart(everyMs = 2000, maxMs = 120000) {
+    const until = Date.now() + maxMs;
+    const t = setInterval(() => {
+      if (this.stopped || Date.now() > until) { clearInterval(t); return; }
+      this.tick().then(() => { if (this.creds && this.fence.active) clearInterval(t); }, () => {});
+    }, everyMs);
+    if (t.unref) t.unref();
   }
 
   async stop() {
@@ -116,10 +131,13 @@ class EdgeHost extends EventEmitter {
   }
 
   async tick() {
-    const prev = this.creds && `${this.creds.serverUrl}|${this.creds.apiToken}`;
+    const prev = this.creds && `${this.creds.serverUrl}|${this.creds.apiToken}|${this.creds.serverAddrs.join()}`;
     if (this.refreshCredentials()) {
-      const cur = this.creds && `${this.creds.serverUrl}|${this.creds.apiToken}`;
-      if (cur !== prev) { this.logger.info('edge: credentials changed — reconnecting'); this.channel.reconnect(); }
+      const cur = this.creds && `${this.creds.serverUrl}|${this.creds.apiToken}|${this.creds.serverAddrs.join()}`;
+      if (cur && cur !== prev && !(this.channel.connected && prev && prev.split('|').slice(0, 2).join() === cur.split('|').slice(0, 2).join())) {
+        this.logger.info('edge: credentials changed — reconnecting');
+        this.channel.reconnect();
+      }
     }
     const was = this.fence.active;
     await this.checkFenceNow();

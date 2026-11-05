@@ -23,8 +23,9 @@ function sendProbe(type, addr) {
   return new Promise((resolve) => {
     let sock;
     try { sock = dgram.createSocket(type); } catch (e) { resolve(e.code || 'EAFNOSUPPORT'); return; }
-    sock.on('error', () => {});
-    const done = (code) => { try { sock.close(); } catch { /* zu */ } resolve(code); };
+    let settled = false;
+    const done = (code) => { if (settled) return; settled = true; try { sock.close(); } catch { /* zu */ } resolve(code); };
+    sock.on('error', (e) => { clearTimeout(t); done(e.code || 'ERROR'); });
     const t = setTimeout(() => done('TIMEOUT'), 2000);
     try {
       sock.send(Buffer.from('gc-edge-fence-probe'), PROBE_PORT, addr, (e) => { clearTimeout(t); done(e ? (e.code || 'ERROR') : 'SENT'); });
