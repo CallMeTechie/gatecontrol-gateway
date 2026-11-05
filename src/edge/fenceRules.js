@@ -18,6 +18,7 @@
 
 const fs = require('node:fs');
 const net = require('node:net');
+const os = require('node:os');
 const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { EDGE_UID } = require('./constants');
@@ -131,7 +132,16 @@ class FenceManager {
       const chk = await this.exec(this.bins.nft, ['list', 'chain', 'inet', TABLE, 'edge']);
       if (chk.ok) return;
     }
-    const r = await this.exec(this.bins.nft, ['-f', '-'], script);
+    // als Datei: neuere nft-Versionen lehnen `-f -` mit einer Pipe ab ("Not a regular file: /dev/stdin")
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-fence-'));
+    const file = path.join(dir, 'edge.nft');
+    let r;
+    try {
+      fs.writeFileSync(file, script, { mode: 0o600 });
+      r = await this.exec(this.bins.nft, ['-f', file]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
     if (!r.ok) throw new Error(`nft: ${r.stderr.trim().split('\n').slice(-2).join(' ').slice(0, 200)}`);
     const chk = await this.exec(this.bins.nft, ['list', 'chain', 'inet', TABLE, 'output']);
     if (!chk.ok || !chk.stdout.includes(`skuid ${this.uid}`)) throw new Error('nft: rules not visible after apply');

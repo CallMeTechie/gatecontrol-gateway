@@ -51,9 +51,16 @@ function fakeExec(behaviour) {
 test('auto: nft zuerst; schlägt nft fehl (DSM), dann iptables-legacy; Marker mit Ergebnis', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-fence-'));
   try {
-    const nftOk = fakeExec((bin, args) => (bin === 'nft' ? { ok: true, stdout: args[0] === 'list' ? 'meta skuid 61001 jump edge' : '', stderr: '' } : null));
+    let loaded = null;
+    const nftOk = fakeExec((bin, args) => {
+      if (bin !== 'nft') return null;
+      if (args[0] === '-f') loaded = fs.readFileSync(args[1], 'utf8'); // Skript als Datei (nicht über stdin)
+      return { ok: true, stdout: args[0] === 'list' ? 'meta skuid 61001 jump edge' : '', stderr: '' };
+    });
     const f = new FenceManager({ runDir: dir, exec: nftOk.exec, env: {} });
     assert.deepStrictEqual(await f.apply(input), { active: true, backend: 'nft', error: null });
+    assert.match(loaded, /^table inet gc_edge\ndelete table inet gc_edge\n/);
+    assert.ok(!fs.existsSync(nftOk.calls.find((c) => c.args[0] === '-f').args[1]), 'Skriptdatei wieder gelöscht');
     const m = JSON.parse(fs.readFileSync(path.join(dir, 'fence.json'), 'utf8'));
     assert.strictEqual(m.active, true);
     assert.strictEqual(m.uid, 61001);
