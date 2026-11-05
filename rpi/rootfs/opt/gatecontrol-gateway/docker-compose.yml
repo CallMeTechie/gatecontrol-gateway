@@ -7,6 +7,7 @@
 #   ./config/gateway.env   ← kommt beim Start von der Boot-Partition
 #   ./gateway-state/       ← Auto-Update-Flag, last-pull, hardware.json
 #   ./deconz/              ← deCONZ-Daten (nur mit RaspBee II / ConBee)
+#   Volumes edge-*         ← Edge-Container (Pakete, Zugangsdaten, Status)
 #   ./.env                 ← schreibt gatecontrol-start bei jedem Start
 #                            (COMPOSE_PROFILES, GC_ZIGBEE_DEVICE, TZ)
 #
@@ -17,6 +18,7 @@
 # Ports (alle host network):
 #   Gateway:  GC_PROXY_PORT (8080) + GC_API_PORT (9876) — nur Tunnel-IP,
 #             dazu L4-Routen-Ports (Tunnel-IP) und Egress-Ports (LAN-IP).
+#   Edge:     nur UDP-/mDNS-Ports, die genehmigte Plugin-Teile binden (≥ 1024).
 #   deCONZ:   8090 (REST-API + Phoscon-Weboberfläche), 8091 (WebSocket) —
 #             auf allen Adressen. Diese Ports nicht für L4-Routen dieses
 #             Gateways verwenden.
@@ -49,6 +51,15 @@ services:
     volumes:
       - ./config:/config:ro
       - ./gateway-state:/state
+      - type: volume
+        source: edge-run
+        target: /run/gc-edge
+        volume: { nocopy: true }
+      - type: volume
+        source: edge-status
+        target: /run/gc-edge-status
+        read_only: true
+        volume: { nocopy: true }
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
@@ -57,6 +68,102 @@ services:
       interval: 60s
       timeout: 5s
       retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Edge-Container für Plugin-Teile (docs/edge.md) — gleiche Optionen wie in
+  # docker-compose.example.yml (CI prüft das). Bleibt untätig, bis der Server
+  # Edge für dieses Gateway einschaltet; abschaltbar mit EDGE=off in settings.txt.
+  edge:
+    image: ghcr.io/callmetechie/gatecontrol-gateway:latest
+    entrypoint: ["/sbin/tini", "--", "node", "src/edge/main.js"]
+    restart: unless-stopped
+    network_mode: host
+    user: "61001:61001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 512m
+    pids_limit: 256
+    volumes:
+      - type: volume
+        source: edge-run
+        target: /run/gc-edge
+        read_only: true
+        volume: { nocopy: true }
+      - type: volume
+        source: edge-status
+        target: /run/gc-edge-status
+        volume: { nocopy: true }
+      - edge-state:/state-edge
+      - edge-mqtt:/gc-mqtt   # Broker-Dateien (übernimmt Besitzer 61001 aus dem Image)
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "node", "src/edge/healthcheck.js"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Lokaler MQTT-Broker (docs/edge.md "MQTT"). Läuft untätig (nur ein kleiner
+  # Wächter), bis der Server MQTT einschaltet; der Edge-Host schreibt dann
+  # mosquitto.conf/passwd/acl nach /gc-mqtt. Port 1883 nur an LAN-Adressen,
+  # ohne anonyme Anmeldung. Der Wächter startet Mosquitto bei geänderter
+  # Konfiguration neu und schickt bei geänderten Konten SIGHUP.
+  mqtt:
+    image: eclipse-mosquitto:2.1.2-alpine@sha256:860aeb5d63ce509508f6dcfb2bc8a1c1dd2bc60555b562b45ce90e52d8dabb0f
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        C=/gc-mqtt; p=""; s=""; r=""
+        halt() { if [ -n "$$p" ]; then kill "$$p" 2>/dev/null; wait "$$p" 2>/dev/null; fi; p=""; }
+        trap 'halt; exit 0' TERM INT
+        while :; do
+          if [ -f "$$C/enabled" ] && [ -f "$$C/mosquitto.conf" ]; then
+            n="$$(cksum < "$$C/mosquitto.conf")"
+            if [ -n "$$p" ] && ! kill -0 "$$p" 2>/dev/null; then p=""; fi
+            if [ -z "$$p" ] || [ "$$n" != "$$s" ]; then
+              halt; mosquitto -c "$$C/mosquitto.conf" & p=$$!
+              s="$$n"; r="$$(cat "$$C/reload" 2>/dev/null)"
+            elif [ "$$(cat "$$C/reload" 2>/dev/null)" != "$$r" ]; then
+              r="$$(cat "$$C/reload" 2>/dev/null)"; kill -HUP "$$p"
+            fi
+          else
+            halt; s=""
+          fi
+          sleep 2 & wait $$!
+        done
+    restart: unless-stopped
+    network_mode: host
+    user: "61001:61001"       # wie der Edge-Host: liest dessen Dateien (0600)
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 32
+    depends_on:
+      - edge                  # legt das Volume mit Besitzer 61001 an
+    volumes:
+      - type: volume
+        source: edge-mqtt
+        target: /gc-mqtt
+        volume: { nocopy: true }
     logging:
       driver: json-file
       options:
@@ -92,3 +199,17 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  edge-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=61001,mode=2750"
+  edge-status:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=61001,gid=61001,mode=0755"
+  edge-state:
+  edge-mqtt:

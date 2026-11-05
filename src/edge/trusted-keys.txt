@@ -1,0 +1,7 @@
+# Vertrauenswürdige Herausgeber für Edge-Teile von Plugins (Ed25519, base64
+# der rohen 32 Byte). Kopie von BUILTIN_PUBLIC_KEYS in
+# gatecontrol/src/services/plugins/constants.js – bei Änderungen am Server
+# hier nachziehen. Prüfen: node scripts/check-edge-trusted-keys.js <server-repo>
+#
+# CallMeTechie (Release-CI von gatecontrol-plugins, signing-key.pub)
+6h2kcathsMmJCuo/XUmvSYGMsTUfYdLWBDYHnct+4GE=

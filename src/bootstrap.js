@@ -31,6 +31,7 @@ const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol
 const logger = require('./logger');
 const os = require('node:os');
 const { lanSubnets, ipInCidr } = require('./discovery/lanInterfaces');
+const { EdgeLink } = require('./edge/gatewayLink');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
 
@@ -53,6 +54,15 @@ async function bootstrap() {
 
   // 1. Bring up WireGuard
   await wireguard.writeConfAndBringUp(config);
+
+  // 1b. Edge-Container (optional, docs/edge.md): Zugangsdaten weiterreichen.
+  //     Ohne Edge-Dienst in der Compose-Datei tut das nichts.
+  //     Setzt auch die Netzgrenze des Edge-Benutzers (nftables/iptables-legacy).
+  const edgeLink = new EdgeLink({ config });
+  if (edgeLink.deployed()) {
+    try { await edgeLink.sync(); } catch (err) { logger.warn({ err: err.message }, 'edge: initial sync failed'); }
+    edgeLink.start();
+  }
 
   // 2. In-memory state
   const store = new ConfigStore();
@@ -210,12 +220,14 @@ async function bootstrap() {
       health.telemetry = collectTelemetry();
       health.telemetry.scan_egress_listeners = egressMgr.getStatus();
       try { health.telemetry.scan_egress_near = await nearMgr.getStatus(store.egressRoutes); } catch (_e) { /* best-effort */ }
+      // Edge-Container: Zusammenfassung (null = kein Edge-Dienst); Abgleich läuft im eigenen 30-s-Takt
+      health.telemetry.edge = edgeLink.telemetry();
       health.config_hash = store.currentHash || null;
       return health;
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, nearMgr, hb };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, nearMgr, hb, edgeLink };
 }
 
 module.exports = { bootstrap };

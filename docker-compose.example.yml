@@ -41,6 +41,17 @@ services:
     volumes:
       - ./config:/config:ro      # Place gateway.env here
       - ./gateway-state:/state          # rw: self-update flag + last-pull marker (#2b)
+      # Edge-Container (docs/edge.md): Zugangsdaten + Netzgrenzen-Marker hin,
+      # Zusammenfassung für die Telemetrie zurück. Ohne Edge-Dienst weglassen.
+      - type: volume
+        source: edge-run
+        target: /run/gc-edge
+        volume: { nocopy: true }
+      - type: volume
+        source: edge-status
+        target: /run/gc-edge-status
+        read_only: true
+        volume: { nocopy: true }
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
@@ -57,3 +68,119 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # Edge-Container für Plugin-Teile im Heimnetz (docs/edge.md). Dasselbe Image
+  # wie das Gateway, anderer Befehl; läuft ohne Rechte als Benutzer 61001 und
+  # bleibt untätig, bis der Server Edge für dieses Gateway einschaltet.
+  # Wer Edge nicht nutzen will, kann den Dienst (und die Volumes) weglassen.
+  edge:
+    image: ghcr.io/callmetechie/gatecontrol-gateway:latest
+    entrypoint: ["/sbin/tini", "--", "node", "src/edge/main.js"]
+    restart: unless-stopped
+    network_mode: host        # LAN-Geräte (UDP/Multicast/mDNS) wie das Gateway
+    user: "61001:61001"       # feste UID: die Netzgrenze (Owner-Match) hängt daran
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    mem_limit: 512m
+    pids_limit: 256
+    volumes:
+      - type: volume
+        source: edge-run
+        target: /run/gc-edge
+        read_only: true
+        volume: { nocopy: true }
+      - type: volume
+        source: edge-status
+        target: /run/gc-edge-status
+        volume: { nocopy: true }
+      - edge-state:/state-edge
+      - edge-mqtt:/gc-mqtt   # Broker-Dateien (übernimmt Besitzer 61001 aus dem Image)
+    environment:
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "node", "src/edge/healthcheck.js"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Lokaler MQTT-Broker (docs/edge.md "MQTT"). Läuft untätig (nur ein kleiner
+  # Wächter), bis der Server MQTT einschaltet; der Edge-Host schreibt dann
+  # mosquitto.conf/passwd/acl nach /gc-mqtt. Port 1883 nur an LAN-Adressen,
+  # ohne anonyme Anmeldung. Der Wächter startet Mosquitto bei geänderter
+  # Konfiguration neu und schickt bei geänderten Konten SIGHUP.
+  mqtt:
+    image: eclipse-mosquitto:2.1.2-alpine@sha256:860aeb5d63ce509508f6dcfb2bc8a1c1dd2bc60555b562b45ce90e52d8dabb0f
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        C=/gc-mqtt; p=""; s=""; r=""
+        halt() { if [ -n "$$p" ]; then kill "$$p" 2>/dev/null; wait "$$p" 2>/dev/null; fi; p=""; }
+        trap 'halt; exit 0' TERM INT
+        while :; do
+          if [ -f "$$C/enabled" ] && [ -f "$$C/mosquitto.conf" ]; then
+            n="$$(cksum < "$$C/mosquitto.conf")"
+            if [ -n "$$p" ] && ! kill -0 "$$p" 2>/dev/null; then p=""; fi
+            if [ -z "$$p" ] || [ "$$n" != "$$s" ]; then
+              halt; mosquitto -c "$$C/mosquitto.conf" & p=$$!
+              s="$$n"; r="$$(cat "$$C/reload" 2>/dev/null)"
+            elif [ "$$(cat "$$C/reload" 2>/dev/null)" != "$$r" ]; then
+              r="$$(cat "$$C/reload" 2>/dev/null)"; kill -HUP "$$p"
+            fi
+          else
+            halt; s=""
+          fi
+          sleep 2 & wait $$!
+        done
+    restart: unless-stopped
+    network_mode: host
+    user: "61001:61001"       # wie der Edge-Host: liest dessen Dateien (0600)
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    mem_limit: 128m
+    pids_limit: 32
+    depends_on:
+      - edge                  # legt das Volume mit Besitzer 61001 an
+    volumes:
+      - type: volume
+        source: edge-mqtt
+        target: /gc-mqtt
+        volume: { nocopy: true }
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # tmpfs, geteilt: der Gateway-Container (root) schreibt, das setgid-Bit gibt
+  # jeder Datei die Gruppe 61001 → der Edge-Container kann lesen, nicht ändern.
+  edge-run:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=61001,mode=2750"
+  # tmpfs, geteilt: der Edge-Host schreibt seine Zusammenfassung, das Gateway liest.
+  edge-status:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=61001,gid=61001,mode=0755"
+  # Pakete der Edge-Teile + gc.store (übernimmt Besitzer 61001 aus dem Image)
+  edge-state:
+  # Broker-Dateien vom Edge-Host + Mosquitto-Daten (data/)
+  edge-mqtt:

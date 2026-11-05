@@ -9,6 +9,7 @@ Companion product for [GateControl](https://github.com/CallMeTechie/gatecontrol)
 - **Wake-on-LAN** triggered on backend-down (zero-config from GateControl UI)
 - **Auto-sync** with GateControl: no manual re-config when routes change
 - **Self-monitoring** with health reporting to server (sliding-window hysteresis, per-route reachability)
+- **Edge-Container** für Plugin-Teile im Heimnetz (UDP/Multicast, mDNS, LAN-TCP/HTTP): eigener Container ohne Rechte (UID 61001), signierte Pakete, Prozess-Isolation, Netzgrenze – siehe [docs/edge.md](docs/edge.md)
 - **Security-hardened**: non-root container, `cap_drop: ALL` + minimal adds, read-only filesystem
 
 ## Architecture
@@ -89,6 +90,7 @@ for the exact `lxc.conf` patches applied.
 - `read_only: true` Root-FS mit tmpfs für `/tmp`, `/run`, `/etc/wireguard`
 - `security_opt: no-new-privileges` bewusst NICHT gesetzt (Linux-Inkompatibilität mit non-root + cap_add NET_ADMIN; Compensating Controls: cap_drop ALL + read_only + USER gateway)
 - Management-API bindet **ausschließlich** auf Tunnel-IP (Startup-Assertion)
+- Edge-Container: gleiches Image, eigener Benutzer 61001, `cap_drop: ALL`, `no-new-privileges`, read-only; Plugin-Prozesse mit Node-Permission-Model, ohne eigenes Netz; startet nichts ohne aktive Netzgrenze ([docs/edge.md](docs/edge.md))
 
 ## Development
 

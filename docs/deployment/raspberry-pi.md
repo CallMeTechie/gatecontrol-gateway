@@ -34,7 +34,12 @@ Manuelle Installation auf einem vorhandenen Raspberry Pi OS: siehe
 Der 3 B+ reicht für Gateway + deCONZ, hat aber Grenzen:
 
 - **RAM:** Gateway (Node.js) ≈ 60–90 MB, deCONZ ≈ 80–150 MB, Docker + System
-  ≈ 150–200 MB – zusammen rund 350–450 MB von 1 GB. Das Image nutzt **zram**
+  ≈ 150–200 MB, Edge-Container (untätig) ≈ 50 MB, MQTT-Broker ≈ 5–10 MB –
+  zusammen rund 400–500 MB von 1 GB. Jeder laufende Edge-Teil eines Plugins
+  kommt mit ≈ 30–50 MB dazu (Obergrenze je Teil: `memoryMb` aus dem Manifest,
+  Standard 48 MB; der Edge-Container ist auf 512 MB, der Broker auf 128 MB
+  begrenzt). Wer Edge nicht nutzt, spart die ≈ 55 MB mit `EDGE=off` in
+  `settings.txt`. Das Image nutzt **zram**
   (komprimierter RAM-Swap) statt einer Swap-Datei auf der SD-Karte.
 - **Ethernet** hängt beim 3 B+ am **USB-2-Bus**: realistisch **200–300 Mbit/s**
   Durchsatz. Für Fernzugriff auf Weboberflächen, RDP und Smart Home reicht das;
@@ -129,6 +134,7 @@ Ordnung. Gelesen bei jedem Start.
 |---|---|---|
 | `HOSTNAME` | Buchstaben, Ziffern, `-` (max. 63) | Gerätename im Netz (siehe [Erster Start](#3-erster-start)) |
 | `ZIGBEE` | `auto` \| `on` \| `off` | deCONZ-Erkennung (siehe [RaspBee II](#5-raspbee-ii-zigbee)) |
+| `EDGE` | `on` \| `off`, Standard `on` | Edge-Container für Plugin-Teile im Heimnetz + lokaler MQTT-Broker ([docs/edge.md](../edge.md)); untätig, bis GateControl Edge/MQTT einschaltet |
 | `TIMEZONE` | IANA-Name, z. B. `Europe/Berlin` | Zeitzone des Pi (und von deCONZ). Ohne Eintrag: `Europe/Berlin` bzw. Imager |
 | `WIFI_SSID` | WLAN-Name, beliebige Zeichen (UTF-8, max. 32 Byte) | WLAN einrichten |
 | `WIFI_PSK` | 8–63 Zeichen (ASCII) oder 64 Hex-Zeichen; leer = offenes Netz | WLAN-Passwort (WPA2-PSK; WPA2/WPA3-Mischbetrieb geht) |

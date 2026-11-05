@@ -12,6 +12,11 @@ ZIGBEE=auto
 # Gerät erzwingen (leer = automatisch; RaspBee II: /dev/ttyAMA0)
 #ZIGBEE_DEVICE=/dev/ttyAMA0
 
+# Edge-Container für Plugin-Teile im Heimnetz + lokaler MQTT-Broker (on/off,
+# Standard on). Laufen ohne Rechte und bleiben untätig, bis GateControl Edge
+# bzw. MQTT für dieses Gateway einschaltet. off spart etwa 55 MB RAM.
+#EDGE=on
+
 # Hostname. Leer = Name aus dem Raspberry Pi Imager, sonst gc-<Name des Gateways>.
 #HOSTNAME=gatecontrol-gw
 
