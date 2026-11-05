@@ -29,11 +29,11 @@ describe('dns: domain sets', () => {
   it('PatternSet: plain = domain + subdomains, *. = subdomains only', () => {
     const p = new PatternSet(['example.com', '*.wild.org', 'bad pattern', '']);
     assert.equal(p.size, 2);
-    assert.ok(p.match('example.com'));
-    assert.ok(p.match('a.b.example.com'));
-    assert.ok(!p.match('notexample.com'));
-    assert.ok(!p.match('wild.org'));
-    assert.ok(p.match('x.wild.org'));
+    assert.ok(p.matches('example.com'));
+    assert.ok(p.matches('a.b.example.com'));
+    assert.ok(!p.matches('notexample.com'));
+    assert.ok(!p.matches('wild.org'));
+    assert.ok(p.matches('x.wild.org'));
     assert.deepEqual(p.toArray(), ['*.wild.org', 'example.com']);
   });
 
@@ -41,13 +41,13 @@ describe('dns: domain sets', () => {
     const b = (arr) => { const x = new HashBuilder(2); for (const d of arr) x.add(d); return x.finish(); };
     const l = new CompactList({ suffix: b(['tracker.net', 'tracker.net']), exact: b(['only.this.org']), except: b(['good.tracker.net']) });
     assert.equal(l.size, 2);
-    assert.ok(l.match('tracker.net'));
-    assert.ok(l.match('x.tracker.net'));
-    assert.ok(!l.match('good.tracker.net'));
-    assert.ok(!l.match('a.good.tracker.net'));
-    assert.ok(l.match('only.this.org'));
-    assert.ok(!l.match('sub.only.this.org'));
-    assert.ok(!l.match('this.org'));
+    assert.ok(l.matches('tracker.net'));
+    assert.ok(l.matches('x.tracker.net'));
+    assert.ok(!l.matches('good.tracker.net'));
+    assert.ok(!l.matches('a.good.tracker.net'));
+    assert.ok(l.matches('only.this.org'));
+    assert.ok(!l.matches('sub.only.this.org'));
+    assert.ok(!l.matches('this.org'));
   });
 });
 
@@ -55,10 +55,10 @@ describe('dns: list parser', () => {
   it('domains format (comments, *., CRLF, invalid lines)', async () => {
     const r = await parseListText('# Titel\r\nads.example.com\r\n*.track.net\n.dot.org\n! adblock comment\nnot valid line\nbad_..x\n\nUPPER.Case.COM\n', 'domains');
     assert.equal(r.entries, 4);
-    assert.ok(r.list.match('ads.example.com') && r.list.match('x.ads.example.com'));
-    assert.ok(r.list.match('track.net') && r.list.match('a.track.net'));
-    assert.ok(r.list.match('dot.org'));
-    assert.ok(r.list.match('upper.case.com'));
+    assert.ok(r.list.matches('ads.example.com') && r.list.matches('x.ads.example.com'));
+    assert.ok(r.list.matches('track.net') && r.list.matches('a.track.net'));
+    assert.ok(r.list.matches('dot.org'));
+    assert.ok(r.list.matches('upper.case.com'));
     assert.equal(r.skipped, 2);
   });
 
@@ -68,11 +68,11 @@ describe('dns: list parser', () => {
       '0.0.0.0 ads.example.com  # Kommentar', '0.0.0.0 a.one.net b.two.net', 'ads.only-domain.com',
     ].join('\n'), 'hosts');
     assert.equal(r.entries, 3);
-    assert.ok(r.list.match('ads.example.com'));
-    assert.ok(!r.list.match('x.ads.example.com'), 'hosts entries are exact');
-    assert.ok(r.list.match('a.one.net') && r.list.match('b.two.net'));
-    assert.ok(!r.list.match('localhost.localdomain'));
-    assert.ok(!r.list.match('ads.only-domain.com'));
+    assert.ok(r.list.matches('ads.example.com'));
+    assert.ok(!r.list.matches('x.ads.example.com'), 'hosts entries are exact');
+    assert.ok(r.list.matches('a.one.net') && r.list.matches('b.two.net'));
+    assert.ok(!r.list.matches('localhost.localdomain'));
+    assert.ok(!r.list.matches('ads.only-domain.com'));
   });
 
   it('adblock format: ||domain^, exceptions, skips rules with options/paths/cosmetics', async () => {
@@ -81,25 +81,25 @@ describe('dns: list parser', () => {
       '||path.example.org/ads^', '||third.example.org^$third-party', 'example.com##.banner', '/regex/', '||*.wild.com^',
     ].join('\n'), 'adblock');
     assert.equal(r.entries, 2);
-    assert.ok(r.list.match('ads.example.com') && r.list.match('x.ads.example.com'));
-    assert.ok(!r.list.match('ok.ads.example.com'), 'exception wins inside the list');
-    assert.ok(r.list.match('imp.example.net'));
-    assert.ok(!r.list.match('path.example.org'));
-    assert.ok(!r.list.match('third.example.org'));
+    assert.ok(r.list.matches('ads.example.com') && r.list.matches('x.ads.example.com'));
+    assert.ok(!r.list.matches('ok.ads.example.com'), 'exception wins inside the list');
+    assert.ok(r.list.matches('imp.example.net'));
+    assert.ok(!r.list.matches('path.example.org'));
+    assert.ok(!r.list.matches('third.example.org'));
   });
 
   it('handles lines split across chunks and overlong lines', async () => {
     const chunks = ['ads.exa', 'mple.com\nsecond.or', 'g\n', 'x'.repeat(5000), '\nlast.net'].map((s) => Buffer.from(s));
     const r = await parseListStream(Readable.from(chunks), 'domains');
     assert.equal(r.entries, 3);
-    assert.ok(r.list.match('ads.example.com') && r.list.match('second.org') && r.list.match('last.net'));
+    assert.ok(r.list.matches('ads.example.com') && r.list.matches('second.org') && r.list.matches('last.net'));
     assert.equal(r.skipped, 1);
     assert.equal(await countLines(Readable.from(chunks.map((c) => Buffer.from(c)))), 4);
   });
 
   it('IDN entries are converted to punycode', async () => {
     const r = await parseListText('bücher.de\n', 'domains');
-    assert.ok(r.list.match('xn--bcher-kva.de'));
+    assert.ok(r.list.matches('xn--bcher-kva.de'));
   });
 
   it('entry limit throws ListTooLarge; unknown format throws', async () => {
@@ -111,7 +111,7 @@ describe('dns: list parser', () => {
     const text = Array.from({ length: 5000 }, (_, i) => `d${i % 4000}.example.com`).join('\n');
     const r = await parseListText(text, 'domains', { expectedEntries: 5000 });
     assert.equal(r.entries, 4000);
-    assert.ok(r.list.match('d3999.example.com'));
-    assert.ok(!r.list.match('d4000.example.com'));
+    assert.ok(r.list.matches('d3999.example.com'));
+    assert.ok(!r.list.matches('d4000.example.com'));
   });
 });

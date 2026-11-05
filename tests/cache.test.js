@@ -196,7 +196,7 @@ describe('cache: LAN endpoint (real HTTPS)', () => {
   function get(p, headers = {}, method = 'GET') {
     return new Promise((resolve, reject) => {
       const req = https.request({
-        host: '127.0.0.1', port, path: p, method, headers, rejectUnauthorized: false,
+        host: '127.0.0.1', port, path: p, method, headers, ca: tls.cert,
         checkServerIdentity: (_h, cert) => (crypto.createHash('sha256').update(cert.raw).digest('hex') === tls.sha256 ? undefined : new Error('pin')),
       }, (res) => {
         const chunks = [];
@@ -250,6 +250,13 @@ describe('cache: LAN endpoint (real HTTPS)', () => {
     }
     assert.equal((await get(signed('e'.repeat(64)))).status, 404, 'symlinks are not followed');
     assert.equal((await get(signed(h), {}, 'POST')).status, 405);
+  });
+
+  it('a different certificate fails the pin', async () => {
+    const other = makeSelfSigned();
+    await assert.rejects(new Promise((resolve, reject) => {
+      https.get({ host: '127.0.0.1', port, path: '/', agent: false, ca: tls.cert, checkServerIdentity: (_h, cert) => (sha(cert.raw) === other.sha256 ? undefined : new Error('pin')) }, resolve).on('error', reject);
+    }), /pin/);
   });
 
   it('port in use → port_busy', async () => {
@@ -324,7 +331,10 @@ describe('cache: HomeCache flow against a fake server', () => {
     assert.deepEqual([ft.enabled, ft.state, ft.port, ft.url, ft.tlsSha256, ft.usedBytes], [true, 'running', cfg.port, tel.urls[0], tel.tlsSha256, 900_000]);
     const exp = String(Math.floor(Date.now() / 1000) + 60);
     const body = await new Promise((resolve, reject) => {
-      https.get(`${tel.urls[0]}/blob/${upd.sha256}?exp=${exp}&sig=${sign(SECRET, upd.sha256, exp)}`, { rejectUnauthorized: false }, (res) => {
+      https.get(`${tel.urls[0]}/blob/${upd.sha256}?exp=${exp}&sig=${sign(SECRET, upd.sha256, exp)}`, {
+        ca: c.tls.cert, // selbstsigniert als Vertrauensanker + Pinning wie die Apps
+        checkServerIdentity: (_h, cert) => (sha(cert.raw) === tel.tlsSha256 ? undefined : new Error('pin')),
+      }, (res) => {
         const chunks = [];
         res.on('data', (x) => chunks.push(x));
         res.on('end', () => resolve(Buffer.concat(chunks)));

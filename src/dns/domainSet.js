@@ -146,7 +146,7 @@ class CompactList {
     return false;
   }
 
-  match(name) {
+  matches(name) {
     return this.matchHashes(suffixes(name).map(hash53));
   }
 }
@@ -173,7 +173,7 @@ class PatternSet {
 
   get size() { return this.incl.size + this.sub.size; }
 
-  match(name) {
+  matches(name) {
     if (!this.size) return false;
     if (this.incl.has(name)) return true;
     let i = name.indexOf('.');

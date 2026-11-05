@@ -57,7 +57,7 @@ describe('dns: list manager', () => {
     await m.setWanted(catalog, new Set(['ads', 'hosts', 'unknown']));
     await m.refreshDue();
     assert.equal(m.lists.get('ads').size, 2);
-    assert.ok(m.lists.get('hosts').match('tracker.example.org'));
+    assert.ok(m.lists.get('hosts').matches('tracker.example.org'));
     assert.ok(changes >= 2);
     assert.ok(fs.existsSync(path.join(dir, 'dns-lists', 'ads.txt')));
     // nicht fällig → kein Abruf

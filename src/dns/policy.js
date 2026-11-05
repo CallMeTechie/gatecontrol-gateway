@@ -80,7 +80,7 @@ class Policy {
   }
 
   isLocal(name) {
-    return name === '' || !name.includes('.') || this.local.match(name);
+    return name === '' || !name.includes('.') || this.local.matches(name);
   }
 
   pausedUntil(mac, now) {
@@ -102,21 +102,21 @@ class Policy {
     const res = (action, reason, extra) => ({ profileId, action, reason, ...extra });
     if (name === CANARY) return res('block', 'canary', { nxdomain: true });
     if (this.isLocal(name)) return res('allow', 'local', { local: true });
-    if (this.alwaysAllow.match(name)) return res('allow', 'always_allow');
+    if (this.alwaysAllow.matches(name)) return res('allow', 'always_allow');
     const safe = profile && profile.safeSearch ? safeSearchTarget(name) : null;
     const allow = (reason) => res('allow', reason, safe ? { safeSearch: safe } : undefined);
-    if (profile && profile.allowSet.match(name)) return allow('profile_allow');
+    if (profile && profile.allowSet.matches(name)) return allow('profile_allow');
     if (this.pausedUntil(mac, now)) return res('block', 'paused');
     if (!profile) return res('allow', 'no_profile');
-    if (profile.denySet.match(name)) return res('block', 'profile_deny');
+    if (profile.denySet.matches(name)) return res('block', 'profile_deny');
     if (profile.schedules.length && !this.extendedUntil(mac, now)) {
       const date = new Date(now);
       for (const s of profile.schedules) {
-        if (!scheduleActive(s, date) || s.allowSet.match(name)) continue;
+        if (!scheduleActive(s, date) || s.allowSet.matches(name)) continue;
         if (s.block === 'all') return res('block', 'schedule');
         for (const c of s.categories) {
           const set = this.categories.get(c);
-          if (set && set.match(name)) return res('block', 'schedule_category', { category: c });
+          if (set && set.matches(name)) return res('block', 'schedule_category', { category: c });
         }
       }
     }
