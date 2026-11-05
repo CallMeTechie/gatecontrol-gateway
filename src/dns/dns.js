@@ -207,8 +207,13 @@ class DnsFilter {
   }
 
   featureTelemetry() {
+    // Server liest Zustand, Adressen und Listen von hier (Vertrag 3b, Server-Seite 5)
+    if (!this.cfg.enabled) return this.status.snapshot({ state: 'off', listen: [], lists: {}, lastReportAt: this.lastReportAt });
     return this.status.snapshot({
-      state: this.cfg.enabled ? this.listen.state : 'off',
+      state: this.listen.state,
+      listen: this.listen.listen,
+      busy: this.listen.busy,
+      lists: Object.fromEntries(Object.entries(this.lists.telemetry()).map(([id, v]) => [id, { entries: v.entries, updatedAt: v.updatedAt, error: v.error }])),
       lastReportAt: this.lastReportAt,
     });
   }

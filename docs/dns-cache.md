@@ -162,7 +162,7 @@ letzten 2 000) und werden beim Ausschalten sofort gelöscht.
 
 `telemetry.dns` (null wenn aus):
 `{ state: 'starting'|'running'|'port_busy'|'no_address'|'error', port, listen: [ip], busy: [ip], upstream: { provider, fallbackRouter, lastOkAt, lastError: { at, code }|null, lastFallbackAt, fallbacks, dohDown }, lists: { <id>: { loaded, entries, updatedAt, checkedAt, error } }, listsBytes, cacheEntries, totals: { queries, blocked, cached, since }, logQueries, lastReportAt, reportError }`,
-dazu `telemetry.features.dns` (an/aus, Lauf/Erfolg/Fehler der Listen, `state`).
+dazu `telemetry.features.dns` (an/aus, Lauf/Erfolg/Fehler der Listen, `state`, `listen`, `busy`, `lists`) – daraus liest der Server.
 
 ### Management-API (über den Tunnel, `X-Gateway-Token`)
 
@@ -240,7 +240,8 @@ Port belegt → `state: 'port_busy'`.
 
 ```js
 { full: bool,               // true: erster Bericht nach Start, nach Fehlern, alle 6 h
-  have: [sha256],           // full: alles; sonst neu seit dem letzten bestätigten Bericht
+  have: [sha256],           // full: alles; sonst neu seit dem letzten bestätigten Bericht (≤ 5 000 je Bericht,
+                            //   Rest folgt sofort als Delta; Zähler nur im ersten Teil)
   gone: [sha256],           // nur Delta: entfernt seit dem letzten bestätigten Bericht
   usedBytes, maxBytes, effectiveMaxBytes, items,
   hits, misses, bytesServed, bytesFetched,   // im Zeitraum
@@ -251,6 +252,9 @@ Port belegt → `state: 'port_busy'`.
 
 `telemetry.cache` (null wenn weder an noch angefordert):
 `{ state: 'running'|'port_busy'|'no_address'|'path_unwritable'|'path_not_allowed'|'no_secret'|'error', port, listen: [ip], urls: ['https://192.168.1.23:8443'], tlsSha256, path, usedBytes, maxBytes, effectiveMaxBytes, freeBytes, items, want, downloading: { sha256, size, bytes, kind }|null, lastSyncAt, lastReportAt, error }`.
+
+`telemetry.features.cache` enthält zusätzlich `state`, `port`, `tlsSha256`,
+`url` (IPv4 zuerst; daraus baut der Server `lan.url`), `usedBytes`, `error`.
 
 ### Management-API
 

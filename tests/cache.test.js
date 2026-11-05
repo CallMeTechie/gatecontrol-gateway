@@ -320,6 +320,8 @@ describe('cache: HomeCache flow against a fake server', () => {
     assert.equal(tel.state, 'running');
     assert.match(tel.tlsSha256, /^[0-9a-f]{64}$/);
     assert.deepEqual(tel.urls, [`https://127.0.0.1:${cfg.port}`]);
+    const ft = c.featureTelemetry();
+    assert.deepEqual([ft.enabled, ft.state, ft.port, ft.url, ft.tlsSha256, ft.usedBytes], [true, 'running', cfg.port, tel.urls[0], tel.tlsSha256, 900_000]);
     const exp = String(Math.floor(Date.now() / 1000) + 60);
     const body = await new Promise((resolve, reject) => {
       https.get(`${tel.urls[0]}/blob/${upd.sha256}?exp=${exp}&sig=${sign(SECRET, upd.sha256, exp)}`, { rejectUnauthorized: false }, (res) => {
@@ -345,6 +347,14 @@ describe('cache: HomeCache flow against a fake server', () => {
     free = 0;
     assert.equal(c.effectiveMax(), 0);
     assert.ok(c.featureTelemetry().enabled);
+    // > 5000 Einträge: full-Bericht in Teilen
+    for (let i = 0; i < 5003; i++) c.store.items.set(i.toString(16).padStart(64, '0'), { size: 1, kind: 'x', storedAt: 0, lastUsedAt: 0 });
+    c.needFull = true;
+    const n = srv.state.posts.length;
+    await c.report();
+    const parts = srv.state.posts.slice(n);
+    assert.deepEqual(parts.map((x) => [x.full, x.have.length]), [[true, 5000], [false, 5]]); // 5005 Blobs gesamt
+    for (let i = 0; i < 5003; i++) c.store.items.delete(i.toString(16).padStart(64, '0'));
     assert.equal(await c.clear(), 'accepted');
     assert.equal(c.store.count, 0);
     await c.apply(normalizeCache({ enabled: false }));

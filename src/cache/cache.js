@@ -19,7 +19,7 @@ const REPORT_MS = 5 * 60_000;
 const FULL_EVERY_MS = 6 * 3600_000;
 const LISTEN_MS = 60_000;
 const RESERVE_BYTES = 512 * 1024 * 1024;   // auf dem Datenträger frei lassen
-const MAX_HAVE = 20_000;
+const MAX_HAVE = 5_000;          // je Bericht und Liste (Server-Grenze)
 
 const zeroCounters = () => ({ hits: 0, misses: 0, bytesServed: 0, bytesFetched: 0, denied: 0 });
 
@@ -217,43 +217,55 @@ class HomeCache {
     }
   }
 
-  /** Bestand/Statistik melden (Delta; full nach Start/Fehler/alle 6 h). */
+  /**
+   * Bestand/Statistik melden (Delta; full nach Start/Fehler/alle 6 h).
+   * Mehr als MAX_HAVE Einträge gehen in Folgeberichten (Delta) hinterher.
+   */
   async report() {
     if (!this.cfg.enabled || !this.store) return;
     const store = this.store;
     const full = this.needFull || this.now() - this.lastFullAt >= FULL_EVERY_MS;
-    const added = [...store.added];
-    const removed = [...store.removed];
-    // Zähler an Ort und Stelle zurücksetzen (der LAN-Handler hält dasselbe Objekt)
+    const added = full ? [...store.items.keys()] : [...store.added];
+    const removed = full ? [] : [...store.removed];
     const counters = { ...this.counters };
+    // Zähler an Ort und Stelle zurücksetzen (der LAN-Handler hält dasselbe Objekt)
     Object.assign(this.counters, zeroCounters());
     const from = this.periodFrom;
     const to = this.now();
     this.periodFrom = to;
-    const body = {
-      full,
-      have: full ? [...store.items.keys()].slice(0, MAX_HAVE) : added.slice(0, MAX_HAVE),
-      gone: full ? [] : removed.slice(0, MAX_HAVE),
-      usedBytes: store.usedBytes,
-      maxBytes: this.cfg.maxBytes,
-      effectiveMaxBytes: this.effectiveMax(),
-      items: store.count,
-      hits: counters.hits,
-      misses: counters.misses,
-      bytesServed: counters.bytesServed,
-      bytesFetched: counters.bytesFetched,
-      period: { from, to },
-    };
-    const r = await this.reporter.post(REPORT_PATH, body);
-    if (r.ok) {
-      for (const s of added) store.added.delete(s);
-      for (const s of removed) store.removed.delete(s);
-      if (full) { this.needFull = false; this.lastFullAt = to; store.added.clear(); store.removed.clear(); }
+    const chunks = Math.max(1, Math.ceil(added.length / MAX_HAVE), Math.ceil(removed.length / MAX_HAVE));
+    let ok = true;
+    for (let i = 0; i < chunks && ok; i++) {
+      const first = i === 0;
+      const body = {
+        full: full && first,
+        have: added.slice(i * MAX_HAVE, (i + 1) * MAX_HAVE),
+        gone: removed.slice(i * MAX_HAVE, (i + 1) * MAX_HAVE),
+        usedBytes: store.usedBytes,
+        maxBytes: this.cfg.maxBytes,
+        effectiveMaxBytes: this.effectiveMax(),
+        items: store.count,
+        hits: first ? counters.hits : 0,
+        misses: first ? counters.misses : 0,
+        bytesServed: first ? counters.bytesServed : 0,
+        bytesFetched: first ? counters.bytesFetched : 0,
+        period: { from, to },
+      };
+      const r = await this.reporter.post(REPORT_PATH, body);
+      ok = r.ok;
+      if (!ok && first) {
+        for (const k of Object.keys(counters)) this.counters[k] += counters[k];
+        this.periodFrom = from;
+      }
+    }
+    if (ok) {
+      if (full) { this.needFull = false; this.lastFullAt = to; store.added.clear(); store.removed.clear(); } else {
+        for (const s of added) store.added.delete(s);
+        for (const s of removed) store.removed.delete(s);
+      }
       this.lastReportAt = to;
     } else {
       this.needFull = true;
-      for (const k of Object.keys(counters)) this.counters[k] += counters[k];
-      this.periodFrom = from;
     }
     store.persist();
   }
@@ -275,21 +287,41 @@ class HomeCache {
     return 'accepted';
   }
 
+  /** IPv4 zuerst – daraus baut der Server die `lan.url`. */
+  _urls() {
+    const listen = [...(this.listen.listen || [])].sort((a, b) => Number(a.includes(':')) - Number(b.includes(':')));
+    return listen.map((a) => (a.includes(':') ? `https://[${a}]:${this.cfg.port}` : `https://${a}:${this.cfg.port}`));
+  }
+
+  _state() {
+    return this.state === 'running' && this.listen.state !== 'running' && this.listen.state !== 'off' ? this.listen.state : this.state;
+  }
+
+  /** Server liest port/tlsSha256/url/usedBytes von hier (Vertrag 3b, Server-Seite 5). */
   featureTelemetry() {
-    return this.status.snapshot({ state: this.state, lastSyncAt: this.lastSyncAt, lastReportAt: this.lastReportAt });
+    const on = this.cfg.enabled && !!this.store;
+    const urls = on ? this._urls() : [];
+    return this.status.snapshot({
+      state: this.cfg.enabled || this.cfg.requested ? this._state() : 'off',
+      port: this.cfg.enabled ? this.cfg.port : null,
+      tlsSha256: on && this.tls ? this.tls.sha256 : null,
+      url: urls[0] || null,
+      usedBytes: on ? this.store.usedBytes : 0,
+      error: this.error,
+      lastSyncAt: this.lastSyncAt,
+      lastReportAt: this.lastReportAt,
+    });
   }
 
   /** Telemetrie `cache` (null wenn weder an noch angefordert). */
   telemetry() {
     if (!this.cfg.enabled && !this.cfg.requested) return null;
     const s = this.store;
-    const listen = this.listen.listen || [];
-    const state = this.state === 'running' && this.listen.state !== 'running' && this.listen.state !== 'off' ? this.listen.state : this.state;
     return {
-      state,
+      state: this._state(),
       port: this.cfg.port || null,
-      listen,
-      urls: listen.map((a) => (a.includes(':') ? `https://[${a}]:${this.cfg.port}` : `https://${a}:${this.cfg.port}`)),
+      listen: this.listen.listen || [],
+      urls: this._urls(),
       tlsSha256: this.tls ? this.tls.sha256 : null,
       path: this.cfg.path || null,
       usedBytes: s ? s.usedBytes : 0,
