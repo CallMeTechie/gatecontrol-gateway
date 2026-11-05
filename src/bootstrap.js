@@ -32,6 +32,9 @@ const logger = require('./logger');
 const os = require('node:os');
 const { lanSubnets, ipInCidr } = require('./discovery/lanInterfaces');
 const { EdgeLink } = require('./edge/gatewayLink');
+const { createFeatureManager } = require('./features/manager');
+const { configHash } = require('./features/config');
+const { createFeaturesRouter } = require('./api/routes/features');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
 
@@ -97,9 +100,14 @@ async function bootstrap() {
     sources: { discoverMdns, discoverSsdp, sweep },
   });
 
+  // Phase 3a: Netzwerk-Wächter, Internetqualität, Anwesenheit, USV — gesteuert
+  // über `features` im Config-Pull (fehlt es, bleibt alles aus).
+  const featureMgr = createFeatureManager({ config, defaultGatewayIp });
+
   // 3. On config change → apply
   store.on('change', async ({ cfg, hash }) => {
     logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length }, 'Applying new config');
+    try { featureMgr.apply(cfg.features); } catch (err) { logger.warn({ err: err.message }, 'features: apply failed'); }
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
     await egressMgr.setRoutes(cfg.egress_routes || []);
@@ -117,7 +125,8 @@ async function bootstrap() {
       }
       const data = await fetchConfig({ serverUrl: config.serverUrl, apiToken: config.apiToken });
       const { config_hash, ...cfgBody } = data;
-      const recomputed = libComputeHash(cfgBody);
+      // Mit `features` rechnet der Server den Hash wie configHash() (Vertrag Phase 3a).
+      const recomputed = configHash(cfgBody, libComputeHash);
       if (config_hash && config_hash !== recomputed) {
         logger.warn({ server_hash: config_hash, our_hash: recomputed }, 'Hash mismatch — this should not happen if shared library is correct');
       }
@@ -173,6 +182,7 @@ async function bootstrap() {
         }));
         mergeRouter.use(createSelfUpdateRouter({ stateDir: config.stateDir }));
         mergeRouter.use(createLanScanRouter({ scanMgr, defaultGatewayIp }));
+        mergeRouter.use(createFeaturesRouter({ featureMgr }));
         return mergeRouter;
       },
     },
@@ -222,12 +232,14 @@ async function bootstrap() {
       try { health.telemetry.scan_egress_near = await nearMgr.getStatus(store.egressRoutes); } catch (_e) { /* best-effort */ }
       // Edge-Container: Zusammenfassung (null = kein Edge-Dienst); Abgleich läuft im eigenen 30-s-Takt
       health.telemetry.edge = edgeLink.telemetry();
+      // Phase 3a: capabilities, Zustand je Funktion (Karte „Funktionen“), USV, RAM des Prozesses
+      try { Object.assign(health.telemetry, featureMgr.telemetry()); } catch (_e) { /* best-effort */ }
       health.config_hash = store.currentHash || null;
       return health;
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, nearMgr, hb, edgeLink };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr };
 }
 
 module.exports = { bootstrap };

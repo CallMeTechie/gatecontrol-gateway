@@ -116,4 +116,7 @@ function primaryLanIp(defaultGwIp, ifaces = os.networkInterfaces()) {
   return cands[0].address;                                     // deterministic fallback
 }
 
-module.exports = { lanSubnets, primaryLanIp, isPhysicalLan, netmaskToPrefix, networkAddress, ipInCidr };
+module.exports = {
+  lanSubnets, primaryLanIp, isPhysicalLan, netmaskToPrefix, networkAddress, ipInCidr,
+  isPrivateIpv4: _isPrivateIpv4,
+};

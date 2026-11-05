@@ -34,8 +34,9 @@ function probePort(host, port, timeoutMs = 400) {
 }
 
 // Bounded-concurrency map over (host × port). `probeFn` is injectable for tests.
-async function sweep({ subnetCidr, ports, concurrency = 128, timeoutMs = 400, jitterMs = 5, probeFn = probePort }) {
-  const hosts = hostsInSubnet(subnetCidr);
+// `hosts` (explicit list, e.g. the network watch's port scan) replaces `subnetCidr`.
+async function sweep({ subnetCidr, hosts: hostList, ports, concurrency = 128, timeoutMs = 400, jitterMs = 5, probeFn = probePort }) {
+  const hosts = Array.isArray(hostList) ? hostList : hostsInSubnet(subnetCidr);
   const jobs = [];
   for (const ip of hosts) for (const port of ports) jobs.push({ ip, port });
   const results = [];
