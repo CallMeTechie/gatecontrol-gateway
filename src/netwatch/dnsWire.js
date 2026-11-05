@@ -156,6 +156,6 @@ function decodeNbstatName(buf) {
 }
 
 module.exports = {
-  encodeQuery, decodeResponse, reverseName, encodeNbstatQuery, decodeNbstatName, encodeName,
+  encodeQuery, decodeResponse, reverseName, encodeNbstatQuery, decodeNbstatName, encodeName, readName,
   TYPE_A, TYPE_PTR,
 };

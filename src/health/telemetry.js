@@ -13,6 +13,7 @@ const { execFileSync } = require('node:child_process');
 const logger = require('../logger');
 const { lanSubnets, primaryLanIp } = require('../discovery/lanInterfaces');
 const { catalogue } = require('../discovery/categories');
+const { collectStorage } = require('./storage');
 
 // ─── Cached-at-load values ──────────────────────────────────────────────
 // Nothing here changes over the container lifetime, so we read once at
@@ -202,6 +203,8 @@ function collectTelemetry() {
     mem_used: memTotal - memFree,
     disk: diskUsage(),
     hardware: hardwareProfile(),
+    // Eingehängte Datenträger (Phase 3b §3) – Vorschlag für den Zwischenspeicher
+    storage: collectStorage({ host: _readHostProfile() }),
 
     // LAN context
     dns_resolvers: dns.getServers(),

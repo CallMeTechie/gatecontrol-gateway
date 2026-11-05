@@ -162,6 +162,11 @@ class NetWatch {
     if (this.loaded) this._persist(true);
   }
 
+  /** Zeitzone geändert → nächtliches Fenster neu in Ortszeit planen. */
+  replan() {
+    if (this.cfg.portscan) this.nextPortscanAt = nextNightly(this.now(), this.rand);
+  }
+
   /** Bekannte IP einer MAC (für die Anwesenheit), sonst null. */
   knownIp(mac) {
     const d = this.devices.get(mac);

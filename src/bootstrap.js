@@ -103,6 +103,9 @@ async function bootstrap() {
   // Phase 3a: Netzwerk-Wächter, Internetqualität, Anwesenheit, USV — gesteuert
   // über `features` im Config-Pull (fehlt es, bleibt alles aus).
   const featureMgr = createFeatureManager({ config, defaultGatewayIp });
+  // DNS-Filter/Zeitzone mit der letzten Einstellung starten, bevor der erste
+  // Config-Pull läuft (der Gateway-Host kann selbst auf den Filter zeigen).
+  try { await featureMgr.restoreBoot(); } catch (err) { logger.warn({ err: err.message }, 'features: boot restore failed'); }
 
   // 3. On config change → apply
   store.on('change', async ({ cfg, hash }) => {

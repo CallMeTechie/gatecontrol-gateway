@@ -114,6 +114,11 @@ class InetQuality {
     }
   }
 
+  /** Zeitzone geändert → Speedtest-Plan neu in Ortszeit. */
+  replan() {
+    if (this.cfg.enabled) this.nextSpeedtestAt = nextSpeedtest(this.cfg.speedtest, this.now(), this.rand);
+  }
+
   stop() {
     this.loop.stop();
     if (this.loaded) { this.dirty = true; this._persist(); }

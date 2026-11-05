@@ -5,6 +5,12 @@
 #   - gateway.env from GateControl UI (Peer-Detail → Download)
 #   - Gateway must be on same L2 segment as target LAN devices (WoL!)
 #   - Host network mode required for dynamic L4 port binding
+#
+# Ports im LAN (nur wenn in GateControl eingeschaltet, nur LAN-Adressen, nie Tunnel):
+#   53/udp+tcp  DNS-Filter (docs/dns-cache.md) – belegt ein anderer Dienst
+#               (z. B. DSM-Paket „DNS Server“, Pi-hole) Port 53, meldet das
+#               Gateway „port_busy“ und erzwingt nichts.
+#   8443/tcp    Zwischenspeicher (HTTPS, selbstsigniert, signierte Links)
 
 services:
   gateway:
@@ -41,6 +47,9 @@ services:
     volumes:
       - ./config:/config:ro      # Place gateway.env here
       - ./gateway-state:/state          # rw: self-update flag + last-pull marker (#2b)
+      # Zwischenspeicher (docs/dns-cache.md): Blobs für Apps im Heimnetz. Auf der
+      # Synology z. B. GC_CACHE_DIR=/volume1/gatecontrol-cache in .env setzen.
+      - ${GC_CACHE_DIR:-./gateway-cache}:/cache
       # Edge-Container (docs/edge.md): Zugangsdaten + Netzgrenzen-Marker hin,
       # Zusammenfassung für die Telemetrie zurück. Ohne Edge-Dienst weglassen.
       - type: volume
@@ -59,8 +68,9 @@ services:
       # Required on Synology DSM, Alpine containers w/o wg-kernel-module, VMs etc.
       # (Also baked into Dockerfile as ENV — overrideable here.)
       - WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
-      # Ortszeit (z. B. Europe/Berlin) für den nächtlichen Portscan des
-      # Netzwerk-Wächters und den Speedtest-Plan; ohne TZ gilt UTC.
+      # Ortszeit für Portscan-Fenster, Speedtest-Plan und DNS-Zeiten. Schickt
+      # der Server eine Zeitzone (ab GateControl mit Phase 3b), gilt diese;
+      # TZ ist nur der Rückfall (ohne beides: UTC).
       - TZ=${TZ:-Etc/UTC}
     healthcheck:
       interval: 60s

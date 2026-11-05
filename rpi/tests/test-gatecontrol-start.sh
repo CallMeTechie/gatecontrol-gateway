@@ -163,6 +163,19 @@ expect "Exit 0" run_start
 expect "Edge + MQTT entfernt" grep -q 'compose -f docker-compose.yml rm -s -f edge mqtt$' "$T/docker.log"
 expect "ohne Edge gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway deconz$' "$T/docker.log"
 
+echo "== CACHE_DIR in settings.txt"
+mkdir -p "$T/usb disk" "$T/usb"
+printf 'CACHE_DIR=%s\n' "$T/usb" >"$T/boot/gatecontrol/settings.txt"
+expect "Exit 0" run_start
+expect ".env: GC_CACHE_DIR" grep -qx "GC_CACHE_DIR=$T/usb" "$T/opt/.env"
+expect "gateway-cache angelegt" test -d "$T/opt/gateway-cache"
+for bad in "$T/fehlt" "$T/usb disk" "relativ/pfad" "$T/usb/../etc"; do
+  printf 'CACHE_DIR=%s\n' "$bad" >"$T/boot/gatecontrol/settings.txt"
+  expect "Exit 0 ($bad)" run_start
+  expect "ungültiges CACHE_DIR verworfen ($bad)" not grep -q GC_CACHE_DIR "$T/opt/.env"
+done
+rm -f "$T/boot/gatecontrol/settings.txt"
+
 echo "== Rollback-Override von update.sh bleibt aktiv"
 echo 'services: {gateway: {image: x@sha256:00}}' >"$T/opt/docker-compose.rollback.yml"
 printf 'GC_ZIGBEE_DEVICE=/dev/evil;rm -rf /\n' >"$T/run/zigbee.env"

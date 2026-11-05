@@ -17,6 +17,12 @@ ZIGBEE=auto
 # bzw. MQTT für dieses Gateway einschaltet. off spart etwa 55 MB RAM.
 #EDGE=on
 
+# Zwischenspeicher (Dateien/Fotos/App-Updates im Heimnetz) auf einem eigenen
+# Datenträger statt auf der SD-Karte – ständiges Schreiben nutzt die Karte ab.
+# Ordner auf einer per /etc/fstab eingehängten USB-Platte bzw. einem USB-Stick
+# (muss beim Start existieren). Leer = /opt/gatecontrol-gateway/gateway-cache.
+#CACHE_DIR=/mnt/usb/gatecontrol-cache
+
 # Hostname. Leer = Name aus dem Raspberry Pi Imager, sonst gc-<Name des Gateways>.
 #HOSTNAME=gatecontrol-gw
 
