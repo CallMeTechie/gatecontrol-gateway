@@ -73,12 +73,20 @@ function validateCaps(caps, where = 'capabilities') {
     }
     out.mdns = { services: uniq(m.services) };
   }
-  for (const k of ['tcp', 'http']) {
-    if (caps[k] === undefined) continue;
-    if (!isObj(caps[k]) || typeof caps[k].lan !== 'boolean' || Object.keys(caps[k]).some((x) => x !== 'lan')) {
-      throw new ManifestError('bad_caps', `${where}.${k} must be { "lan": true|false }`);
+  if (caps.tcp !== undefined) {
+    if (!isObj(caps.tcp) || typeof caps.tcp.lan !== 'boolean' || Object.keys(caps.tcp).some((x) => x !== 'lan')) {
+      throw new ManifestError('bad_caps', `${where}.tcp must be { "lan": true|false }`);
     }
-    out[k] = { lan: caps[k].lan };
+    out.tcp = { lan: caps.tcp.lan };
+  }
+  if (caps.http !== undefined) {
+    const h = caps.http;
+    if (!isObj(h) || typeof h.lan !== 'boolean' || Object.keys(h).some((x) => x !== 'lan' && x !== 'selfSigned')
+      || (h.selfSigned !== undefined && typeof h.selfSigned !== 'boolean')) {
+      throw new ManifestError('bad_caps', `${where}.http must be { "lan": true|false, "selfSigned"?: true|false }`);
+    }
+    // selfSigned = HTTPS ohne Zertifikatsprüfung erlauben (sonst nur volle Prüfung oder pinSha256)
+    out.http = h.selfSigned === true ? { lan: h.lan, selfSigned: true } : { lan: h.lan };
   }
   if (caps.mqtt !== undefined) {
     const m = caps.mqtt;
@@ -112,7 +120,11 @@ function intersectCaps(manifestCaps, approved) {
     out.udp = { ports, multicast };
   }
   if (m.mdns && a.mdns) out.mdns = { services: m.mdns.services.filter((s) => a.mdns.services.includes(s)) };
-  for (const k of ['tcp', 'http']) if (m[k] && a[k]) out[k] = { lan: m[k].lan === true && a[k].lan === true };
+  if (m.tcp && a.tcp) out.tcp = { lan: m.tcp.lan === true && a.tcp.lan === true };
+  if (m.http && a.http) {
+    out.http = { lan: m.http.lan === true && a.http.lan === true };
+    if (m.http.selfSigned === true && a.http.selfSigned === true) out.http.selfSigned = true;
+  }
   if (m.mqtt && a.mqtt) out.mqtt = { topics: m.mqtt.topics.filter((t) => a.mqtt.topics.includes(t)) };
   if (m.serial && a.serial) out.serial = m.serial.filter((s) => a.serial.includes(s));
   return out;

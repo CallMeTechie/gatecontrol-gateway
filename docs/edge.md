@@ -181,7 +181,7 @@ Der Edge-Teil ist ein CommonJS-Modul (`edge.entry`), das ein Objekt mit
 | `gc.lan.udp.send(host, port, buf)` | `udp` | einzelnes Datagramm (≤ 8 KB) von einem flüchtigen Port |
 | `gc.lan.mdns.browse(service, onFound)` | `mdns.services` | `onFound({host, ip, port, service, txt})` → `{stop()}` |
 | `gc.lan.tcp.connect(host, port)` | `tcp.lan` | Duplex-Stream |
-| `gc.lan.http.request({method, url, headers, body, timeoutMs})` | `http.lan` | → `{status, headers, body, text(), json()}`; Antwort ≤ 5 MB, ≤ 30 s, keine Weiterleitungen, HTTPS ohne Zertifikatsprüfung (LAN-Geräte) |
+| `gc.lan.http.request({method, url, headers, body, timeoutMs, pinSha256, insecure})` | `http.lan` | → `{status, headers, body, text(), json()}`; Antwort ≤ 5 MB, ≤ 30 s, keine Weiterleitungen; HTTPS siehe unten |
 | `gc.mqtt.subscribe(topic, fn)` / `gc.mqtt.publish(topic, payload, {retain, qos})` | `mqtt.topics` | lokaler Broker (Dienst `mqtt`); ohne Broker `not_enabled` |
 | `gc.serial.open(name, {baudRate})` | `serial` | **noch nicht verfügbar** (`not_available`): serielle Geräte werden in v1 nicht in den Container gereicht |
 
@@ -192,9 +192,23 @@ WireGuard-, Docker- und VPN-Schnittstellen), nie die Tunnel-Adresse, nie der
 Server, nie die Netzadresse; die Router-Adresse ist erlaubt. Multicast nur für
 genehmigte Gruppen. IPv6 ist in v1 nicht vorgesehen.
 
+**HTTPS zu LAN-Geräten** ist standardmäßig voll geprüft (Zertifikatskette und
+Name/IP-SAN). Für die üblichen selbstsignierten Geräte gibt es zwei Wege:
+
+* `pinSha256`: SHA-256 des Leaf-Zertifikats (64 Hex-Zeichen; auch mit `:`,
+  Großbuchstaben oder `sha256:`-Präfix) – derselbe Mechanismus wie
+  `backend_tls_fingerprint` der HTTPS-Routen (`src/proxy/tlsPin.js`). Dann
+  ersetzt der Pin die Kettenprüfung; die Anfrage bekommt den Socket erst, wenn
+  der Pin passt (sonst `tls_pin_mismatch`, kein Byte der Anfrage geht raus).
+* `insecure: true`: keine Prüfung – nur, wenn das Manifest die Fähigkeit
+  `http: { "lan": true, "selfSigned": true }` verlangt **und** der Admin sie
+  genehmigt hat; sonst `denied`.
+
+Ohne beides scheitert ein selbstsigniertes Gerät mit `tls_error`.
+
 Fehler kommen als `Error` mit `code`: `denied` (Fähigkeit/Ziel), `busy`
 (Grenze erreicht), `timeout`, `not_available`, `not_found`, `net_error`,
-`too_large`, `bad_request`.
+`too_large`, `bad_request`, `tls_error`, `tls_pin_mismatch`.
 
 ### Fähigkeiten (`edge.capabilities`)
 
@@ -204,7 +218,8 @@ genehmigt (`caps`) – die Schnittmenge.
 * `udp.ports`: 1024–65535, nie 5353 (dafür `mdns`), höchstens 16;
   `udp.multicast`: 224.0.0.0/4 ohne 224.0.0.0/24 (außer mDNS 224.0.0.251).
 * `mdns.services`: `_name._tcp|_udp`, höchstens 16.
-* `tcp.lan`, `http.lan`: `true`/`false`.
+* `tcp.lan`, `http.lan`: `true`/`false`; `http.selfSigned`: `true` erlaubt
+  HTTPS ohne Zertifikatsprüfung (`insecure: true`), nur mit Admin-Freigabe.
 * `mqtt.topics`: Filter ohne führendes `#`/`+`, ohne `$`-Themen, höchstens 16.
 * `serial`: benannte Geräte (`zigbee`).
 

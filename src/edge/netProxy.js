@@ -12,6 +12,7 @@ const https = require('node:https');
 const os = require('node:os');
 const { LIMITS } = require('./constants');
 const { DeniedError, checkPort } = require('./lanGuard');
+const { PinnedHttpsAgent, normalizeFingerprint, PIN_MISMATCH_CODE } = require('../proxy/tlsPin');
 
 const HTTP_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 const HOP_HEADERS = new Set(['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'upgrade', 'te', 'trailer', 'proxy-authorization']);
@@ -36,6 +37,22 @@ function lanInterfaceAddrs(guard) {
     for (const a of addrs || []) if (a.family === 'IPv4' && !a.internal && guard.allowed(a.address)) out.push(a.address);
   }
   return out;
+}
+
+/**
+ * Agent ohne Zertifikatsprüfung – ausschließlich für Anfragen mit
+ * `insecure: true`, die tlsOptions() nur bei genehmigter Fähigkeit
+ * `http.selfSigned` erlaubt (Admin-Freigabe am Server). Kein Pooling.
+ */
+class SelfSignedAgent extends https.Agent {
+  constructor() {
+    super({ keepAlive: false, maxCachedSessions: 0 });
+  }
+
+  createConnection(options, cb) {
+    // bewusst ohne Kettenprüfung (Fähigkeit http.selfSigned, siehe oben)
+    return super.createConnection({ ...options, rejectUnauthorized: false }, cb);
+  }
 }
 
 class PluginNet {
@@ -191,7 +208,33 @@ class PluginNet {
 
   // ─── HTTP ──────────────────────────────────────
 
-  httpRequest({ method = 'GET', url, headers = {}, b64 = null, timeoutMs }) {
+  /**
+   * TLS-Prüfung einer HTTPS-Anfrage (sicher by default):
+   *  - Standard: volle Prüfung (Kette + Name/IP-SAN), rejectUnauthorized: true;
+   *  - `pinSha256`: SHA-256 des Leaf-Zertifikats (wie `backend_tls_fingerprint`
+   *    der HTTPS-Routen, src/proxy/tlsPin.js) – dann ersetzt der Pin die
+   *    Kettenprüfung, und die Anfrage bekommt den Socket erst nach passendem Pin;
+   *  - `insecure: true`: keine Prüfung – nur mit der Fähigkeit
+   *    `http.selfSigned` (im Manifest verlangt UND vom Admin genehmigt).
+   */
+  tlsOptions(u, port, { pinSha256, insecure }, c) {
+    if (u.protocol !== 'https:') {
+      if (pinSha256 || insecure) throw new NetError('bad_request', 'pinSha256/insecure only for https');
+      return {};
+    }
+    if (pinSha256 !== undefined && pinSha256 !== null) {
+      const fp = normalizeFingerprint(pinSha256);
+      if (!fp) throw new NetError('bad_request', 'pinSha256 must be the SHA-256 of the certificate (64 hex characters)');
+      return { agent: new PinnedHttpsAgent({ host: u.hostname, port, fingerprint: fp }) };
+    }
+    if (insecure === true) {
+      this.need(c.selfSigned === true, 'http.selfSigned');
+      return { agent: new SelfSignedAgent() };
+    }
+    return { agent: false, rejectUnauthorized: true };
+  }
+
+  async httpRequest({ method = 'GET', url, headers = {}, b64 = null, timeoutMs, pinSha256 = null, insecure = false }) {
     const c = this.caps().http;
     this.need(c && c.lan === true, 'http.lan');
     let u;
@@ -218,8 +261,7 @@ class PluginNet {
     if (body.length) hdrs['content-length'] = String(body.length);
     const limit = Math.max(1000, Math.min(LIMITS.httpTimeoutMaxMs, Number.isFinite(timeoutMs) ? timeoutMs : LIMITS.httpTimeoutMaxMs));
     const mod = u.protocol === 'https:' ? https : http;
-    // LAN-Geräte haben fast immer selbstsignierte Zertifikate (wie die HTTPS-Routen ohne Pin)
-    const opts = { method: m, headers: hdrs, agent: false, timeout: limit, ...(u.protocol === 'https:' ? { rejectUnauthorized: false } : {}) };
+    const opts = { method: m, headers: hdrs, agent: false, timeout: limit, ...this.tlsOptions(u, port, { pinSha256, insecure }, c) };
     return new Promise((resolve, reject) => {
       const deadline = setTimeout(() => req.destroy(new NetError('timeout', 'http request timed out')), limit);
       const req = mod.request(u, opts, (res) => {
@@ -239,7 +281,13 @@ class PluginNet {
         res.on('error', (e) => { clearTimeout(deadline); reject(e instanceof NetError ? e : new NetError('net_error', e.message)); });
       });
       req.on('timeout', () => req.destroy(new NetError('timeout', 'http request timed out')));
-      req.on('error', (e) => { clearTimeout(deadline); reject(e instanceof NetError ? e : new NetError('net_error', `http: ${e.code || e.message}`)); });
+      req.on('error', (e) => {
+        clearTimeout(deadline);
+        if (e instanceof NetError) return reject(e);
+        if (e.code === PIN_MISMATCH_CODE) return reject(new NetError('tls_pin_mismatch', `certificate of ${u.hostname}:${port} does not match pinSha256 (seen ${e.actualFingerprint})`));
+        if (/CERT|SELF_SIGNED|UNABLE_TO|ERR_TLS/.test(String(e.code))) return reject(new NetError('tls_error', `${e.code}: certificate not trusted — use pinSha256`));
+        return reject(new NetError('net_error', `http: ${e.code || e.message}`));
+      });
       if (body.length) req.write(body);
       req.end();
     });

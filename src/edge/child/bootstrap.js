@@ -239,7 +239,8 @@ function makeGc(info) {
       const o = opts && typeof opts === 'object' ? opts : {};
       const body = o.body === undefined || o.body === null ? null
         : (Buffer.isBuffer(o.body) || o.body instanceof Uint8Array || typeof o.body === 'string') ? toB64(o.body) : toB64(JSON.stringify(o.body));
-      const r = await hostCall('http.request', { method: o.method || 'GET', url: o.url, headers: o.headers || {}, b64: body, timeoutMs: o.timeoutMs });
+      const r = await hostCall('http.request', { method: o.method || 'GET', url: o.url, headers: o.headers || {}, b64: body, timeoutMs: o.timeoutMs,
+        pinSha256: typeof o.pinSha256 === 'string' ? o.pinSha256 : null, insecure: o.insecure === true });
       const buf = Buffer.from(String(r.b64 || ''), 'base64');
       return Object.freeze({ status: r.status, headers: r.headers || {}, body: buf, text: () => buf.toString('utf8'), json: () => JSON.parse(buf.toString('utf8')) });
     },
