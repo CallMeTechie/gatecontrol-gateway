@@ -9,6 +9,7 @@ Companion product for [GateControl](https://github.com/CallMeTechie/gatecontrol)
 - **Wake-on-LAN** triggered on backend-down (zero-config from GateControl UI)
 - **Auto-sync** with GateControl: no manual re-config when routes change
 - **Self-monitoring** with health reporting to server (sliding-window hysteresis, per-route reachability)
+- **Netzwerk-Wächter, Internetqualität, Anwesenheit, USV** (vom Server pro Gateway schaltbar): Geräte im Heimnetz mit Hersteller/Namen/offenen Ports, Ping/Verlust/Ausfälle mit Ursache und Speedtest, WLAN-Anwesenheit freigegebener Handys, USV-Zustand per NUT – siehe [docs/netzwerk-internet.md](docs/netzwerk-internet.md)
 - **Edge-Container** für Plugin-Teile im Heimnetz (UDP/Multicast, mDNS, LAN-TCP/HTTP): eigener Container ohne Rechte (UID 61001), signierte Pakete, Prozess-Isolation, Netzgrenze – siehe [docs/edge.md](docs/edge.md)
 - **Security-hardened**: non-root container, `cap_drop: ALL` + minimal adds, read-only filesystem
 
