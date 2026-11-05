@@ -47,7 +47,7 @@ RUN wget -q -O /tmp/ipt.tar.xz "https://www.netfilter.org/projects/iptables/file
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # hadolint ignore=DL3018
-RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils && \
+RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils nftables && \
     addgroup -S gateway && adduser -S -G gateway -H -s /sbin/nologin gateway && \
     mkdir -p /config /var/log/gateway && \
     chown -R gateway:gateway /var/log/gateway
@@ -55,11 +55,11 @@ RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils &
 # Edge-Container (docs/edge.md): gleiches Image, anderer Befehl
 # (node src/edge/main.js), eigener Benutzer mit FESTER UID/GID 61001 – die
 # Netzgrenze des Gateway-Containers (Owner-Match) und die Volumes hängen an
-# dieser Zahl. /state-edge ist der Einhängepunkt des Edge-Volumes; ein neues
-# benanntes Volume übernimmt Besitzer und Rechte dieses Ordners.
+# dieser Zahl. /state-edge und /gc-mqtt sind Einhängepunkte der Edge-Volumes;
+# ein neues benanntes Volume übernimmt Besitzer und Rechte dieser Ordner.
 RUN addgroup -g 61001 gcedge && \
     adduser -u 61001 -G gcedge -D -H -h /state-edge -s /sbin/nologin gcedge && \
-    install -d -m 0700 -o gcedge -g gcedge /state-edge
+    install -d -m 0700 -o gcedge -g gcedge /state-edge /gc-mqtt
 
 COPY --from=wg-build /wireguard-go /usr/local/bin/wireguard-go
 COPY --from=node-build /build/node_modules /app/node_modules
@@ -71,7 +71,12 @@ COPY --from=ipt-legacy /opt/ipt/sbin/xtables-legacy-multi /usr/local/bin/xtables
 RUN ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/iptables \
  && ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/iptables-save \
  && ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/iptables-restore \
- && iptables --version
+ && ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/ip6tables \
+ && ln -sf /usr/local/bin/xtables-legacy-multi /usr/local/bin/ip6tables-restore \
+ && iptables --version && ip6tables --version
+# nftables (apk) ist das bevorzugte Backend der Edge-Netzgrenze (docs/edge.md);
+# wo der Kernel kein nf_tables spricht (Synology DSM), greift legacy-iptables
+# mit Owner-Match (-m owner --uid-owner 61001, statisch eingebaut).
 
 # Grant NET_ADMIN cap to wireguard-go binary (so we can drop CAP_NET_ADMIN from container)
 # Note: Container must still have CAP_NET_ADMIN in cap_add (setcap only works if FS supports it)

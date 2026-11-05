@@ -83,6 +83,7 @@ check "keine gateway.env im Image" test ! -e "$R/opt/gatecontrol-gateway/config/
 check "deCONZ-Image mit Digest eingetragen" grep -qE 'image: deconzcommunity/deconz:[0-9.]+@sha256:[0-9a-f]{64}' "$R/opt/gatecontrol-gateway/docker-compose.yml"
 check "Edge-Dienst in der Compose-Datei (docs/edge.md)" grep -q 'src/edge/main.js' "$R/opt/gatecontrol-gateway/docker-compose.yml"
 check "Edge-Dienst als UID 61001" grep -q 'user: "61001:61001"' "$R/opt/gatecontrol-gateway/docker-compose.yml"
+check "MQTT-Broker (eclipse-mosquitto) mit Digest" grep -qE 'image: eclipse-mosquitto:[0-9.]+(-alpine)?@sha256:[0-9a-f]{64}' "$R/opt/gatecontrol-gateway/docker-compose.yml"
 check "settings.txt: EDGE dokumentiert" grep -q '^#EDGE=on' "$B/gatecontrol/settings.txt"
 if [ -n "$EXPECT_VERSION" ]; then
   check "image-release = $EXPECT_VERSION" grep -qx "$EXPECT_VERSION" "$R/etc/gatecontrol/image-release"

@@ -52,6 +52,29 @@ jobs:
       - name: rpi/check-config.sh
         run: sudo --preserve-env=PATH,GC_TEST_NMCLI rpi/check-config.sh
 
+  edge-fence:
+    # Netzgrenze des Edge-Containers gegen den echten Kernel, je Backend in
+    # einem eigenen Netz-Namespace: nftables und legacy-iptables (Synology-Weg).
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: nftables + iptables-legacy
+        run: |
+          sudo apt-get install -y nftables iptables
+          sudo modprobe -a nf_tables ip_tables ip6_tables xt_owner || true
+          nft --version; iptables-legacy --version
+      - name: nftables
+        run: sudo unshare -n env GC_FENCE_BACKEND=nft "$(command -v node)" tests/live/edge-fence-live.js
+      - name: iptables-legacy (owner match)
+        run: |
+          sudo unshare -n env GC_FENCE_BACKEND=iptables \
+            GC_FENCE_IPTABLES=iptables-legacy GC_FENCE_IPTABLES_RESTORE=iptables-legacy-restore \
+            GC_FENCE_IP6TABLES=ip6tables-legacy GC_FENCE_IP6TABLES_RESTORE=ip6tables-legacy-restore \
+            "$(command -v node)" tests/live/edge-fence-live.js
+
   lint:
     runs-on: ubuntu-latest
     steps:

@@ -89,7 +89,7 @@ if [ "$a" = "$b" ]; then echo "ok: Gateway-Dienst hat dieselben Sicherheits-Opti
 fi
 # Edge-Container (docs/edge.md): gleicher Dienst + gleiche Volumes wie im Beispiel,
 # feste UID 61001, keine Capabilities, no-new-privileges, read-only.
-edge_svcs=(edge)
+edge_svcs=(edge mqtt)
 for svc in "${edge_svcs[@]}"; do
   pick=".services.$svc | {image, entrypoint, network_mode, cap_drop, cap_add, read_only, user, security_opt, tmpfs, mem_limit, pids_limit, devices, volumes: [.volumes[] | {type, source, target, read_only, volume}]}"
   a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$pick")"
@@ -101,6 +101,8 @@ for svc in "${edge_svcs[@]}"; do
     and (.security_opt | index("no-new-privileges:true")) != null and .devices == null' >/dev/null \
     || die "Dienst $svc: Sicherheits-Optionen unvollständig (UID 61001, cap_drop ALL, read_only, no-new-privileges)"
 done
+mimg="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -r '.services.mqtt.image')"
+[[ "$mimg" =~ ^eclipse-mosquitto:[0-9.]+(-alpine)?@sha256:[0-9a-f]{64}$ ]] || die "mqtt: Image nicht per Tag+Digest gepinnt ($mimg)"
 vpick='.volumes | with_entries(.value |= {driver_opts})'
 a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$vpick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"

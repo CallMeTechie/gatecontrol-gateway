@@ -10,12 +10,17 @@
 // Gateway-Container (root, ohne CAP_CHOWN/CAP_DAC_OVERRIDE) schreibt, das
 // setgid-Bit gibt jeder Datei die Gruppe des Edge-Benutzers, der sie damit
 // lesen, aber weder ändern noch löschen kann.
+//
+// Außerdem setzt es die Netzgrenze für den Edge-Benutzer (fenceRules.js)
+// und schreibt deren Marker – alle 30 s, unabhängig vom Heartbeat.
 
 const dns = require('node:dns');
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 const logger = require('../logger');
+const { FenceManager } = require('./fenceRules');
+const { privateLanCidrs } = require('./lanGuard');
 
 const CREDENTIALS_FILE = 'credentials';
 const STATUS_FILE = 'status.json';
@@ -44,8 +49,10 @@ function clampNum(v) { return Number.isFinite(v) ? Math.round(v * 10) / 10 : nul
 
 class EdgeLink {
   constructor({ config, runDir = process.env.GC_EDGE_RUN_DIR || '/run/gc-edge', statusDir = process.env.GC_EDGE_STATUS_DIR || '/run/gc-edge-status',
-    lookup, now = Date.now } = {}) {
+    lookup, now = Date.now, fence, getLanCidrs } = {}) {
     this.config = config;
+    this.fence = fence || new FenceManager({ runDir, logger, now });
+    this.getLanCidrs = getLanCidrs || privateLanCidrs;
     this.runDir = runDir;
     this.statusDir = statusDir;
     this.lookup = lookup;
@@ -88,8 +95,27 @@ class EdgeLink {
         logger.warn({ err: e.message }, 'edge: could not write the credentials for the edge container');
       }
     }
-    return { deployed: true, server: this.server };
+    // Netzgrenze: nur mit bekannter Server-Adresse (sonst bleibt der Edge-Teil zu)
+    try {
+      await this.fence.apply({
+        lanCidrs: this.getLanCidrs(),
+        serverAddrs: this.server ? this.server.addrs : [],
+        serverPort: this.server ? this.server.port : 443,
+        tunnelIp: this.config.tunnelIp,
+      });
+    } catch (e) {
+      logger.warn({ err: e.message }, 'edge fence: apply failed');
+    }
+    return { deployed: true, server: this.server, fence: this.fence.state };
   }
+
+  /** Alle 30 s abgleichen (Zugangsdaten, Server-Adressen, LAN-Subnetze, Regeln). */
+  start(intervalMs = 30000) {
+    this.timer = setInterval(() => { this.sync().catch((e) => logger.debug({ err: e.message }, 'edge: sync failed')); }, intervalMs);
+    if (this.timer.unref) this.timer.unref();
+  }
+
+  stop() { clearInterval(this.timer); }
 
   /** Zusammenfassung des Edge-Hosts (nicht vertrauenswürdig: begrenzt und geklemmt). */
   readStatus() {
@@ -126,6 +152,7 @@ class EdgeLink {
     return {
       deployed: true,
       error: this.lastError,
+      fence: { ...this.fence.state },
       host: this.readStatus(),
     };
   }

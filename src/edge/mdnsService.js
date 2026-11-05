@@ -11,8 +11,9 @@ const { mapMdnsResponse } = require('../discovery/mdns');
 const QUERY_EVERY_MS = 60000;
 
 class MdnsService extends EventEmitter {
-  constructor({ logger, factory } = {}) {
+  constructor({ logger, factory, getInterface = null } = {}) {
     super();
+    this.getInterface = getInterface; // IPv4 der LAN-Schnittstelle (sonst Standard-Route des Hosts)
     this.logger = logger || { debug() {}, warn() {} };
     this.factory = factory || ((opts) => require('multicast-dns')(opts));
     this.mdns = null;
@@ -25,7 +26,9 @@ class MdnsService extends EventEmitter {
   ensure() {
     if (this.mdns) return this.mdns;
     try {
-      this.mdns = this.factory({ multicast: true, reuseAddr: true, loopback: true });
+      const iface = this.getInterface ? this.getInterface() : null;
+      // bind 0.0.0.0: an die Unicast-Adresse gebunden kämen unter Linux keine Multicast-Pakete an
+      this.mdns = this.factory({ multicast: true, reuseAddr: true, loopback: true, bind: '0.0.0.0', ...(iface ? { interface: iface } : {}) });
     } catch (e) {
       this.logger.warn({ err: e.message }, 'edge: mDNS not available');
       return null;

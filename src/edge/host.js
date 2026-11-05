@@ -65,6 +65,7 @@ class EdgeHost extends EventEmitter {
     this.hardware = o.hardware || (() => { try { return require('../health/telemetry').hardwareProfile(); } catch { return null; } });
     this.mdns = o.mdns || null;
     this.mqtt = o.mqtt || null; // MQTT-Verwaltung (Broker-Dateien + internes Konto), optional
+    if (this.mqtt) this.mqtt.onChange = () => this.scheduleStatus();
     this.creds = null;
     this.guard = o.guard || makeLanGuard({ tunnelIp: () => (this.creds ? this.creds.tunnelIp : null), serverAddrs: () => (this.creds ? this.creds.serverAddrs : []) });
     this.store = new packages.PackageStore({ packagesDir: this.paths.packagesDir, logger: this.logger });
@@ -139,6 +140,7 @@ class EdgeHost extends EventEmitter {
         this.channel.reconnect();
       }
     }
+    if (this.mqtt) { try { this.mqtt.refresh(); } catch (e) { this.logger.warn({ err: e.message }, 'edge: mqtt refresh failed'); } }
     const was = this.fence.active;
     await this.checkFenceNow();
     if (was !== this.fence.active || this.hasRetry()) this.requestReconcile();
@@ -390,7 +392,10 @@ class EdgeHost extends EventEmitter {
       try { this.store.prune(e.id, e.spec.version); } catch (err) { this.logger.debug({ err: err.message }, 'edge: prune failed'); }
       this.logger.info({ plugin: e.id, version: e.spec.version }, 'edge: edge part running');
     });
-    proc.on('exit', () => e.net.closeAll());
+    proc.on('exit', () => {
+      e.net.closeAll();
+      if (this.mqtt) this.mqtt.dropPlugin(e.id); // ein neuer Prozess abonniert neu
+    });
     proc.on('event', (name, data) => {
       const msg = e.buffer.push(e.id, name, data, new Date(this.now()).toISOString());
       this.channel.send(msg);

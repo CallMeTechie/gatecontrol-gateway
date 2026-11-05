@@ -34,6 +34,7 @@ async function main() {
     logger.info({ signal }, 'Shutting down');
     try {
       ctx?.hb?.stop();
+      ctx?.edgeLink?.stop();
       ctx?.poller?.stop();
       if (ctx?.apiServer) await new Promise(r => ctx.apiServer.close(r));
       if (ctx?.httpProxyServer) await new Promise(r => ctx.httpProxyServer.close(r));

@@ -13,7 +13,7 @@
 #     es startet nichts.
 #  3. Hostname setzen (settings.txt HOSTNAME → GC_HOSTNAME in der env →
 #     Name aus dem Raspberry Pi Imager bleibt → gc-<Peer-Name>).
-#  4. Dienste wählen: gateway, edge (settings.txt EDGE=on|off, Standard on),
+#  4. Dienste wählen: gateway, edge + mqtt (settings.txt EDGE=on|off, Standard on),
 #     deconz je nach Erkennung durch gatecontrol-hwdetect; docker compose up.
 set -euo pipefail
 
@@ -196,5 +196,5 @@ main() {
 
 ZIGBEE_DEVICE=""
 ZIGBEE_TYPE=""
-EDGE_SERVICES=(edge)
+EDGE_SERVICES=(edge mqtt)
 main "$@"

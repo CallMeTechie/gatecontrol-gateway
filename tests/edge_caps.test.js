@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { validateCaps, intersectCaps, validateEdgeManifest, compareVersions, multicastAllowed } = require('../src/edge/manifest');
-const { makeLanGuard, checkPort } = require('../src/edge/lanGuard');
+const { makeLanGuard, checkPort, isPrivateNet } = require('../src/edge/lanGuard');
 const topics = require('../src/edge/topics');
 
 test('udp: Ports ≥ 1024, nie 5353; Multicast nur 224/4 ohne 224.0.0.0/24 (außer mDNS)', () => {
@@ -75,6 +75,8 @@ test('LAN-Grenzen: nur IPv4 in den LAN-Subnetzen, nie Tunnel, Server, Netzadress
   // Multicast nur mit Fähigkeit
   assert.strictEqual(g.allowed('224.0.1.187'), false);
   assert.strictEqual(g.allowed('224.0.1.187', { multicast: ['224.0.1.187'] }), true);
+  for (const c of ['10.0.0.0/8', '172.16.0.0/12', '172.31.5.0/24', '192.168.1.0/24']) assert.ok(isPrivateNet(c), c);
+  for (const c of ['192.0.2.0/24', '172.32.0.0/16', '100.64.0.0/10', '169.254.0.0/16', '8.8.8.0/24']) assert.ok(!isPrivateNet(c), c);
   assert.throws(() => checkPort(0));
   assert.throws(() => checkPort(65536));
   assert.strictEqual(checkPort(443), 443);

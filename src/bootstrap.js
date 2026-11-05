@@ -57,8 +57,12 @@ async function bootstrap() {
 
   // 1b. Edge-Container (optional, docs/edge.md): Zugangsdaten weiterreichen.
   //     Ohne Edge-Dienst in der Compose-Datei tut das nichts.
+  //     Setzt auch die Netzgrenze des Edge-Benutzers (nftables/iptables-legacy).
   const edgeLink = new EdgeLink({ config });
-  try { await edgeLink.sync(); } catch (err) { logger.warn({ err: err.message }, 'edge: initial sync failed'); }
+  if (edgeLink.deployed()) {
+    try { await edgeLink.sync(); } catch (err) { logger.warn({ err: err.message }, 'edge: initial sync failed'); }
+    edgeLink.start();
+  }
 
   // 2. In-memory state
   const store = new ConfigStore();
@@ -216,8 +220,7 @@ async function bootstrap() {
       health.telemetry = collectTelemetry();
       health.telemetry.scan_egress_listeners = egressMgr.getStatus();
       try { health.telemetry.scan_egress_near = await nearMgr.getStatus(store.egressRoutes); } catch (_e) { /* best-effort */ }
-      // Edge-Container: Zugangsdatei auffrischen + Zusammenfassung (null = kein Edge-Dienst)
-      try { await edgeLink.sync(); } catch (_e) { /* best-effort */ }
+      // Edge-Container: Zusammenfassung (null = kein Edge-Dienst); Abgleich läuft im eigenen 30-s-Takt
       health.telemetry.edge = edgeLink.telemetry();
       health.config_hash = store.currentHash || null;
       return health;

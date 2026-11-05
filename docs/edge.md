@@ -25,7 +25,7 @@ Gateway-Container (root, NET_ADMIN) ──/run/gc-edge──▶ Zugangsdaten + N
 | Benutzer | `gcedge`, **UID/GID 61001** (fest im Image angelegt) |
 | Rechte | `cap_drop: ALL`, keine `cap_add`, `no-new-privileges`, `read_only`, `/tmp` als tmpfs (16 MB), `mem_limit: 512m`, `pids_limit: 256` |
 | Netz | `network_mode: host` (Broadcast/Multicast/mDNS brauchen die echten LAN-Schnittstellen) |
-| Volumes | `edge-state` → `/state-edge` (Pakete, `gc.store`), `edge-run` → `/run/gc-edge` (nur lesen), `edge-status` → `/run/gc-edge-status` |
+| Volumes | `edge-state` → `/state-edge` (Pakete, `gc.store`), `edge-run` → `/run/gc-edge` (nur lesen), `edge-status` → `/run/gc-edge-status`, `edge-mqtt` → `/gc-mqtt` (Broker-Dateien, mit dem Dienst `mqtt` geteilt) |
 
 **Warum dasselbe Image:** kein zweiter Release-Pfad, multi-arch wie das
 Gateway (amd64, arm64, arm/v7) ohne zusätzlichen Bau, und auf dem Host kostet
@@ -47,8 +47,10 @@ Gateway-Update mit und rollt ihn bei einem Rollback mit zurück.
 * `edge-status` ist ein tmpfs-Volume des Edge-Benutzers (`uid=61001`); der
   Edge-Host schreibt dort seine Zusammenfassung, der Gateway-Container liest
   sie (nur lesend eingehängt) für die Telemetrie.
-* `edge-state` ist ein normales Volume; ein neues Volume übernimmt Besitzer
-  und Rechte von `/state-edge` aus dem Image (61001, `0700`).
+* `edge-state` und `edge-mqtt` sind normale Volumes; ein neues Volume
+  übernimmt Besitzer und Rechte von `/state-edge` bzw. `/gc-mqtt` aus dem
+  Image (61001, `0700`). Der Dienst `mqtt` hängt `edge-mqtt` mit `nocopy` ein
+  und startet nach `edge` (`depends_on`).
 
 Beide tmpfs-Volumes werden mit `nocopy` eingehängt, damit Docker die
 Rechte aus den `driver_opts` nicht durch die des Images ersetzt.
@@ -154,16 +156,112 @@ ohne sie startet kein Edge-Teil.
 
 ## Netzgrenze (fail closed)
 
+Der Gateway-Container (root, `CAP_NET_ADMIN`, Host-Netz) setzt beim Start und
+danach alle 30 s Regeln mit **Owner-Match auf UID 61001** im OUTPUT-Pfad des
+Hosts. Sie gelten nur für Pakete, die Prozesse des Edge-Benutzers erzeugen
+(Edge-Host, Plugin-Prozesse, Mosquitto); das Gateway selbst und alle anderen
+Prozesse des Hosts bleiben unberührt. Erlaubt ist, in dieser Reihenfolge:
+
+1. Loopback TCP 1883 in beide Richtungen (lokaler Broker),
+2. die Adressen von `serverUrl` (aufgelöst vom Gateway-Container), nur TCP auf
+   dessen Port,
+3. **verworfen:** die eigene Tunnel-Adresse und alles über `gatecontrol0`,
+4. Multicast 224.0.0.0/4 (mDNS, genehmigte Gruppen),
+5. die privaten LAN-Subnetze (RFC 1918) der physischen LAN-Schnittstellen,
+6. alles andere **DROP** – auch IPv6 (außer Broker über `::1` und
+   IPv6-Adressen des Servers).
+
+Kein DNS, keine anderen Loopback-Dienste (z. B. Management-API, SSH), kein
+Internet. Ändern sich LAN-Subnetze oder Server-Adressen, werden die Regeln
+beim nächsten Takt angepasst.
+
+**Backends:**
+
+* **nftables** (bevorzugt): eigene Tabelle `inet gc_edge` mit Kette `output`
+  (`meta skuid 61001 jump edge`), in einer Transaktion ersetzt
+  (`table … ; delete table … ; table … { … }`), Regeln anderer Programme
+  (Docker, Firewall) bleiben unberührt.
+* **legacy-iptables** (Synology DSM: der Kernel spricht nur x_tables, `nft`
+  scheitert – wie bei der Scan-Egress-Weiterleitung): eigene Kette `GC_EDGE`,
+  per `iptables-restore --noflush` atomar ersetzt (letzte Regel `DROP`), Sprung
+  aus `OUTPUT` mit `-m owner --uid-owner 61001`; dasselbe mit `ip6tables`.
+  Fehlt `ip6tables`, ist das nur in Ordnung, wenn der Host gar kein IPv6 hat.
+  Das statische `xtables-legacy-multi` im Image bringt den Owner-Match mit;
+  der DSM-Kernel braucht das Modul `xt_owner`.
+
+Automatisch: erst nftables, sonst legacy-iptables; danach bleibt das
+funktionierende Backend zuerst dran. Erzwingen lässt es sich mit
+`GC_FENCE_BACKEND=nft|iptables` in der Umgebung des Gateway-Containers.
+
+Das Ergebnis schreibt der Gateway-Container nach `/run/gc-edge/fence.json`
+(`active`, `backend`, `error`, `uid`, `appliedAt`, LAN-Subnetze, Server).
 Der Edge-Host startet Plugin-Prozesse nur, wenn beides stimmt:
 
-1. `/run/gc-edge/fence.json` (vom Gateway-Container geschrieben) meldet aktive
-   Regeln für UID 61001 und ist jünger als 3 Minuten;
+1. der Marker meldet aktive Regeln für UID 61001 und ist jünger als 3 Minuten;
 2. eine **Probe** zeigt, dass die Regeln für den eigenen Prozess wirklich
-   greifen: ein UDP-Datagramm an `192.0.2.1` (TEST-NET-1, nie LAN) muss mit
-   `EPERM` abgewiesen werden; IPv6 muss ebenfalls zu sein.
+   greifen: ein UDP-Datagramm an `192.0.2.1` (TEST-NET-1, nie ein privates
+   LAN) muss mit `EPERM` abgewiesen werden; IPv6 muss ebenfalls zu sein.
 
-Geprüft wird beim Start und alle 30 s. Fällt die Grenze weg, stoppen alle
-Edge-Teile (`denied`, `lastError: network_fence_inactive: <grund>`).
+Geprüft wird beim Start (bis die Regeln da sind alle 2 s) und dann alle 30 s.
+Fällt die Grenze weg (Gateway-Container gestoppt, Regeln entfernt), stoppen
+alle Edge-Teile (`denied`, `lastError: network_fence_inactive: <grund>`).
+Die Regeln bleiben beim Stoppen des Gateways bestehen – sie schränken nur
+UID 61001 ein. Entfernen von Hand: `nft delete table inet gc_edge` bzw.
+`iptables -D OUTPUT -m owner --uid-owner 61001 -j GC_EDGE; iptables -F GC_EDGE; iptables -X GC_EDGE`.
+
+Tests: `tests/edge_fence_rules.test.js` (Regeltext, Rückfall auf iptables,
+fail closed) und `tests/live/edge-fence-live.js` gegen den echten Kernel in
+einem eigenen Netz-Namespace (CI-Job `edge-fence`, beide Backends; lokal auch
+im gebauten Image).
+
+## MQTT (lokaler Broker)
+
+Dienst `mqtt`: `eclipse-mosquitto` (Tag + Digest gepinnt), Host-Netz, als UID
+61001, `cap_drop: ALL`, `no-new-privileges`, read-only, `mem_limit 128m`. Ohne
+MQTT im Sollzustand läuft dort nur ein kleiner Wächter (Shell-Schleife, ≈ 1 MB).
+
+Schaltet der Server MQTT ein (`state.mqtt.enabled`), schreibt der Edge-Host
+in das gemeinsame Volume `edge-mqtt` (`/gc-mqtt`, Dateien `0600`):
+
+* `mosquitto.conf`: `listener 1883` **nur an den privaten LAN-Adressen** der
+  physischen Schnittstellen plus `127.0.0.1` (für den Edge-Host),
+  `allow_anonymous false`, `password_file`, `acl_file`, Persistenz in
+  `/gc-mqtt/data/`, Pakete ≤ 256 KB;
+* `passwd`: die Konten aus `state.mqtt.accounts` (Hash im
+  `mosquitto_passwd`-Format `$7$…`, vom Server erzeugt) plus das interne
+  Konto `gc-edge` (zufälliges Passwort je Start des Edge-Hosts);
+* `acl`: je Konto die Themen aus dem `state`; das interne Konto darf nur die
+  `pluginTopics` (plus Lesen von `$SYS/broker/clients/connected` und
+  `$SYS/broker/log/N` für die Statusmeldung).
+
+Der Wächter im `mqtt`-Container startet Mosquitto, sobald `enabled` und
+`mosquitto.conf` da sind, startet neu, wenn sich `mosquitto.conf` ändert
+(Listener lassen sich nicht per SIGHUP ändern, z. B. neue LAN-Adresse), und
+schickt **SIGHUP**, wenn sich Konten oder ACL ändern (Datei `reload`).
+`state.mqtt.enabled: false` → Datei `enabled` weg → Mosquitto wird beendet.
+
+**TLS (vorbereitet):** mit `state.mqtt.tls: true` und den Dateien
+`/gc-mqtt/tls/server.crt` + `server.key` im Volume kommt je LAN-Adresse ein
+`listener 8883` dazu; fehlen sie, meldet der Status `tls: "missing_cert"`.
+Zertifikate liefert der Server in v1 noch nicht.
+
+**mDNS:** der Edge-Host kündigt den Broker als `_mqtt._tcp` (Instanz
+„GateControl MQTT <hostname>“, Port 1883, A-Record der LAN-Adressen) auf der
+primären LAN-Schnittstelle an (multicast-dns, verträgt sich mit Avahi auf dem
+Pi). Avahi des Hosts wird nicht genutzt: aus dem Container gibt es keinen
+D-Bus-Zugriff.
+
+**Edge-Teile:** `gc.mqtt.subscribe(filter, fn)` / `gc.mqtt.publish(topic,
+payload, {retain, qos})` laufen über das interne Konto. Erlaubt ist nur, was
+die Fähigkeit `mqtt.topics` des Plugins (Manifest ∩ Genehmigung) **und**
+`state.mqtt.pluginTopics[<plugin>]` abdecken; ein Abo darf nicht breiter sein
+als ein genehmigter Filter. QoS 0/1, höchstens 64 Abos je Plugin, Nutzlast ≤
+256 KB. Endet ein Edge-Prozess, werden seine Abos aufgeräumt.
+
+**Status:** `mqtt: { running, clients, tls, accounts: [{ user, connected,
+lastSeen }] }` – `running` = internes Konto verbunden, `clients` ohne das
+interne Konto (aus `$SYS`), `connected`/`lastSeen` aus den
+Verbindungsmeldungen des Brokers (`$SYS/broker/log/N`).
 
 ## Edge-API für Plugin-Autoren
 
@@ -182,12 +280,12 @@ Der Edge-Teil ist ein CommonJS-Modul (`edge.entry`), das ein Objekt mit
 | `gc.lan.mdns.browse(service, onFound)` | `mdns.services` | `onFound({host, ip, port, service, txt})` → `{stop()}` |
 | `gc.lan.tcp.connect(host, port)` | `tcp.lan` | Duplex-Stream |
 | `gc.lan.http.request({method, url, headers, body, timeoutMs, pinSha256, insecure})` | `http.lan` | → `{status, headers, body, text(), json()}`; Antwort ≤ 5 MB, ≤ 30 s, keine Weiterleitungen; HTTPS siehe unten |
-| `gc.mqtt.subscribe(topic, fn)` / `gc.mqtt.publish(topic, payload, {retain, qos})` | `mqtt.topics` | lokaler Broker (Dienst `mqtt`); ohne Broker `not_enabled` |
+| `gc.mqtt.subscribe(topic, fn)` / `gc.mqtt.publish(topic, payload, {retain, qos})` | `mqtt.topics` | lokaler Broker (siehe „MQTT“); ohne MQTT `not_enabled` |
 | `gc.serial.open(name, {baudRate})` | `serial` | **noch nicht verfügbar** (`not_available`): serielle Geräte werden in v1 nicht in den Container gereicht |
 
 Ziele von `gc.lan.*` sind nur **IPv4-Adressen** (keine Hostnamen – es gibt
-keine DNS-Anfragen aus Plugin-Daten) in den LAN-Subnetzen des Gateways
-(dieselbe Schnittstellen-Logik wie LAN-Scan und Telemetrie: keine
+keine DNS-Anfragen aus Plugin-Daten) in den privaten LAN-Subnetzen (RFC 1918) des
+Gateways (dieselbe Schnittstellen-Logik wie LAN-Scan und Telemetrie: keine
 WireGuard-, Docker- und VPN-Schnittstellen), nie die Tunnel-Adresse, nie der
 Server, nie die Netzadresse; die Router-Adresse ist erlaubt. Multicast nur für
 genehmigte Gruppen. IPv6 ist in v1 nicht vorgesehen.
@@ -235,7 +333,7 @@ mDNS-Suchen 8 je Plugin · Speicher `memoryMb` (16–256, Standard 48).
 Der Heartbeat des Gateways trägt `telemetry.edge`:
 
 ```json
-{ "deployed": true, "error": null,
+{ "deployed": true, "error": null, "fence": { "active": true, "backend": "nft", "error": null },
   "host": { "at": "…", "stale": false, "edge_host": "1.0.0", "connected": true, "edge_enabled": true,
             "host_rss_mb": 48.2,
             "plugins": [{ "id": "shelly", "version": "1.0.0", "state": "running", "rss_mb": 31.5, "restarts": 0 }],
@@ -251,4 +349,15 @@ als nicht vertrauenswürdig und wird begrenzt und geklemmt gelesen.
 docker compose logs -f edge                   # Edge-Host (JSON, LOG_LEVEL=debug für Plugin-Logs)
 docker compose exec edge cat /run/gc-edge-status/status.json
 docker compose exec edge cat /run/gc-edge/fence.json
+docker compose logs -f mqtt                   # Wächter + Mosquitto
+nft list table inet gc_edge                   # auf dem Host: Regeln (bzw. iptables -S GC_EDGE)
 ```
+
+## Speicherbedarf (gemessen)
+
+Docker-Test auf x86_64 (Node 20, Alpine), ein laufender Edge-Teil (UDP-Echo +
+MQTT-Abo): Edge-Host VmRSS ≈ 55 MB, Plugin-Prozess VmRSS ≈ 46 MB (davon ein
+großer Teil geteilte Seiten des Node-Binärs), Cgroup-Verbrauch des ganzen
+Edge-Containers ≈ 20 MiB; Mosquitto ≈ 8 MB VmRSS / ≈ 3 MiB Cgroup; Wächter
+ohne Broker ≈ 1 MB. Auf einem Pi (arm64) sind ähnliche Werte zu erwarten;
+grob: Edge untätig ≈ 50 MB, je Edge-Teil ≈ 30–50 MB, Broker ≈ 5–10 MB.

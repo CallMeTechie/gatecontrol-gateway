@@ -126,12 +126,15 @@ test('Gateway-Seite: Zugangsdatei nur mit Edge-Volume, Adressen aufgelöst, Stat
     assert.strictEqual(none.telemetry(), null);
     const run = path.join(dir, 'run');
     fs.mkdirSync(run);
-    const link = new EdgeLink({ config, runDir: run, statusDir: dir, lookup: async () => [{ address: '203.0.113.7', family: 4 }] });
+    const applied = [];
+    const fence = { state: { active: true, backend: 'nft', error: null }, apply: async (o) => { applied.push(o); return fence.state; } };
+    const link = new EdgeLink({ config, runDir: run, statusDir: dir, lookup: async () => [{ address: '203.0.113.7', family: 4 }], fence, getLanCidrs: () => ['192.168.1.0/24'] });
     await link.sync();
     const file = path.join(run, 'credentials');
     const c = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.deepStrictEqual(c, { v: 1, serverUrl: config.serverUrl, apiToken: config.apiToken, serverAddrs: ['203.0.113.7'], tunnelIp: '10.8.0.5' });
     assert.strictEqual(fs.statSync(file).mode & 0o777, 0o440);
+    assert.deepStrictEqual(applied[0], { lanCidrs: ['192.168.1.0/24'], serverAddrs: ['203.0.113.7'], serverPort: 443, tunnelIp: '10.8.0.5' });
     // DNS-Ausfall: letzte Adressen bleiben
     link.lookup = async () => { throw Object.assign(new Error('x'), { code: 'EAI_AGAIN' }); };
     await link.sync();
@@ -139,6 +142,7 @@ test('Gateway-Seite: Zugangsdatei nur mit Edge-Volume, Adressen aufgelöst, Stat
     fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ at: new Date().toISOString(), connected: true, edgeEnabled: true, hostRssMb: 41.234,
       plugins: [{ id: 'x'.repeat(200), version: '1.0.0', state: 'running', rssMb: 30, restarts: 1, extra: 'weg' }], mqtt: { running: true, clients: 3 } }));
     const t = link.telemetry();
+    assert.deepStrictEqual(t.fence, { active: true, backend: 'nft', error: null });
     assert.strictEqual(t.host.connected, true);
     assert.strictEqual(t.host.stale, false);
     assert.strictEqual(t.host.host_rss_mb, 41.2);

@@ -1,7 +1,7 @@
 'use strict';
 
 // Zieladressen der Edge-Teile (Vertrag Abschnitt 5): nur IPv4-Adressen in den
-// LAN-Subnetzen des Gateways (dieselbe Schnittstellen-Logik wie LAN-Scan und
+// privaten (RFC 1918) LAN-Subnetzen des Gateways (dieselbe Schnittstellen-Logik wie LAN-Scan und
 // Telemetrie: src/discovery/lanInterfaces.js), nie das Tunnel-Netz, nie die
 // eigene Tunnel-Adresse, nie der Server. Hostnamen werden nicht aufgelöst
 // (keine DNS-Anfragen aus Plugin-Daten). Multicast nur mit Fähigkeit.
@@ -16,8 +16,22 @@ class DeniedError extends Error {
 
 const CACHE_MS = 10000;
 
+/** Netzadresse in RFC 1918 (10/8, 172.16/12, 192.168/16)? */
+function isPrivateNet(cidr) {
+  const [a, b] = cidr.split('/')[0].split('.').map(Number);
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+/**
+ * LAN-Subnetze für Edge-Teile und Netzgrenze: die physischen LAN-Schnittstellen
+ * (lanSubnets) – nur private Netze nach RFC 1918, nie öffentliche Adressen.
+ */
+function privateLanCidrs() {
+  return lanSubnets(defaultGatewayIp()).map((s) => s.cidr).filter(isPrivateNet);
+}
+
 function makeLanGuard({ getSubnets, tunnelIp = null, serverAddrs = () => [], now = Date.now } = {}) {
-  const subnetsOf = getSubnets || (() => lanSubnets(defaultGatewayIp()).map((s) => s.cidr));
+  const subnetsOf = getSubnets || privateLanCidrs;
   let cache = null;
   let cachedAt = 0;
   function subnets() {
@@ -68,4 +82,4 @@ function checkPort(port) {
   return port;
 }
 
-module.exports = { makeLanGuard, checkPort, DeniedError };
+module.exports = { makeLanGuard, checkPort, DeniedError, privateLanCidrs, isPrivateNet };

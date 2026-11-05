@@ -10,6 +10,9 @@ const logger = require('../logger');
 const { paths } = require('./constants');
 const { EdgeHost } = require('./host');
 const { MdnsService } = require('./mdnsService');
+const { MqttManager } = require('./mqtt/manager');
+const { primaryLanIp } = require('../discovery/lanInterfaces');
+const { defaultGatewayIp } = require('../health/telemetry');
 
 process.on('unhandledRejection', (reason) => {
   logger.error({ err: reason && reason.message ? reason.message : String(reason) }, 'edge: unhandled rejection — kept alive');
@@ -18,8 +21,10 @@ process.on('unhandledRejection', (reason) => {
 async function main() {
   const p = paths();
   for (const d of [p.stateDir, p.packagesDir, p.dataDir]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
-  const mdns = new MdnsService({ logger });
-  const host = new EdgeHost({ paths: p, logger, mdns });
+  // mDNS auf der primären LAN-Schnittstelle (wie der LAN-Scan), nicht auf Docker-/VPN-Netzen
+  const mdns = new MdnsService({ logger, getInterface: () => primaryLanIp(defaultGatewayIp()) });
+  const mqtt = new MqttManager({ dir: p.mqttDir, logger, mdns });
+  const host = new EdgeHost({ paths: p, logger, mdns, mqtt });
   await host.start();
   // Die Zeitgeber des Hosts sind unref() (Tests); der Container-Prozess soll
   // aber auch ohne Verbindung und ohne Zugangsdatei weiterlaufen.
