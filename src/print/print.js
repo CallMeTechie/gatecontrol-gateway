@@ -18,7 +18,7 @@ const discovery = require('./discovery');
 const ippLib = require('./ipp');
 const esclLib = require('./escl');
 const { makePrintClient, ID_RE } = require('./serverClient');
-const { isRfc1918 } = require('./config');
+const { isRfc1918, cleanText } = require('./config');
 const { inspectLeafCertificate } = require('../proxy/tlsPin');
 
 const DEVICES_PATH = '/api/v1/gateway/print/devices';
@@ -36,8 +36,12 @@ const JOB_WATCH_MS = 10 * 60_000;     // so lange auf „fertig“ des Druckers 
 const JOB_POLL_MS = 5_000;
 const FORGET_MS = 30 * 86400_000;     // Geräte, 30 Tage nicht gesehen, vergessen
 const JOURNAL_MS = 2 * 86400_000;
-const MANUAL_IPP = [631];
+// `manual`-Adressen: IPP ohne TLS auf 631 (Pfade der gängigen Hersteller), dann IPPS auf 443; eSCL auf 80, dann 443
+const MANUAL_IPP_PATHS = ['ipp/print', 'ipp', ''];
+const MANUAL_IPPS = { scheme: 'ipps', port: 443, path: 'ipp/print' };
 const MANUAL_ESCL = [{ scheme: 'http', port: 80 }, { scheme: 'https', port: 443 }];
+const PROBE_MS = 5_000;
+const NET_CODES = new Set(['network', 'timeout']);
 
 const TLS_SCHEMES = new Set(['ipps', 'https']);
 const PIN_RE = /^[0-9a-f]{64}$/;
@@ -72,6 +76,7 @@ class PrintService {
     this.polling = null;
     this.cycles = 0;
     this.lastSearchAt = null;
+    this.lastSearch = null;         // Diagnose der letzten Suche (an den Server, docs/print.md)
     this.lastReportAt = 0;
     this.lastReported = null;
     this.serverMissing = false;
@@ -184,17 +189,30 @@ class PrintService {
     this.status.start();
     try {
       const packets = [];
+      const diag = { errors: [], responders: new Set() };
+      let interfaces = 0;
       for (const s of this.getSubnets()) {
         if (!s.localIp) continue;
-        packets.push(...await this.browse({ ifaceIp: s.localIp, timeoutMs: this.browseMs }));
+        interfaces += 1;
+        packets.push(...await this.browse({ ifaceIp: s.localIp, timeoutMs: this.browseMs, diag }));
       }
-      const found = discovery.mergeDevices(discovery.mapServices(packets), (ip) => this.isAllowed(ip));
+      const { devices: found, stats } = discovery.analyze(packets, (ip) => this.isAllowed(ip));
       const now = this.now();
       for (const f of found) this._merge(f, 'mdns', now);
-      for (const ip of this.cfg.manual) {
-        if (found.some((f) => f.ip === ip)) continue;
-        const m = await this._probeManual(ip);
-        if (m) this._merge(m, 'manual', now);
+      // die `manual`-Adressen direkt fragen (gleichzeitig; eine, die mDNS schon fand, nicht noch einmal)
+      const manual = await Promise.all(this.cfg.manual.map(async (ip) => {
+        if (found.some((f) => f.ip === ip)) return { ip, found: true, via: 'mdns' };
+        const r = await this._probeManual(ip);
+        if (r.device) { this._merge(r.device, 'manual', now); return { ip, found: true, via: 'manual' }; }
+        return { ip, found: false, error: r.error };
+      }));
+      if (!interfaces) diag.errors.unshift('no_lan');
+      this.lastSearch = {
+        at: now, interfaces, responses: stats.responses, responders: diag.responders.size, services: stats.services,
+        devices: found.length, dropped: stats.dropped, hosts: stats.hosts, manual, errors: diag.errors.slice(0, 8),
+      };
+      if (found.length || Object.keys(stats.dropped).length || manual.length) {
+        logger.info({ interfaces, responses: stats.responses, services: stats.services, devices: found.length, dropped: stats.dropped, manual: manual.filter((m) => m.found).length }, 'print: search done');
       }
       // Geräte an Adressen, die nicht mehr erlaubt sind (Subnetz weg, manual entfernt), und alte Einträge gehen
       for (const [id, d] of this.devices) {
@@ -258,27 +276,69 @@ class PrintService {
     return true;
   }
 
+  /** Den Fingerabdruck eines TLS-Endpunkts lernen (trust on first use) → pin oder null. */
+  async _pinOf(host, port) {
+    try {
+      const c = await this.inspect({ host, port, timeoutMs: PROBE_MS });
+      return c && typeof c.sha256 === 'string' && PIN_RE.test(c.sha256) ? c.sha256 : null;
+    } catch (_e) { return null; }
+  }
+
+  /**
+   * Eine `manual`-Adresse direkt fragen: IPP `Get-Printer-Attributes` auf 631
+   * (/ipp/print, /ipp, /), sonst IPPS auf 443 (Zertifikat beim ersten Kontakt
+   * gelernt); eSCL `ScannerCapabilities` auf 80, sonst 443.
+   * → { device } oder { error: 'unreachable' | 'no_service' }
+   */
   async _probeManual(ip) {
     let ipp = null;
+    let attrs = null;
     let escl = null;
-    let info = null;
-    for (const port of MANUAL_IPP) {
-      for (const p of ['ipp/print', '']) {
-        const ep = { scheme: 'ipp', host: ip, port, path: p };
-        try { info = this.ipp.printerInfo(await this.ipp.getPrinterAttributes(ep, { timeoutMs: 5_000 })); ipp = ep; break; } catch (_e) { /* nächster */ }
+    let caps = null;
+    let answered = false; // irgendetwas hat geantwortet (HTTP-Status, Zertifikat) – dann ist es nur kein Drucker/Scanner
+    const tryIpp = async (ep) => {
+      try { attrs = await this.ipp.getPrinterAttributes(ep, { timeoutMs: PROBE_MS }); ipp = ep; return 'ok'; } catch (e) {
+        if (!NET_CODES.has(e && e.code)) answered = true;
+        return NET_CODES.has(e && e.code) ? 'down' : 'other';
       }
-      if (ipp) break;
+    };
+    for (const p of MANUAL_IPP_PATHS) {
+      const r = await tryIpp({ scheme: 'ipp', host: ip, port: 631, path: p });
+      if (r !== 'other') break; // gefunden, oder 631 gar nicht erreichbar → kein weiterer Pfad
+    }
+    const pins = new Map();
+    const pinFor = async (port) => {
+      if (!pins.has(port)) pins.set(port, await this._pinOf(ip, port));
+      if (pins.get(port)) answered = true;
+      return pins.get(port);
+    };
+    if (!ipp) {
+      const pin = await pinFor(MANUAL_IPPS.port);
+      if (pin) await tryIpp({ scheme: MANUAL_IPPS.scheme, host: ip, port: MANUAL_IPPS.port, path: MANUAL_IPPS.path, pin });
     }
     for (const c of MANUAL_ESCL) {
       const ep = { scheme: c.scheme, host: ip, port: c.port, path: 'eSCL' };
       if (TLS_SCHEMES.has(ep.scheme)) {
-        try { const cert = await this.inspect({ host: ip, port: c.port, timeoutMs: 5_000 }); if (cert && PIN_RE.test(String(cert.sha256))) ep.pin = cert.sha256; else continue; } catch (_e) { continue; }
+        const pin = await pinFor(c.port);
+        if (!pin) continue;
+        ep.pin = pin;
       }
-      try { await this.escl.capabilities(ep, { timeoutMs: 5_000 }); escl = ep; break; } catch (_e) { /* nächster */ }
+      try { caps = await this.escl.capabilities(ep, { timeoutMs: PROBE_MS }); escl = ep; break; } catch (e) {
+        if (!NET_CODES.has(e && e.code)) answered = true;
+      }
     }
-    if (!ipp && !escl) return null;
+    if (!ipp && !escl) return { error: answered ? 'no_service' : 'unreachable' };
+    const info = attrs ? this.ipp.printerInfo(attrs) : null;
+    const first = (k) => (attrs && Array.isArray(attrs[k]) && typeof attrs[k][0] === 'string' ? cleanText(attrs[k][0], 120) : '');
+    const model = (info && info.model) || (caps && caps.model) || '';
     const uuid = info && info.uuid ? discovery.normUuid(info.uuid) : null;
-    return { id: discovery.deviceId(uuid, ip), uuid, ip, name: (info && info.name) || ip, model: (info && info.model) || '', location: (info && info.location) || '', ipp, escl, hints: {} };
+    const device = {
+      id: discovery.deviceId(uuid, ip), uuid, ip,
+      // „HP OfficeJet Pro 8720“ (printer-info) vor dem Modell vor „HP_OfficeJet_Pro_8720“ (printer-name)
+      name: first('printer-info') || model || first('printer-name') || ip,
+      model, location: (info && info.location) || '', ipp, escl, hints: {},
+    };
+    return { device };
   }
 
   async refreshAll() {
@@ -344,7 +404,7 @@ class PrintService {
     const devices = this.devicesView();
     const sig = JSON.stringify(devices.map((x) => ({ ...x, seenAt: null })));
     if (!force && sig === this.lastReported && this.now() - this.lastReportAt < REPORT_MS) return;
-    const r = await this.reporter.post(DEVICES_PATH, { scannedAt: this.lastSearchAt, devices });
+    const r = await this.reporter.post(DEVICES_PATH, { scannedAt: this.lastSearchAt, devices, ...(this.lastSearch ? { search: this.lastSearch } : {}) });
     if (r.ok) { this.lastReported = sig; this.lastReportAt = this.now(); this.serverMissing = false; } else if (r.status === 404) this.serverMissing = true;
   }
 
@@ -591,6 +651,7 @@ class PrintService {
       scanners: list.filter((d) => d.escl).length,
       queue: this.jobs.size,
       lastSearchAt: this.lastSearchAt,
+      search: this.lastSearch,
     });
   }
 }

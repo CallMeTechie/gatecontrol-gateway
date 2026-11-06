@@ -21,3 +21,11 @@ test('mapMdnsResponse skips records without a resolvable A address', () => {
   const recs = mapMdnsResponse({ answers: [{ type: 'PTR', name: '_x._tcp.local', data: 'y._x._tcp.local' }], additionals: [] });
   assert.deepEqual(recs, []);
 });
+
+test('mapMdnsResponse matches the A record regardless of case (SRV target lower, A upper case)', () => {
+  const recs = mapMdnsResponse({
+    answers: [{ type: 'SRV', name: 'p._ipp._tcp.local', data: { port: 631, target: 'hp5a3b2c.local' } }],
+    additionals: [{ type: 'A', name: 'HP5A3B2C.local', data: '192.168.1.57' }],
+  });
+  assert.deepEqual(recs, [{ ip: '192.168.1.57', host: 'hp5a3b2c.local', port: 631, mdnsType: '_ipp._tcp' }]);
+});
