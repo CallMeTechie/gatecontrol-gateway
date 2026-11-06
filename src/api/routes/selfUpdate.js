@@ -8,6 +8,11 @@ const logger = require('../../logger');
 
 const COOLDOWN_MS = 60_000;
 
+// When the server last asked for an update (the flag was written): a shutdown
+// soon after is the update recreating the container (shutdownNotice.js).
+let _lastRequestAt = 0;
+function lastRequestAt() { return _lastRequestAt; }
+
 function createSelfUpdateRouter({ stateDir }) {
   const router = express.Router();
   router.post('/self-update', async (req, res) => {
@@ -36,6 +41,7 @@ function createSelfUpdateRouter({ stateDir }) {
         requested_at: new Date().toISOString(),
         triggered_via: 'server-push',
       }) + '\n', { mode: 0o600 });
+      _lastRequestAt = Date.now();
       logger.info({ request_id }, 'Self-update flag written');
       res.status(200).json({ ok: true, queued: true });
     } catch (err) {
@@ -46,4 +52,4 @@ function createSelfUpdateRouter({ stateDir }) {
   return router;
 }
 
-module.exports = { createSelfUpdateRouter };
+module.exports = { createSelfUpdateRouter, lastRequestAt };
