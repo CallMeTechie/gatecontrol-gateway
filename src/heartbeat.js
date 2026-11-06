@@ -34,6 +34,33 @@ async function sendHeartbeat({ serverUrl, apiToken, health }) {
   }
 }
 
+// Cap of the "going down" notice: a shutdown must not wait for a server that
+// is far away or gone (docker stop kills after 10 s).
+const GOING_DOWN_TIMEOUT_MS = 2_000;
+
+/**
+ * Tell the server the gateway stops right now (graceful shutdown: container
+ * recreated for an update, docker restart, host reboot). The server shows
+ * "Update läuft" / "startet neu" at once instead of "online" until the
+ * heartbeat goes stale; the next heartbeat ends it. Best-effort: a server
+ * before this endpoint answers 404, an unreachable one times out — both are
+ * fine. Resolves true when the server took it.
+ */
+async function sendGoingDown({ serverUrl, apiToken, reason, timeoutMs = GOING_DOWN_TIMEOUT_MS }) {
+  try {
+    await axios.post(`${serverUrl}/api/v1/gateway/going-down`, { reason: reason === 'update' ? 'update' : 'restart' }, {
+      headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+      timeout: timeoutMs,
+      httpAgent,
+      httpsAgent,
+    });
+    return true;
+  } catch (err) {
+    logger.info({ err: err.message, status: err.response?.status }, 'Going-down notice not delivered');
+    return false;
+  }
+}
+
 async function _collectHealth(getHealth, timeoutMs) {
   let timer;
   const timeout = new Promise((resolve) => {
@@ -64,4 +91,4 @@ function startHeartbeatTicker({ serverUrl, apiToken, getHealth, intervalMs, heal
   return { stop: () => clearInterval(timer) };
 }
 
-module.exports = { sendHeartbeat, startHeartbeatTicker, _collectHealth, DEFAULT_HEALTH_TIMEOUT_MS };
+module.exports = { sendHeartbeat, sendGoingDown, startHeartbeatTicker, _collectHealth, DEFAULT_HEALTH_TIMEOUT_MS, GOING_DOWN_TIMEOUT_MS };
