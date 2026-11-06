@@ -157,4 +157,107 @@ function mdnsPacket({ ip = '192.168.1.57', port = 631, esclPort = 80, uuid = 'F0
   return p;
 }
 
-module.exports = { startFakePrinter, mdnsPacket, CAPS };
+// ─── HP OfficeJet Pro 8720, wie er im LAN wirklich antwortet ────────────
+// Auf die PTR-Frage kommt nur der PTR; SRV und TXT erst auf die Nachfrage,
+// die A-Adresse in einem eigenen Paket – mit Großbuchstaben im Rechnernamen
+// (SRV nennt „hp5a3b2c.local“, A „HP5A3B2C.local“) und zusätzlich der
+// Wi-Fi-Direct-Adresse des Druckers, dazu ein AAAA.
+
+const HP = Object.freeze({
+  name: 'HP OfficeJet Pro 8720 [5A3B2C]',
+  host: 'HP5A3B2C.local',
+  uuid: '1c852a4d-b800-1f08-abcd-ec8eb55a3b2c',
+  model: 'HP OfficeJet Pro 8720',
+});
+
+const txtList = (o) => Object.entries(o).map(([k, v]) => Buffer.from(`${k}=${v}`));
+
+/** Die Antwort auf eine Frage (PTR, SRV, TXT, A) wie der HP 8720 → Paket oder null. */
+function hpAnswer(q, { ip = '192.168.1.57', direct = '192.168.223.1' } = {}) {
+  const inst = (t) => `${HP.name}._${t}._tcp.local`;
+  const lname = String(q.name).toLowerCase();
+  const types = ['ipp', 'ipps', 'uscan'];
+  if (q.type === 'PTR') {
+    const t = types.find((x) => lname === `_${x}._tcp.local`);
+    return t ? { answers: [{ type: 'PTR', name: `_${t}._tcp.local`, ttl: 4500, data: inst(t) }] } : null;
+  }
+  const t = types.find((x) => lname === inst(x).toLowerCase());
+  if (t && q.type === 'SRV') return { answers: [{ type: 'SRV', name: inst(t), ttl: 120, data: { port: t === 'ipp' ? 631 : t === 'ipps' ? 443 : 80, target: HP.host.toLowerCase(), priority: 0, weight: 0 } }] };
+  if (t && q.type === 'TXT') {
+    const base = { txtvers: 1, ty: HP.model, product: '(HP OfficeJet Pro 8720)', UUID: HP.uuid, note: '' };
+    const data = t === 'uscan' ? { ...base, rs: 'eSCL', is: 'platen,adf' } : { ...base, rp: 'ipp/print', Color: 'T', Duplex: 'T', pdl: 'application/pdf,image/jpeg,image/urf,image/pwg-raster' };
+    return { answers: [{ type: 'TXT', name: inst(t).replace('._tcp.local', '._TCP.local'), ttl: 4500, data: txtList(data) }] };
+  }
+  if (q.type === 'A' && lname === HP.host.toLowerCase()) {
+    return { answers: [{ type: 'A', name: HP.host, ttl: 120, data: direct }, { type: 'A', name: HP.host, ttl: 120, data: ip }], additionals: [{ type: 'AAAA', name: HP.host, ttl: 120, data: 'fe80::ee8e:b5ff:fe5a:3b2c' }] };
+  }
+  return null;
+}
+
+/** Die Antworten eines HP 8720 auf eine Suche mit Nachfrage – in getrennten Paketen. */
+function hpPackets(opts = {}) {
+  const out = [];
+  for (const t of ['ipp', 'ipps', 'uscan']) out.push(hpAnswer({ name: `_${t}._tcp.local`, type: 'PTR' }, opts));
+  for (const t of ['ipp', 'ipps', 'uscan']) {
+    out.push(hpAnswer({ name: `${HP.name}._${t}._tcp.local`, type: 'SRV' }, opts));
+    out.push(hpAnswer({ name: `${HP.name}._${t}._tcp.local`, type: 'TXT' }, opts));
+  }
+  out.push(hpAnswer({ name: HP.host, type: 'A' }, opts));
+  return out;
+}
+
+/**
+ * Ein multicast-dns-Ersatz für browse({ factory }): beantwortet Fragen wie
+ * der HP 8720 (hpAnswer), merkt sich jede Frage und jede Socket-Einstellung.
+ * fail: { mdns?: 'EADDRINUSE' } – dieser Socket meldet den Fehler gleich.
+ */
+function fakeMdnsFactory({ answer = hpAnswer, fail = {}, opts = {} } = {}) {
+  const EventEmitter = require('node:events');
+  const log = { sockets: [], queries: [] };
+  const factory = (o) => {
+    const m = new EventEmitter();
+    const way = o.port === 0 ? 'legacy' : 'mdns';
+    log.sockets.push({ way, ...o });
+    m.destroy = () => { m.destroyed = true; };
+    m.query = (q, rinfo) => {
+      if (m.destroyed) throw new Error('destroyed');
+      for (const question of q.questions) log.queries.push({ way, ...question, to: rinfo });
+      for (const question of q.questions) {
+        const p = answer(question, opts);
+        if (p) setImmediate(() => { if (!m.destroyed) m.emit('response', JSON.parse(JSON.stringify(p), (k, v) => (v && v.type === 'Buffer' ? Buffer.from(v.data) : v)), { address: opts.ip || '192.168.1.57', port: 5353 }); });
+      }
+    };
+    if (fail[way]) setImmediate(() => m.emit('error', Object.assign(new Error(fail[way]), { code: fail[way] })));
+    return m;
+  };
+  return { factory, log };
+}
+
+/**
+ * Ein echter mDNS-Responder (UDP, multicast-dns) auf `port`, der wie der HP
+ * 8720 antwortet: auf Fragen von Port `port` per Multicast an die Gruppe
+ * (wie im LAN üblich), auf Fragen von einem anderen Port direkt an diesen
+ * („Legacy Unicast“, RFC 6762 §6.7). multicast: false / legacy: false schaltet
+ * einen der Wege ab.
+ */
+function startFakeMdnsResponder({ ifaceIp, port, multicast = true, legacy = true, ip = '192.168.1.57' }) {
+  const mdns = require('multicast-dns')({ interface: ifaceIp, bind: '0.0.0.0', port, multicast: true, reuseAddr: true });
+  const seen = [];
+  mdns.on('query', (q, rinfo) => {
+    const fromPort = rinfo.port === port;
+    if ((fromPort && !multicast) || (!fromPort && !legacy)) return;
+    for (const question of q.questions || []) {
+      seen.push({ ...question, legacy: !fromPort });
+      const p = hpAnswer(question, { ip });
+      if (!p) continue;
+      if (fromPort) mdns.respond(p, { port, address: '224.0.0.251' });
+      else mdns.respond({ ...p, id: q.id, questions: [question] }, { port: rinfo.port, address: rinfo.address });
+    }
+  });
+  return new Promise((resolve, reject) => {
+    mdns.once('ready', () => resolve({ seen, close: () => new Promise((r) => mdns.destroy(r)) }));
+    mdns.once('error', reject);
+  });
+}
+
+module.exports = { startFakePrinter, mdnsPacket, CAPS, HP, hpAnswer, hpPackets, fakeMdnsFactory, startFakeMdnsResponder };

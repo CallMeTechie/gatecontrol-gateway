@@ -12,9 +12,41 @@ macht das Plugin „Drucken & Scannen“ (`gatecontrol-print`) am Server.
 |---|---|---|
 | Geräte finden | mDNS `_ipp._tcp`, `_ipps._tcp` (Drucker), `_uscan._tcp`, `_uscans._tcp` (Scanner) auf jeder eigenen LAN-Adresse, alle 10 Min. und auf „Neu suchen“; `manual`-Adressen direkt (IPP 631 `/ipp/print`, eSCL 80/443 `/eSCL`) | `print-devices.json` |
 | Zustand | IPP `Get-Printer-Attributes` (bereit/Standby, Gründe, Tinte `marker-*`, Formate, Farbe, beidseitig), eSCL `ScannerCapabilities`/`ScannerStatus` alle 5 Min. | – |
-| Bericht | `POST /api/v1/gateway/print/devices` nach jeder Suche, bei Änderung, sonst alle 15 Min.; `telemetry.features.print` | – |
+| Bericht | `POST /api/v1/gateway/print/devices` (`{ scannedAt, devices, search }`) nach jeder Suche, bei Änderung, sonst alle 15 Min.; `telemetry.features.print` (mit `search`) | – |
 | Drucken | Warteschlange `GET /api/v1/gateway/print/jobs` (jede Minute mit ETag, sofort nach Mgmt `POST /api/print/jobs`), Datei `GET …/jobs/<id>/file` (≤ 50 MB, sha256 geprüft), IPP `Print-Job` (`document-format`, `copies`, `sides`, `print-color-mode`), `Get-Job-Attributes` bis fertig (≤ 10 Min.), Zustände an `POST …/jobs/<id>` | `print-tmp/` (Dateien bis zum Senden), `print-journal.json` |
 | Scannen | Mgmt `POST /api/print/scan` → eSCL `POST ScanJobs`, `GET …/NextDocument` bis 404, je Seite `PUT /api/v1/gateway/print/scans/<id>/pages/<n>` (≤ 50 MB, ≤ 100 Seiten), Zustand an `POST …/scans/<id>` | `print-tmp/` (je Seite bis zum Hochladen) |
+
+## Suche im LAN
+
+* **Sockets:** je LAN-Adresse ein Socket auf Port 5353, gebunden an
+  `0.0.0.0` (SO_REUSEADDR – geteilt mit avahi/Bonjour des Hosts, z. B. auf
+  Synology DSM) und der Gruppe nur auf dieser Schnittstelle beigetreten;
+  dazu eine „Legacy Unicast“-Frage von einem freien Port (RFC 6762 §6.7),
+  die Geräte direkt beantworten. Nie an die LAN-Adresse selbst binden:
+  unter Linux kommen an so einem Socket keine Multicast-Antworten an.
+* **Nachfragen:** viele Drucker (HP OfficeJet, Brother, Canon) antworten
+  auf die PTR-Frage nur mit dem PTR oder schicken SRV, TXT und A in
+  getrennten Paketen, mit anderer Schreibweise. Die Einträge werden über
+  alle Antworten ohne Rücksicht auf Groß-/Kleinschreibung gesammelt; was
+  fehlt (SRV/TXT des Dienstes, A des Rechners), wird zweimal gezielt
+  nachgefragt. Nur AAAA genügt nicht (IPv4 im LAN). Hat ein Gerät mehrere
+  Adressen (LAN und Wi-Fi Direct), gilt die erste erlaubte.
+* **Diagnose (`search`):** `{ at, interfaces, responses, responders,
+  services, devices, dropped: { <Grund>: n }, hosts: [{ ip, reason, name }]
+  (≤ 8), manual: [{ ip, found, via?: 'mdns'|'manual', error?:
+  'unreachable'|'no_service' }], errors }`. Gründe: `incomplete` (kein SRV
+  oder keine Adresse), `no_ipv4`, `other_subnet` (privat, aber nicht im
+  eigenen LAN – per `manual` erlauben), `not_private`, `bad_path`,
+  `too_many`; `errors`: `no_lan`, `mdns_port_busy`, `mdns_failed`,
+  `legacy_failed`. Die Gateway-Seite am Server zeigt das unter „Drucken &
+  Scannen“.
+* **`manual`:** jede Adresse wird gleichzeitig gefragt: IPP
+  `Get-Printer-Attributes` auf 631 (`/ipp/print`, `/ipp`, `/` – weitere
+  Pfade nur, wenn 631 überhaupt antwortet), sonst IPPS auf 443 (Zertifikat
+  beim ersten Kontakt gelernt); eSCL `ScannerCapabilities` auf 80, sonst
+  443 (gleicher Pin). Name aus `printer-info`, sonst
+  `printer-make-and-model`. Findet mDNS das Gerät unter dieser Adresse,
+  gilt der mDNS-Fund – auch in einem anderen privaten Subnetz.
 
 ## Regeln
 

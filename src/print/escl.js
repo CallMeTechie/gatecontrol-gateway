@@ -10,6 +10,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
 const { tlsFor, netError } = require('./ipp');
+const { cleanText } = require('./config');
 
 const MAX_XML = 256 * 1024;
 const MAX_PAGE = 50 * 1024 * 1024;
@@ -95,6 +96,7 @@ function parseCapabilities(xml) {
   const dim = (x, k) => nums(tags(x, k))[0] || null;
   const src = platenXml || adfXml;
   return {
+    model: cleanText(tags(s, 'MakeAndModel')[0] || '', 120),
     platen: !!platenXml,
     feeder: !!adfXml,
     duplex: has(adfXml, 'AdfDuplexInputCaps'),
