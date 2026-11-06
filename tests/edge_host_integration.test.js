@@ -1,8 +1,10 @@
 'use strict';
 
-// Integrationstest: echter Edge-Host gegen einen Fake-Server (WebSocket),
-// echter Plugin-Prozess (Permission-Model + Sperren) mit einem Beispiel-
-// Edge-Teil (UDP-Echo). Das "LAN" ist hier 127.0.0.0/8.
+// Integrationstest: echter Edge-Host gegen einen Fake-Server, dazwischen die
+// Gateway-Seite (EdgeBridge auf einem Unix-Socket) wie im Betrieb mit
+// network_mode: none – Kanal, Pakete und gc.lan.* laufen über den Socket,
+// geprüft im „Gateway“. Echter Plugin-Prozess (Permission-Model + Sperren)
+// mit einem Beispiel-Edge-Teil (UDP-Echo). Das "LAN" ist hier 127.0.0.0/8.
 
 const { test, before, after } = require('node:test');
 const assert = require('node:assert');
@@ -11,60 +13,13 @@ const dgram = require('node:dgram');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const http = require('node:http');
-const WebSocket = require('ws');
-const gcplugin = require('../src/edge/gcplugin');
-const signature = require('../src/edge/signature');
 const { EdgeHost } = require('../src/edge/host');
-const { makeLanGuard } = require('../src/edge/lanGuard');
 const { keyPair } = require('./helpers/edgeFixtures');
+const { TOKEN, buildPackage: build, FakeServer, makeBridge } = require('./helpers/edgeHarness');
 
 const trusted = keyPair();
 const PORT = 40000 + crypto.randomInt(0, 9000);
-
-function buildPackage({ sign = true, version = '1.0.0', caps } = {}) {
-  const src = fs.readFileSync(path.join(__dirname, 'fixtures/edge/echo-plugin.js'), 'utf8')
-    .replace('|| 40000', `|| ${PORT}`).replace('bind(40001', `bind(${PORT + 1}`);
-  const manifest = { id: 'echo', version, name: 'Echo', edge: { entry: 'edge/index.js', memoryMb: 32, capabilities: caps || { udp: { ports: [PORT], multicast: [] } } } };
-  let files = new Map([['plugin.json', Buffer.from(JSON.stringify(manifest))], ['edge/index.js', Buffer.from(src)], ['server/index.js', Buffer.from('x')]]);
-  if (sign) files = signature.sign(files, trusted.privateKey).files;
-  const buf = gcplugin.encode(files);
-  return { buf, sha256: crypto.createHash('sha256').update(buf).digest('hex'), version };
-}
-
-class FakeServer {
-  constructor() {
-    this.msgs = [];
-    this.waiters = [];
-    this.ws = null;
-  }
-  async listen() {
-    this.http = http.createServer();
-    this.wss = new WebSocket.Server({ noServer: true, handleProtocols: () => 'gc-edge.v1' });
-    this.http.on('upgrade', (req, sock, head) => this.wss.handleUpgrade(req, sock, head, (ws) => {
-      this.ws = ws;
-      ws.on('message', (d) => { const m = JSON.parse(d); this.msgs.push(m); this.check(); });
-    }));
-    await new Promise((r) => this.http.listen(0, '127.0.0.1', r));
-    return this.http.address().port;
-  }
-  send(m) { this.ws.send(JSON.stringify(m)); }
-  check() {
-    for (const w of [...this.waiters]) {
-      const hit = this.msgs.find(w.pred);
-      if (hit) { this.waiters.splice(this.waiters.indexOf(w), 1); clearTimeout(w.t); w.resolve(hit); }
-    }
-  }
-  wait(pred, ms = 8000, what = 'message') {
-    return new Promise((resolve, reject) => {
-      const w = { pred, resolve, t: setTimeout(() => reject(new Error(`timeout waiting for ${what}`)), ms) };
-      this.waiters.push(w);
-      this.check();
-    });
-  }
-  clear() { this.msgs = []; }
-  close() { try { this.ws && this.ws.terminate(); } catch { /* zu */ } this.http.close(); }
-}
+const buildPackage = (o = {}) => build({ key: trusted, port: PORT, ...o });
 
 let tmp;
 let server;
@@ -87,29 +42,38 @@ async function call(method, params, timeoutMs) {
   return server.wait((m) => m.t === 'result' && m.id === id, 8000, `result ${method}`);
 }
 
+let bridge;
+let runDir;
+
+function publish(p) { server.packages.set(p.version, p.buf); }
+
 before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-edge-int-'));
   const p = { runDir: path.join(tmp, 'run'), statusDir: path.join(tmp, 'status'), stateDir: tmp, packagesDir: path.join(tmp, 'packages'), dataDir: path.join(tmp, 'data') };
+  runDir = p.runDir;
   for (const d of [p.runDir, p.statusDir]) fs.mkdirSync(d);
   pkgs = { current: buildPackage() };
   server = new FakeServer();
-  const port = await server.listen();
+  await server.listen();
+  publish(pkgs.current);
+  bridge = makeBridge({ runDir: p.runDir, server });
+  await bridge.start();
   host = new EdgeHost({
     paths: p,
     keys: [trusted.publicKeyB64],
-    loadCredentials: () => ({ serverUrl: `http://127.0.0.1:${port}`, apiToken: 'gc_gw_test', serverAddrs: [], tunnelIp: null }),
-    download: async (_c, id, version) => (version === pkgs.current.version ? pkgs.current.buf : pkgs.other.buf),
-    fenceCheck: async () => (fenceActive ? { active: true, backend: 'test', reason: null } : { active: false, backend: null, reason: 'no_marker' }),
-    guard: makeLanGuard({ getSubnets: () => ['127.0.0.0/8'] }),
+    fenceCheck: async () => (fenceActive ? { mode: 'isolated', active: true, backend: 'isolated', reason: null } : { mode: 'isolated', active: false, backend: null, reason: 'probe_sent' }),
     hardware: () => ({ arch: process.arch }),
     backoff: [100, 200],
     timing: { statusDebounceMs: 20, statusEveryMs: 60000, fenceCheckMs: 60000 },
+    rpcTiming: { rpcReconnectMinMs: 50, rpcReconnectMaxMs: 200 },
+    channelTiming: { reconnectMinMs: 50, reconnectMaxMs: 300 },
   });
   await host.start();
 });
 
 after(async () => {
   await host.stop();
+  await bridge.stop();
   server.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -117,9 +81,15 @@ after(async () => {
 test('hello → state → Edge-Teil läuft', async () => {
   const hello = await server.wait((m) => m.t === 'hello', 8000, 'hello');
   assert.strictEqual(hello.v, 1);
-  assert.strictEqual(hello.gw.edgeHost, '1.0.0');
+  assert.strictEqual(hello.gw.edgeHost, '1.1.0');
   assert.strictEqual(typeof hello.gw.version, 'string');
-  assert.deepStrictEqual(hello.gw.fence, { active: true, backend: 'test' });
+  assert.deepStrictEqual(hello.gw.fence, { active: true, backend: 'isolated' });
+  assert.deepStrictEqual(hello.gw.isolation, { mode: 'isolated', active: true });
+  // das Token setzt das Gateway; der Edge-Host kennt es nicht
+  assert.ok(server.auth.includes(`Bearer ${TOKEN}`));
+  for (const f of fs.readdirSync(runDir)) {
+    if (fs.statSync(path.join(runDir, f)).isFile()) assert.ok(!fs.readFileSync(path.join(runDir, f), 'utf8').includes(TOKEN), f);
+  }
   server.send(state());
   const st = await server.wait(pluginStatus((p) => p.state === 'running'), 15000, 'running');
   const p = st.plugins.find((x) => x.id === 'echo');
@@ -164,6 +134,14 @@ test('Fähigkeiten: kein Ziel außerhalb des LAN, kein fremder Port, kein TCP oh
   assert.deepStrictEqual((await call('udpTo', { host: '127.0.0.1', port: 9 })).result, { ok: true });
   assert.deepStrictEqual((await call('bindOther')).result, { code: 'denied' });
   assert.deepStrictEqual((await call('tcpTo', { host: '127.0.0.1', port: 80 })).result, { code: 'denied' });
+  // die Tunnel-Adresse des Gateways ist kein LAN-Ziel (geprüft im Gateway)
+  assert.deepStrictEqual((await call('udpTo', { host: '127.9.9.9', port: PORT })).result, { code: 'denied' });
+});
+
+test('Paket kam über den Gateway-Socket (Download mit dem Token des Gateways)', () => {
+  const downloads = server.auth.filter((a) => a === `Bearer ${TOKEN}`).length;
+  assert.ok(downloads >= 2, 'Kanal + Paket über das Gateway');
+  assert.ok(fs.existsSync(path.join(tmp, 'packages', 'echo', '1.0.0')));
 });
 
 test('Isolation: keine eigenen Netz-, Prozess- oder Dateizugriffe, keine Geheimnisse in der Umgebung', async () => {
@@ -207,12 +185,29 @@ test('Absturz → Neustart mit Backoff', async () => {
   assert.deepStrictEqual((await call('ping', 2)).result, { pong: 2 });
 });
 
-test('ohne aktive Netzgrenze kein Plugin-Prozess (fail closed)', async () => {
+test('Gateway-Socket kurz weg (Gateway neu gestartet) → Edge-Teil startet neu, UDP geht wieder', async () => {
+  await bridge.stop();
+  bridge = makeBridge({ runDir, server });
+  await bridge.start();
+  server.clear();
+  await server.wait((m) => m.t === 'hello', 8000, 'hello after relay restart');
+  server.send(state());
+  await server.wait(pluginStatus((p) => p.state === 'running'), 15000, 'running after gateway restart');
+  const sock = dgram.createSocket('udp4');
+  await new Promise((r) => sock.bind(0, '127.0.0.1', r));
+  let got = null;
+  sock.on('message', (m) => { got = m.toString(); });
+  for (let i = 0; i < 40 && !got; i++) { sock.send('wieder', PORT, '127.0.0.1'); await new Promise((r) => setTimeout(r, 100)); }
+  sock.close();
+  assert.strictEqual(got, 'echo:wieder');
+});
+
+test('ohne bestätigte Isolation kein Plugin-Prozess (fail closed)', async () => {
   fenceActive = false;
   server.clear();
   await host.tick();
   const st = await server.wait(pluginStatus((p) => p.state === 'denied'), 8000, 'denied');
-  assert.match(st.plugins[0].lastError, /network_fence_inactive/);
+  assert.match(st.plugins[0].lastError, /network_isolation_inactive/);
   const r = await call('ping', 1);
   assert.strictEqual(r.error.code, 'denied');
   fenceActive = true;
@@ -224,6 +219,7 @@ test('ohne aktive Netzgrenze kein Plugin-Prozess (fail closed)', async () => {
 test('unsigniert ohne allowUnsigned → denied; mit allowUnsigned → läuft (Update auf 1.1.0)', async () => {
   pkgs.other = pkgs.current;
   pkgs.current = buildPackage({ sign: false, version: '1.1.0' });
+  publish(pkgs.current);
   server.clear();
   server.send(state());
   const st = await server.wait(pluginStatus((p) => p.state === 'denied' && p.version === '1.1.0'), 8000, 'denied unsigned');

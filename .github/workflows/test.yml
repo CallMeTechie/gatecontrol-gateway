@@ -52,9 +52,26 @@ jobs:
       - name: rpi/check-config.sh
         run: sudo --preserve-env=PATH,GC_TEST_NMCLI rpi/check-config.sh
 
+  edge-isolated:
+    # Edge-Container ohne Netz (Compose: network_mode: none): der Edge-Host
+    # läuft in einem leeren Netz-Namespace (unshare -n), das „Gateway“ im
+    # normalen Netz – Isolation erkannt, direkte Verbindung scheitert, Kanal,
+    # Paket, UDP und HTTP laufen über den Gateway-Socket, Internet abgelehnt.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: 'https://npm.pkg.github.com/', scope: '@callmetechie' }
+      - run: npm ci
+        env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN }}' }
+      - name: Edge-Host im leeren Netz-Namespace
+        run: sudo "$(command -v node)" tests/live/edge-isolated-live.js
+
   edge-fence:
-    # Netzgrenze des Edge-Containers gegen den echten Kernel, je Backend in
-    # einem eigenen Netz-Namespace: nftables und legacy-iptables (Synology-Weg).
+    # Netzgrenze des Edge-Containers (nur noch für alte Compose-Dateien mit Edge
+    # im Host-Netz) gegen den echten Kernel, je Backend in einem eigenen
+    # Netz-Namespace: nftables und legacy-iptables.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

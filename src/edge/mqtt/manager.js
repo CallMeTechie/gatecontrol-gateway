@@ -1,6 +1,9 @@
 'use strict';
 
-// MQTT im Edge-Host (docs/edge.md "MQTT"): schreibt die Broker-Dateien aus
+// MQTT (docs/edge.md "MQTT"): läuft im Gateway-Container (neue Compose-Datei,
+// Edge ohne Netz: Dateien nach /gc-mqtt-conf, Edge-Teile rufen gc.mqtt.* per
+// RPC, bridge.js) oder – alte Compose-Datei mit Netzgrenze – im Edge-Host.
+// Schreibt die Broker-Dateien aus
 // dem Sollzustand, hält das interne Konto `gc-edge` am lokalen Broker,
 // verteilt Nachrichten an die Edge-Teile (gc.mqtt.*) und kündigt den Broker
 // per mDNS als _mqtt._tcp an. Das interne Konto darf nur die pluginTopics;
@@ -37,9 +40,9 @@ const DISCONNECT_RE = /Client (\S+)(?: \[[^\]]*\])? (?:disconnected|closed its c
 const CONNECT_RE = /New client connected from \S+ as (\S+) \(.*?u'([^']*)'\)/;
 
 class MqttManager {
-  constructor({ dir, logger, mdns = null, hostname = os.hostname(), getLanAddrs = lanAddresses, clientFactory, retryMs = 5000, now = Date.now, onChange = () => {} } = {}) {
+  constructor({ dir, brokerDir, logger, mdns = null, hostname = os.hostname(), getLanAddrs = lanAddresses, clientFactory, retryMs = 5000, now = Date.now, onChange = () => {} } = {}) {
     this.onChange = onChange;
-    this.files = new BrokerFiles(dir);
+    this.files = new BrokerFiles(dir, { brokerDir: brokerDir || dir });
     this.logger = logger || { info() {}, warn() {}, debug() {} };
     this.mdns = mdns;
     this.hostname = hostname.split('.')[0] || 'gatecontrol';

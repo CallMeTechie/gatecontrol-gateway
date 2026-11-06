@@ -117,62 +117,89 @@ test('call wird geprüft, Timeout begrenzt', () => {
   assert.throws(() => parseCall({ plugin: 'pp', method: 'm' }));
 });
 
-test('Gateway-Seite: Zugangsdatei nur mit Edge-Volume, Adressen aufgelöst, Status geklemmt', async () => {
+test('Gateway-Seite: kein Token im Edge-Volume, Adressen aufgelöst, Netzgrenze, Status geklemmt, Betriebsart', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-edge-link-'));
   try {
     const config = { serverUrl: 'https://gc.example.com', apiToken: 'gc_gw_' + 'a'.repeat(64), tunnelIp: '10.8.0.5' };
-    const none = new EdgeLink({ config, runDir: path.join(dir, 'missing'), statusDir: dir });
+    const none = new EdgeLink({ config, runDir: path.join(dir, 'missing'), statusDir: dir, bridge: null });
     assert.deepStrictEqual(await none.sync(), { deployed: false });
     assert.strictEqual(none.telemetry(), null);
     const run = path.join(dir, 'run');
     fs.mkdirSync(run);
+    // Zugangsdatei eines älteren Gateways (mit Token) liegt noch im tmpfs → wird gelöscht
+    fs.writeFileSync(path.join(run, 'credentials'), JSON.stringify({ v: 1, apiToken: config.apiToken }));
     const applied = [];
-    const fence = { state: { active: true, backend: 'nft', error: null }, apply: async (o) => { applied.push(o); return fence.state; } };
-    const link = new EdgeLink({ config, runDir: run, statusDir: dir, lookup: async () => [{ address: '203.0.113.7', family: 4 }], fence, getLanCidrs: () => ['192.168.1.0/24'] });
+    let ticks = 0;
+    const bridge = { tick() { ticks++; }, status: () => ({ listening: true, relay: true, rpc: false }) };
+    const fence = { state: { active: false, backend: null, error: 'iptables: owner match missing' }, apply: async (o) => { applied.push(o); return fence.state; } };
+    const link = new EdgeLink({ config, runDir: run, statusDir: dir, lookup: async () => [{ address: '203.0.113.7', family: 4 }], fence, getLanCidrs: () => ['192.168.1.0/24'], bridge });
     await link.sync();
-    const file = path.join(run, 'credentials');
-    const c = JSON.parse(fs.readFileSync(file, 'utf8'));
-    assert.deepStrictEqual(c, { v: 1, serverUrl: config.serverUrl, apiToken: config.apiToken, serverAddrs: ['203.0.113.7'], tunnelIp: '10.8.0.5' });
-    assert.strictEqual(fs.statSync(file).mode & 0o777, 0o440);
+    assert.ok(!fs.existsSync(path.join(run, 'credentials')), 'altes Token entfernt');
+    assert.deepStrictEqual(fs.readdirSync(run), [], 'das Gateway legt kein Token mehr ab');
+    assert.strictEqual(ticks, 1);
     assert.deepStrictEqual(applied[0], { lanCidrs: ['192.168.1.0/24'], serverAddrs: ['203.0.113.7'], serverPort: 443, tunnelIp: '10.8.0.5' });
     // DNS-Ausfall: letzte Adressen bleiben
     link.lookup = async () => { throw Object.assign(new Error('x'), { code: 'EAI_AGAIN' }); };
     await link.sync();
-    assert.deepStrictEqual(JSON.parse(fs.readFileSync(file, 'utf8')).serverAddrs, ['203.0.113.7']);
+    assert.deepStrictEqual(applied[1].serverAddrs, ['203.0.113.7']);
     fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ at: new Date().toISOString(), connected: true, edgeEnabled: true, hostRssMb: 41.234,
+      mode: 'isolated', isolation: { active: true, reason: null },
       plugins: [{ id: 'x'.repeat(200), version: '1.0.0', state: 'running', rssMb: 30, restarts: 1, extra: 'weg' }], mqtt: { running: true, clients: 3 } }));
     const t = link.telemetry();
-    assert.deepStrictEqual(t.fence, { active: true, backend: 'nft', error: null });
+    assert.deepStrictEqual(t.fence, { active: false, backend: null, error: 'iptables: owner match missing' });
+    assert.strictEqual(t.mode, 'isolated', 'Edge ohne Netz: Netzgrenze nicht nötig');
+    assert.deepStrictEqual(t.socket, { listening: true, relay: true, rpc: false });
+    assert.deepStrictEqual(t.host.isolation, { active: true, reason: null });
     assert.strictEqual(t.host.connected, true);
     assert.strictEqual(t.host.stale, false);
     assert.strictEqual(t.host.host_rss_mb, 41.2);
     assert.strictEqual(t.host.plugins[0].id.length, 64);
     assert.strictEqual(t.host.plugins[0].extra, undefined);
     assert.deepStrictEqual(t.host.mqtt, { running: true, clients: 3 });
+    // unbekannte Betriebsart / veraltete Zusammenfassung → mode null
+    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ at: new Date(Date.now() - 10 * 60000).toISOString(), mode: 'fence' }));
+    assert.strictEqual(link.telemetry().mode, null);
+    fs.writeFileSync(path.join(dir, 'status.json'), JSON.stringify({ at: new Date().toISOString(), mode: 'host' }));
+    assert.strictEqual(link.telemetry().mode, null);
     assert.deepStrictEqual(await resolveServer('http://192.0.2.1:3000'), { host: '192.0.2.1', port: 3000, addrs: ['192.0.2.1'] });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('Start ohne Zugangsdatei: Host wartet und verbindet, sobald sie da ist', async () => {
+test('Betriebsart: steht nach der ersten Prüfung fest, ein Wechsel sperrt; hello/Status melden sie', async () => {
   const { EdgeHost } = require('../src/edge/host');
   const EventEmitter = require('node:events');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-edge-start-'));
-  const channel = Object.assign(new EventEmitter(), { connected: false, reconnects: 0, start() {}, stop() {}, send() { return false; }, reconnect() { this.reconnects++; } });
-  let creds = null;
-  const host = new EdgeHost({ paths: { runDir: dir, statusDir: null, stateDir: dir, packagesDir: path.join(dir, 'p'), dataDir: path.join(dir, 'd') },
-    channel, loadCredentials: () => creds, fenceCheck: async () => ({ active: true, backend: 'test', reason: null }), hardware: () => null });
+  const sent = [];
+  const channel = Object.assign(new EventEmitter(), { connected: true, start() {}, stop() {}, send(m) { sent.push(m); return true; }, reconnect() {} });
+  const rpc = Object.assign(new EventEmitter(), { info: { mqtt: { available: true }, mqttStatus: { running: true, clients: 2, accounts: [] } },
+    start() {}, stop() {}, call: async () => ({}), closePlugin() {} });
+  let check = { mode: 'isolated', active: true, backend: 'isolated', reason: null };
+  const host = new EdgeHost({ paths: { runDir: dir, statusDir: dir, stateDir: dir, packagesDir: path.join(dir, 'p'), dataDir: path.join(dir, 'd') },
+    channel, rpc, fenceCheck: async () => check, hardware: () => null });
   try {
     await host.start();
-    assert.strictEqual(channel.reconnects, 0);
-    creds = { serverUrl: 'https://gc.example.com', apiToken: 't', serverAddrs: ['192.0.2.7'], tunnelIp: null };
-    await new Promise((r) => setTimeout(r, 2500));
-    assert.strictEqual(channel.reconnects, 1, 'neue Zugangsdatei → sofort verbinden');
-    creds = { ...creds, serverAddrs: ['192.0.2.8'] };
-    channel.connected = true;
+    assert.strictEqual(host.mode, 'isolated');
+    const hello = host.hello();
+    assert.deepStrictEqual(hello.gw.isolation, { mode: 'isolated', active: true });
+    assert.deepStrictEqual(hello.gw.fence, { active: true, backend: 'isolated' });
+    assert.deepStrictEqual(hello.gw.mqtt, { available: true }, 'MQTT liegt beim Gateway');
+    assert.deepStrictEqual(host.statusMessage().mqtt, { running: true, clients: 2, accounts: [] });
+    const file = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
+    assert.strictEqual(file.mode, 'isolated');
+    assert.deepStrictEqual(file.isolation, { active: true, reason: null });
+    // plötzlich Netz (darf nicht passieren) → nicht mehr frei, Betriebsart bleibt
+    check = { mode: 'fence', active: true, backend: 'nft', reason: null };
     await host.tick();
-    assert.strictEqual(channel.reconnects, 1, 'nur neue Adresse bei bestehender Verbindung → kein Abbruch');
+    assert.strictEqual(host.mode, 'isolated');
+    assert.strictEqual(host.fence.active, false);
+    assert.strictEqual(host.fence.reason, 'mode_changed_fence');
+    // MQTT beim Gateway fällt weg → neues hello
+    sent.length = 0;
+    rpc.info = { mqtt: { available: false }, mqttStatus: null };
+    rpc.emit('info', rpc.info);
+    assert.ok(sent.some((m) => m.t === 'hello' && m.gw.mqtt.available === false));
   } finally {
     await host.stop();
     fs.rmSync(dir, { recursive: true, force: true });

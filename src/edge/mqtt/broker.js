@@ -10,6 +10,13 @@
 //   enabled          vorhanden = Broker soll laufen
 // Der Wächter im mqtt-Container startet Mosquitto neu, wenn sich mosquitto.conf
 // ändert (Listener lassen sich per SIGHUP nicht ändern), sonst SIGHUP.
+//
+// Neue Compose-Datei (Edge-Container ohne Netz): diese Dateien schreibt der
+// Gateway-Container nach /gc-mqtt-conf (tmpfs, gid 61001) – der Edge-Container
+// hat darauf keinen Zugriff, kann also weder Bridges noch Plugins in die
+// Broker-Konfiguration schreiben. Der Wächter kopiert sie nach /gc-mqtt
+// (`brokerDir`, eigenes Volume des Brokers); dorthin zeigen auch die Pfade in
+// mosquitto.conf. Ohne `brokerDir` gilt der alte Weg (eine Ablage für beides).
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -92,7 +99,14 @@ function writeIfChanged(file, body, mode = 0o600) {
 }
 
 class BrokerFiles {
-  constructor(dir) { this.dir = dir; this.reloadSeq = 0; }
+  /** @param {string} dir Ablage, in die geschrieben wird; @param {{brokerDir?:string}} [o] Pfad aus Sicht von Mosquitto */
+  constructor(dir, { brokerDir = dir } = {}) {
+    this.dir = dir;
+    this.brokerDir = brokerDir;
+    // eigene Ablage: 0600 (Besitzer = Broker); Gateway-Ablage: 0640 (Gruppe 61001 über setgid, der Wächter liest)
+    this.fileMode = brokerDir === dir ? 0o600 : 0o640;
+    this.reloadSeq = 0;
+  }
 
   available() {
     try { fs.accessSync(this.dir, fs.constants.W_OK); return true; } catch { return false; }
@@ -106,11 +120,12 @@ class BrokerFiles {
 
   /** Alles schreiben; liefert { confChanged, authChanged }. */
   write({ accounts, internalHash, internalTopics, listenAddrs, tls }) {
-    fs.mkdirSync(path.join(this.dir, 'data'), { recursive: true, mode: 0o700 });
+    // data/ legt im neuen Weg der Wächter im eigenen Volume an
+    if (this.brokerDir === this.dir) fs.mkdirSync(path.join(this.dir, 'data'), { recursive: true, mode: 0o700 });
     const tlsFiles = tls ? this.tlsFiles() : null;
-    const confChanged = writeIfChanged(path.join(this.dir, 'mosquitto.conf'), buildConf({ dir: this.dir, listenAddrs, tls: tlsFiles }));
-    const a = writeIfChanged(path.join(this.dir, 'passwd'), buildPasswd(accounts, internalHash));
-    const b = writeIfChanged(path.join(this.dir, 'acl'), buildAcl(accounts, internalTopics));
+    const confChanged = writeIfChanged(path.join(this.dir, 'mosquitto.conf'), buildConf({ dir: this.brokerDir, listenAddrs, tls: tlsFiles }), this.fileMode);
+    const a = writeIfChanged(path.join(this.dir, 'passwd'), buildPasswd(accounts, internalHash), this.fileMode);
+    const b = writeIfChanged(path.join(this.dir, 'acl'), buildAcl(accounts, internalTopics), this.fileMode);
     if (a || b) writeIfChanged(path.join(this.dir, 'reload'), `${Date.now()}-${++this.reloadSeq}\n`, 0o644);
     writeIfChanged(path.join(this.dir, 'enabled'), '1\n', 0o644);
     return { confChanged, authChanged: a || b, tls: tls ? (tlsFiles ? 'on' : 'missing_cert') : 'off' };

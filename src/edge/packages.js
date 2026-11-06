@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const http = require('node:http');
 const https = require('node:https');
-const { LIMITS, TIMING, assertId, assertVersion } = require('./constants');
+const { LIMITS, TIMING, PACKAGES_PATH, assertId, assertVersion } = require('./constants');
 const gcplugin = require('./gcplugin');
 const signature = require('./signature');
 const { validateEdgeManifest, ManifestError } = require('./manifest');
@@ -23,15 +23,27 @@ class PackageRejected extends Error {
 const MANIFEST_FILE = 'plugin.json';
 const READY_FILE = '.ready.json';
 
-/** Paket vom Server laden (Bearer apiToken, Größe ≤ 20 MB). */
-function download({ serverUrl, apiToken, serverAddrs }, id, version, { timeoutMs = TIMING.downloadTimeoutMs } = {}) {
-  const u = new URL(serverUrl);
-  u.pathname = u.pathname.replace(/\/+$/, '') + `/api/v1/gateway/edge/packages/${encodeURIComponent(assertId(id))}/${encodeURIComponent(assertVersion(version))}`;
-  const mod = u.protocol === 'https:' ? https : http;
-  const opts = { method: 'GET', headers: { Authorization: `Bearer ${apiToken}`, Accept: 'application/octet-stream' }, timeout: timeoutMs, agent: false };
-  if (Array.isArray(serverAddrs) && serverAddrs.length) opts.lookup = pinnedLookup(() => serverAddrs);
+/**
+ * Paket laden (Größe ≤ 20 MB): im Edge-Host über den Gateway-Socket
+ * (`{ socketPath }`, das Gateway holt es mit seinem Token vom Server), sonst
+ * direkt vom Server (Bearer apiToken – so lädt das Gateway selbst).
+ */
+function download({ serverUrl, apiToken, serverAddrs, socketPath }, id, version, { timeoutMs = TIMING.downloadTimeoutMs } = {}) {
+  const rel = `${PACKAGES_PATH}/${encodeURIComponent(assertId(id))}/${encodeURIComponent(assertVersion(version))}`;
+  let mod = http;
+  let target;
+  const opts = { method: 'GET', headers: { Accept: 'application/octet-stream' }, timeout: timeoutMs, agent: false };
+  if (socketPath) {
+    Object.assign(opts, { socketPath, path: rel });
+  } else {
+    target = new URL(serverUrl);
+    target.pathname = target.pathname.replace(/\/+$/, '') + rel;
+    if (target.protocol === 'https:') mod = https;
+    opts.headers.Authorization = `Bearer ${apiToken}`;
+    if (Array.isArray(serverAddrs) && serverAddrs.length) opts.lookup = pinnedLookup(() => serverAddrs);
+  }
   return new Promise((resolve, reject) => {
-    const req = mod.request(u, opts, (res) => {
+    const cb = (res) => {
       if (res.statusCode !== 200) {
         res.resume();
         return reject(new PackageRejected(res.statusCode === 404 ? 'not_found' : 'download_failed', `package download: HTTP ${res.statusCode}`));
@@ -45,7 +57,8 @@ function download({ serverUrl, apiToken, serverAddrs }, id, version, { timeoutMs
       });
       res.on('end', () => resolve(Buffer.concat(chunks)));
       res.on('error', reject);
-    });
+    };
+    const req = target ? mod.request(target, opts, cb) : mod.request(opts, cb);
     req.on('timeout', () => req.destroy(new PackageRejected('download_failed', 'package download timed out')));
     req.on('error', (e) => reject(e instanceof PackageRejected ? e : new PackageRejected('download_failed', e.message)));
     req.end();

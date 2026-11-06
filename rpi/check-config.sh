@@ -101,6 +101,9 @@ for svc in "${edge_svcs[@]}"; do
     and (.security_opt | index("no-new-privileges:true")) != null and .devices == null' >/dev/null \
     || die "Dienst $svc: Sicherheits-Optionen unvollständig (UID 61001, cap_drop ALL, read_only, no-new-privileges)"
 done
+# Edge ohne Netz (docs/edge.md "Gateway-Socket"): keine Netzgrenze, kein Kernel-Modul nötig
+enet="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -r '.services.edge.network_mode')"
+[ "$enet" = none ] || die "edge: network_mode muss none sein (ist: $enet)"
 mimg="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -r '.services.mqtt.image')"
 [[ "$mimg" =~ ^eclipse-mosquitto:[0-9.]+(-alpine)?@sha256:[0-9a-f]{64}$ ]] || die "mqtt: Image nicht per Tag+Digest gepinnt ($mimg)"
 vpick='.volumes | with_entries(.value |= {driver_opts})'

@@ -34,7 +34,7 @@ async function main() {
     logger.info({ signal }, 'Shutting down');
     try {
       ctx?.hb?.stop();
-      ctx?.edgeLink?.stop();
+      await ctx?.edgeLink?.stop();
       ctx?.featureMgr?.stop();
       ctx?.poller?.stop();
       if (ctx?.apiServer) await new Promise(r => ctx.apiServer.close(r));

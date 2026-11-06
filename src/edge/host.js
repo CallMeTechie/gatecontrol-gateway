@@ -3,13 +3,22 @@
 // Edge-Host (docs/edge.md): läuft als einziger Prozess im Edge-Container,
 // hält den Kanal zum Server, setzt den Sollzustand (`state`) um, holt und
 // prüft Pakete, startet je Edge-Teil einen abgeschotteten Prozess und führt
-// dessen gc.*-Aufrufe aus. Fail closed: ohne aktive Netzgrenze läuft kein
-// Plugin-Prozess.
+// dessen gc.*-Aufrufe aus.
+//
+// Netz hat der Edge-Host selbst keines nötig: Kanal, Pakete und jede
+// gc.lan.*-/mDNS-Anfrage gehen über den Gateway-Socket (remote.js →
+// bridge.js im Gateway-Container, der dort prüft und ausführt). gc.mqtt.*
+// ebenso, wenn der Container isoliert läuft; mit alter Compose-Datei (Host-
+// Netz) verwaltet der Edge-Host den Broker wie bisher selbst.
+//
+// Fail closed: ein Plugin-Prozess startet nur, wenn der Container nachweislich
+// kein Netz hat (Betriebsart `isolated`, network_mode: none) oder – im Host-
+// Netz (`fence`) – die Netzgrenze des Gateways aktiv ist.
 
 const fs = require('node:fs');
 const path = require('node:path');
 const EventEmitter = require('node:events');
-const { EDGE_HOST_VERSION, PROTOCOL_VERSION, LIMITS, TIMING, RESTART_BACKOFF_MS } = require('./constants');
+const { EDGE_HOST_VERSION, PROTOCOL_VERSION, LIMITS, TIMING, RESTART_BACKOFF_MS, SOCKET_NAME } = require('./constants');
 const { EdgeChannel } = require('./channel');
 const { parseState, parseCall } = require('./protocol');
 const packages = require('./packages');
@@ -18,34 +27,16 @@ const { intersectCaps } = require('./manifest');
 const { EdgeProcess, rssMb } = require('./pluginProcess');
 const { EventBuffer } = require('./eventBuffer');
 const { PluginStore } = require('./store');
-const { PluginNet, NetError } = require('./netProxy');
-const { makeLanGuard } = require('./lanGuard');
-const { checkFence } = require('./fence');
+const { NetError } = require('./netProxy');
+const { GatewayRpc, RemoteNet, RemoteMqtt } = require('./remote');
+const { checkBoundary } = require('./fence');
 
 const GATEWAY_VERSION = (() => { try { return require('../../package.json').version; } catch { return '0.0.0'; } })();
-const CREDENTIALS_FILE = 'credentials';
 const DOWNLOAD_RETRY_MS = 60000;
+const INFO_WAIT_MS = 3000;
 
 function errInfo(e) {
   return { code: (e && typeof e.code === 'string' && e.code.length <= 32) ? e.code : 'edge_error', message: String((e && e.message) || e).slice(0, 300) };
-}
-
-/** Zugangsdatei des Gateway-Containers lesen (JSON: serverUrl, apiToken, serverAddrs, tunnelIp). */
-function readCredentials(runDir) {
-  try {
-    const raw = fs.readFileSync(path.join(runDir, CREDENTIALS_FILE), 'utf8');
-    if (raw.length > 16 * 1024) return null;
-    const c = JSON.parse(raw);
-    if (!c || typeof c.serverUrl !== 'string' || typeof c.apiToken !== 'string') return null;
-    return {
-      serverUrl: c.serverUrl,
-      apiToken: c.apiToken,
-      serverAddrs: Array.isArray(c.serverAddrs) ? c.serverAddrs.filter((a) => typeof a === 'string').slice(0, 8) : [],
-      tunnelIp: typeof c.tunnelIp === 'string' ? c.tunnelIp : null,
-    };
-  } catch {
-    return null;
-  }
 }
 
 class EdgeHost extends EventEmitter {
@@ -59,20 +50,24 @@ class EdgeHost extends EventEmitter {
     this.gatewayVersion = o.gatewayVersion || GATEWAY_VERSION;
     this.keys = o.keys || null; // null = signature.trustedKeys()
     this.backoff = o.backoff || RESTART_BACKOFF_MS;
-    this.loadCredentials = o.loadCredentials || (() => readCredentials(this.paths.runDir));
+    this.socketPath = o.socketPath || path.join(this.paths.runDir, SOCKET_NAME);
     this.download = o.download || packages.download;
-    this.fenceCheck = o.fenceCheck || (() => checkFence({ runDir: this.paths.runDir }));
+    // isoliert (kein Netz) oder Netzgrenze aktiv → { mode, active, backend, reason }
+    this.fenceCheck = o.fenceCheck || (() => checkBoundary({ runDir: this.paths.runDir }));
     this.hardware = o.hardware || (() => { try { return require('../health/telemetry').hardwareProfile(); } catch { return null; } });
     this.mdns = o.mdns || null;
-    this.mqtt = o.mqtt || null; // MQTT-Verwaltung (Broker-Dateien + internes Konto), optional
-    if (this.mqtt) this.mqtt.onChange = () => this.scheduleStatus();
-    this.creds = null;
-    this.guard = o.guard || makeLanGuard({ tunnelIp: () => (this.creds ? this.creds.tunnelIp : null), serverAddrs: () => (this.creds ? this.creds.serverAddrs : []) });
+    this.rpc = o.rpc || new GatewayRpc({ socketPath: this.socketPath, logger: this.logger, timing: o.rpcTiming });
+    // MQTT: im Host-Netz der lokale Manager (Broker-Dateien + internes Konto), isoliert das Gateway
+    this.localMqtt = o.mqtt || null;
+    this.remoteMqtt = new RemoteMqtt({ rpc: this.rpc });
+    for (const m of [this.localMqtt, this.remoteMqtt]) if (m) m.onChange = () => this.onMqttChange();
     this.store = new packages.PackageStore({ packagesDir: this.paths.packagesDir, logger: this.logger });
-    this.channel = o.channel || new EdgeChannel({ credentials: () => this.creds, logger: this.logger, timing: o.channelTiming });
+    this.channel = o.channel || new EdgeChannel({ credentials: () => ({ socketPath: this.socketPath }), logger: this.logger, timing: o.channelTiming });
     this.plugins = new Map(); // id → Eintrag
     this.desired = null;
+    this.mode = null; // 'isolated' | 'fence' – fest ab der ersten Prüfung (das Netz eines Containers ändert sich nicht)
     this.fence = { active: false, backend: null, reason: 'not_checked' };
+    this.mqttAvailable = false;
     this.reconciling = false;
     this.again = false;
     this.statusTimer = null;
@@ -84,10 +79,31 @@ class EdgeHost extends EventEmitter {
 
   // ─── Lebenszyklus ─────────────────────────────
 
+  /** MQTT dieser Betriebsart (null, solange sie nicht feststeht). */
+  get mqtt() {
+    if (this.mode === 'isolated') return this.remoteMqtt;
+    if (this.mode === 'fence') return this.localMqtt;
+    return null;
+  }
+
   async start() {
     this.stopped = false;
-    this.refreshCredentials();
     await this.checkFenceNow();
+    this.rpc.on('push', (plugin, msg) => {
+      const e = this.plugins.get(plugin);
+      if (e && e.proc) e.proc.toChild(msg);
+    });
+    this.rpc.on('open', (session) => this.onRpcOpen(session));
+    this.rpc.start();
+    // kurz auf die Angaben des Gateways warten (MQTT verfügbar?), damit das hello stimmt
+    if (!this.rpc.info) {
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, INFO_WAIT_MS);
+        if (t.unref) t.unref();
+        this.rpc.once('info', () => { clearTimeout(t); resolve(); });
+      });
+    }
+    this.mqttAvailable = !!(this.mqtt && this.mqtt.available());
     this.channel.on('open', () => this.onOpen());
     this.channel.on('close', () => { this.stateSeen = false; this.scheduleStatus(); });
     this.channel.on('message', (m) => this.onMessage(m));
@@ -95,8 +111,31 @@ class EdgeHost extends EventEmitter {
     this.statusTimer = setInterval(() => this.sendStatus(), this.timing.statusEveryMs);
     this.fenceTimer = setInterval(() => this.tick().catch((e) => this.logger.warn({ err: e.message }, 'edge: tick failed')), this.timing.fenceCheckMs);
     for (const t of [this.statusTimer, this.fenceTimer]) if (t.unref) t.unref();
-    if (!this.creds || !this.fence.active) this.fastStart();
+    if (!this.fence.active) this.fastStart();
     this.writeStatusFile();
+  }
+
+  /**
+   * Gateway-Socket (wieder) verbunden. Nach einer Unterbrechung (Gateway-Container
+   * neu gestartet) sind dort alle Sockets und Abos weg – laufende Edge-Teile
+   * starten deshalb neu und richten sich frisch ein.
+   */
+  async onRpcOpen(session) {
+    if (session <= 1) return;
+    const running = [...this.plugins.values()].filter((e) => e.proc);
+    if (!running.length) return;
+    this.logger.info({ plugins: running.map((e) => e.id) }, 'edge: gateway socket back — restarting edge parts');
+    for (const e of running) await this.stopProcess(e);
+    this.requestReconcile();
+  }
+
+  onMqttChange() {
+    const avail = !!(this.mqtt && this.mqtt.available());
+    if (avail !== this.mqttAvailable) {
+      this.mqttAvailable = avail;
+      if (this.channel.connected) this.channel.send(this.hello()); // der Server zeigt den Broker an
+    }
+    this.scheduleStatus();
   }
 
   /**
@@ -108,7 +147,7 @@ class EdgeHost extends EventEmitter {
     const until = Date.now() + maxMs;
     const t = setInterval(() => {
       if (this.stopped || Date.now() > until) { clearInterval(t); return; }
-      this.tick().then(() => { if (this.creds && this.fence.active) clearInterval(t); }, () => {});
+      this.tick().then(() => { if (this.fence.active) clearInterval(t); }, () => {});
     }, everyMs);
     if (t.unref) t.unref();
   }
@@ -120,26 +159,12 @@ class EdgeHost extends EventEmitter {
     clearTimeout(this.statusDebounce);
     this.channel.stop();
     await Promise.all([...this.plugins.values()].map((e) => this.stopProcess(e)));
-    if (this.mqtt) await this.mqtt.stop();
+    if (this.localMqtt) await this.localMqtt.stop();
+    this.rpc.stop();
     if (this.mdns) this.mdns.close();
   }
 
-  refreshCredentials() {
-    const c = this.loadCredentials();
-    const changed = JSON.stringify(c) !== JSON.stringify(this.creds);
-    this.creds = c;
-    return changed;
-  }
-
   async tick() {
-    const prev = this.creds && `${this.creds.serverUrl}|${this.creds.apiToken}|${this.creds.serverAddrs.join()}`;
-    if (this.refreshCredentials()) {
-      const cur = this.creds && `${this.creds.serverUrl}|${this.creds.apiToken}|${this.creds.serverAddrs.join()}`;
-      if (cur && cur !== prev && !(this.channel.connected && prev && prev.split('|').slice(0, 2).join() === cur.split('|').slice(0, 2).join())) {
-        this.logger.info('edge: credentials changed — reconnecting');
-        this.channel.reconnect();
-      }
-    }
     if (this.mqtt) { try { this.mqtt.refresh(); } catch (e) { this.logger.warn({ err: e.message }, 'edge: mqtt refresh failed'); } }
     const was = this.fence.active;
     await this.checkFenceNow();
@@ -155,12 +180,28 @@ class EdgeHost extends EventEmitter {
   async checkFenceNow() {
     let f;
     try { f = await this.fenceCheck(); } catch (e) { f = { active: false, backend: null, reason: e.message }; }
+    const mode = f.mode === 'isolated' ? 'isolated' : 'fence';
+    if (!this.mode) {
+      this.mode = mode;
+      this.logger.info({ mode }, mode === 'isolated' ? 'edge: container without network (isolated) — network I/O through the gateway'
+        : 'edge: container in the host network — the gateway\'s network fence is required');
+    } else if (mode !== this.mode) {
+      f = { active: false, backend: null, reason: `mode_changed_${mode}` };
+    }
+    f = { mode: this.mode, active: f.active === true, backend: f.backend || null, reason: f.active ? null : (f.reason || 'inactive') };
     if (f.active !== this.fence.active) {
-      if (f.active) this.logger.info({ backend: f.backend }, 'edge: network fence active');
-      else this.logger.warn({ reason: f.reason }, 'edge: network fence NOT active — edge parts stay stopped');
+      if (f.active) this.logger.info({ mode: f.mode, backend: f.backend }, f.mode === 'isolated' ? 'edge: isolation confirmed' : 'edge: network fence active');
+      else this.logger.warn({ mode: f.mode, reason: f.reason }, f.mode === 'isolated' ? 'edge: isolation NOT confirmed — edge parts stay stopped'
+        : 'edge: network fence NOT active — edge parts stay stopped');
     }
     this.fence = f;
     return f;
+  }
+
+  /** Netzgrenze für hello/status: isoliert heißt „keine nötig“ (ältere Server zeigen das als aktiv). */
+  fenceView() {
+    if (this.mode === 'isolated') return { active: this.fence.active, backend: 'isolated' };
+    return { active: this.fence.active, backend: this.fence.backend };
   }
 
   // ─── Kanal ────────────────────────────────────
@@ -173,7 +214,8 @@ class EdgeHost extends EventEmitter {
         version: this.gatewayVersion,
         edgeHost: EDGE_HOST_VERSION,
         mqtt: { available: !!(this.mqtt && this.mqtt.available()) },
-        fence: { active: this.fence.active, backend: this.fence.backend },
+        fence: this.fenceView(),
+        isolation: { mode: this.mode, active: this.fence.active },
         hardware: this.hardware(),
       },
     };
@@ -270,8 +312,8 @@ class EdgeHost extends EventEmitter {
         store: new PluginStore(this.paths.dataDir, id),
         net: null,
       };
-      e.net = new PluginNet({ pluginId: id, caps: () => e.caps, guard: this.guard, mdns: this.mdns, logger: this.logger,
-        toChild: (msg) => { if (e.proc) e.proc.toChild(msg); } });
+      // gc.lan.* führt das Gateway aus (bridge.js) – hier keine eigenen Sockets
+      e.net = new RemoteNet({ pluginId: id, rpc: this.rpc, caps: () => e.caps });
       this.plugins.set(id, e);
     }
     return e;
@@ -324,7 +366,7 @@ class EdgeHost extends EventEmitter {
       e.status = e.proc ? 'update_pending' : 'starting';
       this.scheduleStatus();
       try {
-        const buf = await this.download(this.creds, p.id, p.version);
+        const buf = await this.download({ socketPath: this.socketPath }, p.id, p.version);
         const checked = packages.inspect(buf, { id: p.id, version: p.version, sha256: p.sha256, allowUnsigned: st.allowUnsigned,
           gatewayVersion: this.gatewayVersion, keys: this.keys || signature.trustedKeys() });
         inst = this.store.extract({ id: p.id, version: p.version, sha256: p.sha256 }, checked);
@@ -361,7 +403,8 @@ class EdgeHost extends EventEmitter {
     e.installed = inst;
     if (!this.fence.active) {
       await this.stopProcess(e);
-      this.deny(e, 'network_fence_inactive', this.fence.reason || 'network fence not active');
+      if (this.mode === 'isolated') this.deny(e, 'network_isolation_inactive', this.fence.reason || 'isolation not confirmed');
+      else this.deny(e, 'network_fence_inactive', this.fence.reason || 'network fence not active');
       e.spec = spec;
       return;
     }
@@ -460,7 +503,8 @@ class EdgeHost extends EventEmitter {
       t: 'status',
       plugins: [...this.plugins.values()].filter((e) => e.wanted || e.proc).map((e) => this.pluginStatus(e)),
       mqtt: this.mqtt ? this.mqtt.status() : { running: false, clients: 0, accounts: [] },
-      fence: { active: this.fence.active, backend: this.fence.backend, reason: this.fence.reason },
+      fence: { ...this.fenceView(), reason: this.fence.reason },
+      isolation: { mode: this.mode, active: this.fence.active, reason: this.fence.reason },
     };
   }
 
@@ -490,6 +534,8 @@ class EdgeHost extends EventEmitter {
         edgeEnabled: !!(this.desired && this.desired.edgeEnabled),
         hostRssMb: rssMb(process.pid),
         fence: m.fence,
+        mode: this.mode,
+        isolation: { active: this.fence.active, reason: this.fence.reason },
         plugins: m.plugins.map((p) => ({ id: p.id, version: p.version, state: p.state, rssMb: p.rssMb, restarts: p.restarts })),
         mqtt: { running: m.mqtt.running, clients: m.mqtt.clients },
       };
@@ -502,4 +548,4 @@ class EdgeHost extends EventEmitter {
   }
 }
 
-module.exports = { EdgeHost, readCredentials, CREDENTIALS_FILE, LIMITS };
+module.exports = { EdgeHost, LIMITS };

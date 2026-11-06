@@ -53,9 +53,9 @@ RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils n
     chown -R gateway:gateway /var/log/gateway
 
 # Edge-Container (docs/edge.md): gleiches Image, anderer Befehl
-# (node src/edge/main.js), eigener Benutzer mit FESTER UID/GID 61001 – die
-# Netzgrenze des Gateway-Containers (Owner-Match) und die Volumes hängen an
-# dieser Zahl. /state-edge und /gc-mqtt sind Einhängepunkte der Edge-Volumes;
+# (node src/edge/main.js), eigener Benutzer mit FESTER UID/GID 61001 – der
+# Gateway-Socket (Gruppe 61001), die Volumes und die Netzgrenze alter
+# Compose-Dateien (Owner-Match) hängen an dieser Zahl. /state-edge und /gc-mqtt sind Einhängepunkte der Edge-Volumes;
 # ein neues benanntes Volume übernimmt Besitzer und Rechte dieser Ordner.
 RUN addgroup -g 61001 gcedge && \
     adduser -u 61001 -G gcedge -D -H -h /state-edge -s /sbin/nologin gcedge && \

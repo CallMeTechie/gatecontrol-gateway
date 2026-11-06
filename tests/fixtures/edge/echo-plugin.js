@@ -23,6 +23,15 @@ module.exports = {
     gc.handle('tcpTo', async (p) => {
       try { const s = await gc.lan.tcp.connect(p.host, p.port); s.destroy(); return { ok: true }; } catch (e) { return { code: e.code }; }
     });
+    gc.handle('httpTo', async (p) => {
+      try { const r = await gc.lan.http.request({ url: p.url }); return { status: r.status, text: r.text() }; } catch (e) { return { code: e.code }; }
+    });
+    gc.handle('mqttPub', async (p) => {
+      try { await gc.mqtt.publish(p.topic, p.text, { qos: 1 }); return { ok: true }; } catch (e) { return { code: e.code }; }
+    });
+    gc.handle('mqttSub', async (p) => {
+      try { await gc.mqtt.subscribe(p.topic, (t, b) => gc.emit('mqtt', { topic: t, text: b.toString('utf8') })); return { ok: true }; } catch (e) { return { code: e.code }; }
+    });
     gc.handle('bindOther', async () => {
       try { await gc.lan.udp.bind(40001, {}, () => {}); return { ok: true }; } catch (e) { return { code: e.code }; }
     });

@@ -9,8 +9,17 @@
 // OUTPUT-Pfad für lokal erzeugte Pakete. IPv6 muss ebenfalls zu sein (EPERM
 // oder gar keine Route).
 
+//
+// Zweiter Weg (ab Edge-Host 1.1.0, neue Compose-Datei): der Edge-Container
+// läuft mit `network_mode: none` und hat gar kein Netz – dann braucht es
+// keine Netzgrenze (kein Kernel-Modul, kein xt_owner auf der Synology).
+// checkIsolation() bestätigt das selbst: außer Loopback keine Schnittstelle,
+// und dieselbe Probe scheitert mangels Route (ENETUNREACH). checkBoundary()
+// entscheidet: isoliert → frei; sonst muss die Netzgrenze aktiv sein.
+
 const dgram = require('node:dgram');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { TIMING, EDGE_UID } = require('./constants');
 
@@ -67,4 +76,44 @@ async function checkFence({ runDir, uid = EDGE_UID, now = Date.now, maxAgeMs = T
   return { active: true, backend: m.backend || null, reason: null };
 }
 
-module.exports = { checkFence, probe, readMarker, MARKER, PROBE_V4, PROBE_V6 };
+// Ohne Netz gibt es keine Route (ENETUNREACH); EPERM/EACCES (Regel) oder
+// fehlende Adresse/Familie zählen ebenfalls als zu. Nur 'SENT' heißt offen.
+const CLOSED = ['ENETUNREACH', 'EHOSTUNREACH', 'EADDRNOTAVAIL', 'EAFNOSUPPORT', 'EPERM', 'EACCES'];
+
+/** Schnittstellen mit einer Adresse außer Loopback (internal). */
+function externalInterfaces(ifaces = os.networkInterfaces()) {
+  return Object.entries(ifaces || {})
+    .filter(([, addrs]) => (addrs || []).some((a) => a && a.internal !== true))
+    .map(([name]) => name).sort();
+}
+
+/**
+ * Hat dieser Container gar kein Netz (Compose: network_mode: none)?
+ * @returns {Promise<{isolated:boolean, reason:string|null, interfaces:string[]}>}
+ */
+async function checkIsolation({ interfaces = () => os.networkInterfaces(), probeFn = probe } = {}) {
+  const ext = externalInterfaces(interfaces());
+  if (ext.length) return { isolated: false, reason: 'network_interfaces', interfaces: ext };
+  const p = await probeFn();
+  if (!CLOSED.includes(p.v4)) return { isolated: false, reason: `probe_${String(p.v4).toLowerCase()}`, interfaces: [] };
+  if (!CLOSED.includes(p.v6)) return { isolated: false, reason: `probe6_${String(p.v6).toLowerCase()}`, interfaces: [] };
+  return { isolated: true, reason: null, interfaces: [] };
+}
+
+/**
+ * Darf ein Edge-Teil starten? Isoliert (kein Netz) oder Netzgrenze aktiv.
+ * `mode`: 'isolated' (keine Schnittstelle außer Loopback) | 'fence' (Host-Netz).
+ * @returns {Promise<{mode:'isolated'|'fence', active:boolean, backend:string|null, reason:string|null}>}
+ */
+async function checkBoundary({ runDir, interfaces, probeFn = probe, fenceFn = checkFence, ...rest } = {}) {
+  const iso = await checkIsolation({ interfaces, probeFn });
+  if (iso.isolated) return { mode: 'isolated', active: true, backend: 'isolated', reason: null };
+  if (iso.reason !== 'network_interfaces') {
+    // kein Netz zu sehen, aber die Probe kam durch – nicht freigeben
+    return { mode: 'isolated', active: false, backend: null, reason: iso.reason };
+  }
+  const f = await fenceFn({ runDir, probeFn, ...rest });
+  return { mode: 'fence', active: f.active, backend: f.backend, reason: f.reason };
+}
+
+module.exports = { checkFence, checkIsolation, checkBoundary, externalInterfaces, probe, readMarker, MARKER, PROBE_V4, PROBE_V6 };

@@ -58,13 +58,14 @@ async function bootstrap() {
   // 1. Bring up WireGuard
   await wireguard.writeConfAndBringUp(config);
 
-  // 1b. Edge-Container (optional, docs/edge.md): Zugangsdaten weiterreichen.
-  //     Ohne Edge-Dienst in der Compose-Datei tut das nichts.
-  //     Setzt auch die Netzgrenze des Edge-Benutzers (nftables/iptables-legacy).
+  // 1b. Edge-Container (optional, docs/edge.md): Gateway-Socket für den
+  //     Edge-Container (Relay zum Server, Pakete, gc.lan/mDNS/MQTT per RPC)
+  //     und – für alte Compose-Dateien mit Edge im Host-Netz – die Netzgrenze
+  //     des Edge-Benutzers. Ohne Edge-Dienst in der Compose-Datei tut das nichts.
   const edgeLink = new EdgeLink({ config });
   if (edgeLink.deployed()) {
     try { await edgeLink.sync(); } catch (err) { logger.warn({ err: err.message }, 'edge: initial sync failed'); }
-    edgeLink.start();
+    await edgeLink.start();
   }
 
   // 2. In-memory state
