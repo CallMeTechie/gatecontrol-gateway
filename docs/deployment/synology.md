@@ -1,44 +1,73 @@
 # Deployment: Synology DSM 7.2+
 
+> **Schritt-für-Schritt-Anleitung für Einsteiger:** das [GateControl-Handbuch](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/handbuch) (Kapitel 3 „Gateway einrichten“, Kapitel 6 „Bestehendes Gateway aktualisieren“, FAQ) · English: [user guide](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/guide). Diese Seite ist die technische Ergänzung dazu.
+
 ## Voraussetzungen
 
 - DSM 7.2 oder neuer mit Container Manager (DSM 7.0/7.1 siehe "Legacy" unten)
 - NAS im gleichen LAN wie Ziel-Geräte
 - Administrator-Rechte
+- Zugang zu `ghcr.io` (Gateway-Image) und Docker Hub (`eclipse-mosquitto` für den Dienst `mqtt`) – der Container Manager lädt die Images beim Erstellen des Projekts selbst, ein manueller Import ist nicht nötig.
 
 ## Schritte
 
-1. **Image importieren**
+1. **Gateway in GateControl anlegen**
 
-   Container Manager kann keine Images selbst bauen. Download:
-
-   ```
-   docker pull ghcr.io/callmetechie/gatecontrol-gateway:latest
-   docker save -o gatecontrol-gateway.tar ghcr.io/callmetechie/gatecontrol-gateway:latest
-   ```
-
-   Dann per File Station nach `/volume1/docker/` hochladen und im Container Manager → „Importieren" auswählen.
+   GateControl → Gateways → „Gateway hinzufügen“ → Plattform „Synology NAS“ →
+   „Gateway anlegen und weiter“ → `gatecontrol-gateway-nas.zip` herunterladen.
+   Das Paket enthält `docker-compose.yml` (Host-Netz, wireguard-go, Dienste
+   `gateway`, `edge`, `mqtt`), `config/gateway.env`, `update.sh` und die leeren
+   Ordner `gateway-state/` und `gateway-cache/`. Jeder Download erzeugt einen
+   neuen Zugangsschlüssel.
 
 2. **Ordnerstruktur**
 
-   Via File Station:
+   File Station → `docker` → Ordner `gatecontrol-gateway` anlegen, ZIP hochladen
+   und dort „Extrahieren“:
    ```
    /volume1/docker/gatecontrol-gateway/
-     └── config/
-         └── gateway.env    ← aus GateControl-UI heruntergeladen
+     ├── docker-compose.yml
+     ├── update.sh
+     ├── config/
+     │   └── gateway.env
+     ├── gateway-state/     ← /state (Auto-Update-Flag, last-pull, update.log)
+     └── gateway-cache/     ← /cache (Zwischenspeicher, docs/dns-cache.md)
    ```
+
+   **Der Container Manager legt fehlende Bind-Mount-Ordner nicht an** – fehlt
+   einer, bricht der Start mit `Bind mount failed: … does not exist` ab. Wer die
+   Compose-Datei selbst schreibt (z. B. aus `docker-compose.example.yml`), legt
+   `config/`, `gateway-state/` und `gateway-cache/` vorher in der File Station an.
 
 3. **Projekt erstellen**
 
    Container Manager → Projekt → Erstellen:
-   - Pfad: `/volume1/docker/gatecontrol-gateway`
-   - docker-compose.yml: Copy-Paste aus `docker-compose.example.yml` (siehe Haupt-Repo) –
-     die Datei enthält seit Gateway 1.19.0 auch die Dienste `edge` und `mqtt` für
-     Plugins im Heimnetz (siehe [Edge-Dienst](#edge-dienst-plugins-im-heimnetz)).
+   - Projektname `gatecontrol-gateway`, Pfad: `/volume1/docker/gatecontrol-gateway`
+   - „Vorhandene docker-compose.yml verwenden“ → Weiter → Fertig.
 
-4. **Starten**
+   Die Meldung „Your kernel does not support PIDs limit …“ ist harmlos: Der
+   DSM-Kernel kann `pids_limit` (Dienste `edge`, `mqtt`) nicht setzen, Docker
+   lässt die Grenze weg.
 
-   Projekt → Start. Logs via Container Manager → Projekt → Logs.
+4. **Auto-Update**
+
+   Systemsteuerung → Aufgabenplaner → Erstellen → Geplante Aufgabe →
+   Benutzerdefiniertes Skript, Benutzer `root`, jede Minute, Befehl wie im
+   Assistenten:
+   ```
+   PATH=/usr/local/bin:$PATH GATEWAY_STATE_DIR=/volume1/docker/gatecontrol-gateway/gateway-state GC_GW_COMPOSE_DIR=/volume1/docker/gatecontrol-gateway bash /volume1/docker/gatecontrol-gateway/update.sh
+   ```
+   Details: [Auto-Update](../auto-update.md).
+
+5. **Prüfen**
+
+   Container → `…-gateway-1`, `…-edge-1`, `…-mqtt-1` laufen; Protokoll unter
+   Container Manager → Container → Protokoll. In GateControl meldet sich das
+   Gateway im Assistenten (Schritt 4).
+
+Das Auto-Update tauscht nur das Image, nie die `docker-compose.yml`. Ältere
+Projekte ohne `edge`/`mqtt` oder ohne `gateway-cache` ergänzen die Blöcke unten
+bzw. ersetzen die Datei durch die aktuelle aus dem Handbuch (Kapitel 6).
 
 ## Edge-Dienst (Plugins im Heimnetz)
 
@@ -62,8 +91,10 @@ Abweichungen gilt diese Datei.
 
 ### 1. Einträge im Dienst `gateway`
 
-Unter `services:` → `gateway:` → `volumes:` (nach `./config:/config:ro` und
-`./gateway-state:/state`) ergänzen – darüber reicht der Gateway-Container dem
+Unter `services:` → `gateway:` → `volumes:` (nach `./config:/config:ro`,
+`./gateway-state:/state` und `${GC_CACHE_DIR:-./gateway-cache}:/cache` – für
+den Zwischenspeicher, Ordner `gateway-cache` vorher in der File Station anlegen)
+ergänzen – darüber reicht der Gateway-Container dem
 Edge-Container die Zugangsdaten und den Marker der Netzgrenze und liest dessen
 Zusammenfassung für die Telemetrie:
 
@@ -227,6 +258,7 @@ neu erstellen und starten. Per SSH geht dasselbe mit:
 
 ```bash
 cd /volume1/docker/gatecontrol-gateway
+sudo mkdir -p gateway-state gateway-cache
 sudo docker compose up -d
 ```
 
