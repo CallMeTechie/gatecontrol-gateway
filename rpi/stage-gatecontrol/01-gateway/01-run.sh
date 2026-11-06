@@ -9,8 +9,8 @@ GW="${ROOTFS_DIR}/opt/gatecontrol-gateway"
 # Dateien 1:1 übernehmen (Eigentümer root; Rechte aus dem Repo).
 rsync -rlptD --chown=root:root --exclude __pycache__ "${SRC}/" "${ROOTFS_DIR}/"
 
-# deCONZ-Image (Tag + Digest) in die Compose-Datei eintragen.
-sed -i "s|@DECONZ_IMAGE@|${DECONZ_IMAGE}|" "${GW}/docker-compose.yml"
+# deCONZ- und Ollama-Image (Tag + Digest) in die Compose-Datei eintragen.
+sed -i -e "s|@DECONZ_IMAGE@|${DECONZ_IMAGE}|" -e "s|@OLLAMA_IMAGE@|${OLLAMA_IMAGE}|" "${GW}/docker-compose.yml"
 if grep -q '@[A-Z_]*@' "${GW}/docker-compose.yml"; then
 	echo "Platzhalter in docker-compose.yml nicht ersetzt" >&2
 	exit 1
@@ -26,6 +26,6 @@ printf '%s\n' "${GC_IMAGE_VERSION}" >"${ROOTFS_DIR}/etc/gatecontrol/image-releas
 
 on_chroot <<CHROOT
 systemctl enable gatecontrol-settings.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
-	gatecontrol-gateway-update.path gatecontrol-gateway-update.timer gatecontrol-radio.path \
+	gatecontrol-gateway-update.path gatecontrol-gateway-update.timer gatecontrol-radio.path gatecontrol-ai.path \
 	unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
 CHROOT

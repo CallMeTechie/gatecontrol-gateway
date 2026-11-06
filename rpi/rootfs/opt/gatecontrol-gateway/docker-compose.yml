@@ -80,6 +80,10 @@ services:
         source: radio-ctl
         target: /gc-radio
         volume: { nocopy: true }
+      - type: volume            # Lokale KI (docs/local-ai.md): Steuerdatei für den Dienst ki
+        source: ai-ctl
+        target: /gc-ai
+        volume: { nocopy: true }
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
@@ -273,6 +277,59 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Lokale KI (docs/local-ai.md) – wie in docker-compose.example.yml, nur ohne Profil
+  ki:
+    image: @OLLAMA_IMAGE@
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        C=/gc-ai; p=""
+        say() { printf '%s %s\n' "$$1" "$$(date +%s)" >"$$C/.ki.state" && mv -f "$$C/.ki.state" "$$C/ki.state"; }
+        halt() { if [ -n "$$p" ]; then kill "$$p" 2>/dev/null; wait "$$p" 2>/dev/null; fi; p=""; }
+        dead() { [ ! -e "/proc/$$1" ] || grep -q '^State:[[:space:]]*Z' "/proc/$$1/status" 2>/dev/null; }
+        trap 'halt; say idle; exit 0' TERM INT
+        while :; do
+          if [ -f "$$C/run" ]; then
+            if [ -n "$$p" ] && dead "$$p"; then wait "$$p"; say exit; p=""; sleep 8; fi
+            if [ -z "$$p" ]; then ollama serve & p=$$!; fi
+            say running
+          else
+            halt; say idle
+          fi
+          sleep 2 & wait $$!
+        done
+    restart: unless-stopped
+    network_mode: host
+    # Vorrang hat das Gateway: weniger CPU-Anteil, und wird der Speicher knapp,
+    # beendet der Kernel zuerst das Modell – nie Gateway oder Tunnel
+    cpu_shares: 256
+    oom_score_adj: 800
+    volumes:
+      - ki-models:/root/.ollama
+      - type: volume            # Steuerdatei vom Gateway, Zustand zurück
+        source: ai-ctl
+        target: /gc-ai
+        volume: { nocopy: true }
+    environment:
+      - TZ=${TZ:-Etc/UTC}
+      # nur lokal (das Gateway leitet weiter), nicht 11434 – ein vorhandenes Ollama stört nicht
+      - OLLAMA_HOST=127.0.0.1:11435
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_KEEP_ALIVE=10m
+    healthcheck:
+      test: ["CMD-SHELL", "case \"$$(cut -d' ' -f1 /gc-ai/ki.state 2>/dev/null)\" in running) ollama list >/dev/null ;; *) true ;; esac"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   edge-run:
     driver_opts:
@@ -296,3 +353,11 @@ volumes:
       type: tmpfs
       device: tmpfs
       o: "size=1m,uid=0,gid=0,mode=0755"
+  # tmpfs, geteilt: Steuerdatei des Gateways für den Dienst ki und dessen Zustand
+  ai-ctl:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=0,mode=0755"
+  # die Modelle der lokalen KI (je Modell 1–6 GB)
+  ki-models:

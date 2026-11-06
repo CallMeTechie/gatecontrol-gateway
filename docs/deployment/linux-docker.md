@@ -62,6 +62,15 @@
 
    Der Assistent zeigt „Gateway hat sich gemeldet“; danach steht das Gateway in GateControl als „online“.
 
+## Lokale KI (optional)
+
+Der Dienst `ki` (Ollama, [docs/local-ai.md](../local-ai.md)) steht in
+`docker-compose.example.yml` im Profil `ki` – ohne den Schalter lädt niemand das
+≈ 3-GB-Image. Einschalten in GateControl (KI-Anbieter › Lokale KI), dann entweder
+die Compose-Datei aus GateControl neu holen (enthält `ki` ohne Profil) oder
+`COMPOSE_PROFILES=ki` in `.env` setzen und `docker compose up -d`. Ollama hört nur
+auf `127.0.0.1:11435`; das Gateway lädt die Modelle und leitet die Fragen weiter.
+
 ## Troubleshooting
 
 - **„Refused to bind on 0.0.0.0"** → `GC_TUNNEL_IP` in `gateway.env` fehlt oder ist falsch
