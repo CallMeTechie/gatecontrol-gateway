@@ -9,6 +9,7 @@
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const { tlsFor, netError } = require('./ipp');
 
 const MAX_XML = 256 * 1024;
 const MAX_PAGE = 50 * 1024 * 1024;
@@ -25,13 +26,12 @@ class EsclError extends Error {
 
 function request(ep, method, path, { body = null, accept = '*/*', timeoutMs = TIMEOUT_MS, max = MAX_XML, toFile = null, signal = null } = {}) {
   return new Promise((resolve, reject) => {
+    let tls;
+    try { tls = tlsFor(ep, 'https', EsclError); } catch (e) { reject(e); return; }
     const lib = ep.scheme === 'https' ? https : http;
     const headers = { Accept: accept };
     if (body != null) { headers['Content-Type'] = 'text/xml'; headers['Content-Length'] = String(Buffer.byteLength(body)); }
-    const req = lib.request({
-      host: ep.host, port: ep.port, method, path, headers, timeout: timeoutMs, agent: false,
-      ...(ep.scheme === 'https' ? { rejectUnauthorized: false } : {}),
-    }, (res) => {
+    const req = lib.request({ host: ep.host, port: ep.port, method, path, headers, timeout: timeoutMs, ...tls }, (res) => {
       const status = res.statusCode;
       if (status < 200 || status >= 300) { res.resume(); resolve({ status, headers: res.headers, body: null, bytes: 0 }); return; }
       let n = 0;
@@ -56,7 +56,7 @@ function request(ep, method, path, { body = null, accept = '*/*', timeoutMs = TI
       res.on('end', () => resolve({ status, headers: res.headers, body: Buffer.concat(chunks), bytes: n }));
       res.on('error', (e) => reject(new EsclError('network', e.message)));
     });
-    const fail = (e) => { req.destroy(); reject(e instanceof EsclError ? e : new EsclError('network', e.message, { errno: e.code })); };
+    const fail = (e) => { req.destroy(); reject(e instanceof EsclError ? e : netError(EsclError, e)); };
     req.on('timeout', () => fail(new EsclError('timeout', 'eSCL request timed out')));
     req.on('error', fail);
     if (signal) {

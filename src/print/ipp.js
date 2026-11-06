@@ -9,6 +9,7 @@
 const fs = require('node:fs');
 const http = require('node:http');
 const https = require('node:https');
+const { getPinnedAgent, PIN_MISMATCH_CODE } = require('../proxy/tlsPin');
 
 const OP = Object.freeze({ PRINT_JOB: 0x0002, VALIDATE_JOB: 0x0004, CANCEL_JOB: 0x0008, GET_JOB_ATTRIBUTES: 0x0009, GET_PRINTER_ATTRIBUTES: 0x000b });
 const GROUP = Object.freeze({ operation: 0x01, job: 0x02, end: 0x03, printer: 0x04, unsupported: 0x05 });
@@ -176,19 +177,37 @@ function endpointUri(ep) {
 }
 
 /**
+ * TLS eines Endpunkts: ipp/http ohne TLS; ipps/https nur mit dem Fingerabdruck,
+ * den das Gateway beim ersten Kontakt gespeichert hat (ep.pin, trust on first
+ * use – Drucker im LAN haben selbst signierte Zertifikate). Den Socket gibt der
+ * Pin-Agent erst nach passendem Zertifikat heraus (src/proxy/tlsPin.js).
+ */
+function tlsFor(ep, tlsScheme, ErrorClass = IppError) {
+  if (ep.scheme !== tlsScheme) return { agent: false };
+  if (typeof ep.pin !== 'string' || !/^[0-9a-f]{64}$/.test(ep.pin)) throw new ErrorClass('no_pin', `no certificate pin for ${ep.host}:${ep.port}`);
+  return { agent: getPinnedAgent({ host: ep.host, port: ep.port, fingerprint: ep.pin }) };
+}
+
+/** Netzfehler → Fehler mit Code; ein anderes Zertifikat als gespeichert → cert_changed. */
+function netError(ErrorClass, e) {
+  if (e && e.code === PIN_MISMATCH_CODE) return new ErrorClass('cert_changed', e.message, { seenSha256: e.actualFingerprint || null });
+  return new ErrorClass('network', e && e.message, { errno: e && e.code });
+}
+
+/**
  * POST application/ipp. body: Buffer (Kopf) und optional eine Datei, die
  * dahinter gestreamt wird ({ file, size }). → decodeResponse(…)
  */
 function post(ep, head, { file = null, size = 0, timeoutMs = DEFAULT_TIMEOUT_MS, signal = null } = {}) {
   return new Promise((resolve, reject) => {
+    let tls;
+    try { tls = tlsFor(ep, 'ipps'); } catch (e) { reject(e); return; }
     const lib = ep.scheme === 'ipps' ? https : http;
     const length = head.length + (file ? size : 0);
     const req = lib.request({
       host: ep.host, port: ep.port, method: 'POST', path: '/' + String(ep.path || '').replace(/^\/+/, ''),
       headers: { 'Content-Type': 'application/ipp', 'Content-Length': String(length), Accept: 'application/ipp' },
-      timeout: timeoutMs, agent: false,
-      // Drucker im LAN haben selbst signierte Zertifikate; die Adresse prüft print.js
-      ...(ep.scheme === 'ipps' ? { rejectUnauthorized: false } : {}),
+      timeout: timeoutMs, ...tls,
     }, (res) => {
       if (res.statusCode !== 200) { res.resume(); reject(new IppError('http_status', `HTTP ${res.statusCode}`, { httpStatus: res.statusCode })); return; }
       const chunks = [];
@@ -201,7 +220,7 @@ function post(ep, head, { file = null, size = 0, timeoutMs = DEFAULT_TIMEOUT_MS,
       res.on('end', () => { try { resolve(decodeResponse(Buffer.concat(chunks))); } catch (e) { reject(e); } });
       res.on('error', (e) => reject(new IppError('network', e.message)));
     });
-    const fail = (e) => { req.destroy(); reject(e instanceof IppError ? e : new IppError('network', e.message, { errno: e.code })); };
+    const fail = (e) => { req.destroy(); reject(e instanceof IppError ? e : netError(IppError, e)); };
     req.on('timeout', () => fail(new IppError('timeout', 'IPP request timed out')));
     req.on('error', fail);
     if (signal) {
@@ -326,6 +345,6 @@ async function cancelJob(ep, jobId, opts = {}) {
 
 module.exports = {
   OP, GROUP, TAG, STATUS, RETRY_STATUS, JOB_STATE, PRINTER_STATE, IppError,
-  encodeRequest, encodeMessage, decodeResponse, attrsOf, endpointUri, post,
+  encodeRequest, encodeMessage, decodeResponse, tlsFor, netError, attrsOf, endpointUri, post,
   getPrinterAttributes, printerInfo, printJob, getJobAttributes, cancelJob, PRINTER_ATTRS,
 };

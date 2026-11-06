@@ -19,6 +19,7 @@ const ippLib = require('./ipp');
 const esclLib = require('./escl');
 const { makePrintClient, ID_RE } = require('./serverClient');
 const { isRfc1918 } = require('./config');
+const { inspectLeafCertificate } = require('../proxy/tlsPin');
 
 const DEVICES_PATH = '/api/v1/gateway/print/devices';
 const JOB_PATH = (id) => `/api/v1/gateway/print/jobs/${id}`;
@@ -38,6 +39,9 @@ const JOURNAL_MS = 2 * 86400_000;
 const MANUAL_IPP = [631];
 const MANUAL_ESCL = [{ scheme: 'http', port: 80 }, { scheme: 'https', port: 443 }];
 
+const TLS_SCHEMES = new Set(['ipps', 'https']);
+const PIN_RE = /^[0-9a-f]{64}$/;
+
 const SCAN_MODES = ['bw', 'gray', 'color'];
 const SCAN_FORMATS = ['image/jpeg', 'application/pdf'];
 
@@ -51,10 +55,10 @@ function printerPart(info) {
 class PrintService {
   constructor({
     reporter, client = null, serverUrl, apiToken, stateDir, getSubnets = () => [],
-    browse = discovery.browse, ipp = ippLib, escl = esclLib, now = Date.now,
+    browse = discovery.browse, ipp = ippLib, escl = esclLib, now = Date.now, inspect = inspectLeafCertificate,
     cycleMs = CYCLE_MS, jobsMs = JOBS_MS, retryMs = RETRY_MS, jobPollMs = JOB_POLL_MS, jobWatchMs = JOB_WATCH_MS, browseMs = 4000,
   }) {
-    Object.assign(this, { reporter, stateDir, getSubnets, browse, ipp, escl, now, retryMs, jobPollMs, jobWatchMs, browseMs });
+    Object.assign(this, { reporter, stateDir, getSubnets, browse, ipp, escl, now, inspect, retryMs, jobPollMs, jobWatchMs, browseMs });
     this.client = client || makePrintClient({ serverUrl, apiToken });
     this.status = new FeatureStatus(now);
     this.cfg = { enabled: false, manual: [] };
@@ -94,7 +98,7 @@ class PrintService {
     if (!this.stateDir) return;
     const devices = [...this.devices.values()].map((d) => ({
       id: d.id, uuid: d.uuid, ip: d.ip, name: d.name, model: d.model, location: d.location, source: d.source,
-      ipp: d.ipp, escl: d.escl, hints: d.hints, seenAt: d.seenAt, printer: d.printer, scanner: d.scanner,
+      ipp: d.ipp, escl: d.escl, hints: d.hints, seenAt: d.seenAt, printer: d.printer, scanner: d.scanner, problem: d.problem || null, seenSha256: d.seenSha256 || null,
     }));
     writeJson(this.stateDir, STATE_FILE, { devices });
     const cut = this.now() - JOURNAL_MS;
@@ -151,10 +155,21 @@ class PrintService {
     else { await this.refreshAll(); await this.report(); }
   }
 
-  /** Mgmt „Neu suchen“ */
-  requestSearch() {
+  /**
+   * Mgmt „Neu suchen“. `retrust`: die Geräte-Id, deren geändertes Zertifikat
+   * ein Administrator bestätigt hat – ihr gespeicherter Fingerabdruck wird
+   * verworfen und beim nächsten Kontakt neu gelernt.
+   */
+  requestSearch({ retrust = null } = {}) {
     if (!this.cfg.enabled) return 'disabled';
     if (this.searching) return 'busy';
+    const d = typeof retrust === 'string' ? this.devices.get(retrust) : null;
+    if (d) {
+      for (const ep of [d.ipp, d.escl]) if (ep) delete ep.pin;
+      d.problem = null;
+      d.seenSha256 = null;
+      logger.info({ device: d.id }, 'print: certificate pin dropped on request');
+    }
     void this.search();
     return 'accepted';
   }
@@ -201,12 +216,46 @@ class PrintService {
     const old = this.devices.get(f.id) || [...this.devices.values()].find((d) => d.ip === f.ip && (!d.uuid || d.uuid === f.uuid));
     if (old && old.id !== f.id) this.devices.delete(old.id);
     const d = old || { printer: null, scanner: null };
+    // ein gelernter Fingerabdruck bleibt, solange es derselbe Endpunkt ist
+    const keepPin = (fresh, prev) => {
+      if (!fresh) return prev || null;
+      const same = prev && prev.scheme === fresh.scheme && prev.host === fresh.host && prev.port === fresh.port;
+      return same && prev.pin ? { ...fresh, pin: prev.pin } : fresh;
+    };
     Object.assign(d, {
       id: f.id, uuid: f.uuid || null, ip: f.ip, name: f.name || (old && old.name) || f.ip, model: f.model || (old && old.model) || '',
-      location: f.location || (old && old.location) || '', source, ipp: f.ipp || (old && old.ipp) || null, escl: f.escl || (old && old.escl) || null,
+      location: f.location || (old && old.location) || '', source, ipp: keepPin(f.ipp, old && old.ipp), escl: keepPin(f.escl, old && old.escl),
       hints: f.hints || {}, seenAt: now,
     });
     this.devices.set(d.id, d);
+  }
+
+  /**
+   * Trust on first use für ipps/https: Drucker und Scanner im LAN haben selbst
+   * signierte Zertifikate. Beim ersten Kontakt wird der SHA-256 des
+   * Leaf-Zertifikats gelernt (nur TLS-Handshake, kein Byte Anwendungsdaten –
+   * src/proxy/tlsPin.js), danach gilt jede Verbindung nur mit genau diesem
+   * Zertifikat. Ein anderes → `cert_changed`, bis ein Administrator es bestätigt.
+   */
+  async _learnPins(d) {
+    for (const ep of [d.ipp, d.escl]) {
+      if (!ep || !TLS_SCHEMES.has(ep.scheme) || (typeof ep.pin === 'string' && PIN_RE.test(ep.pin))) continue;
+      try {
+        const c = await this.inspect({ host: ep.host, port: ep.port, timeoutMs: 5_000 });
+        if (c && typeof c.sha256 === 'string' && PIN_RE.test(c.sha256)) {
+          ep.pin = c.sha256;
+          logger.info({ device: d.id, port: ep.port }, 'print: certificate pinned on first contact');
+        }
+      } catch (_e) { /* nicht erreichbar – beim nächsten Durchlauf wieder */ }
+    }
+  }
+
+  _certProblem(d, err) {
+    if (!err || err.code !== 'cert_changed') return false;
+    if (d.problem !== 'cert_changed') logger.warn({ device: d.id, seen: err.seenSha256 }, 'print: certificate of the device changed — not used until confirmed');
+    d.problem = 'cert_changed';
+    d.seenSha256 = err.seenSha256 || null;
+    return true;
   }
 
   async _probeManual(ip) {
@@ -222,6 +271,9 @@ class PrintService {
     }
     for (const c of MANUAL_ESCL) {
       const ep = { scheme: c.scheme, host: ip, port: c.port, path: 'eSCL' };
+      if (TLS_SCHEMES.has(ep.scheme)) {
+        try { const cert = await this.inspect({ host: ip, port: c.port, timeoutMs: 5_000 }); if (cert && PIN_RE.test(String(cert.sha256))) ep.pin = cert.sha256; else continue; } catch (_e) { continue; }
+      }
       try { await this.escl.capabilities(ep, { timeoutMs: 5_000 }); escl = ep; break; } catch (_e) { /* nächster */ }
     }
     if (!ipp && !escl) return null;
@@ -238,6 +290,7 @@ class PrintService {
 
   async refresh(d) {
     let ok = false;
+    await this._learnPins(d);
     if (d.ipp) {
       try {
         const info = this.ipp.printerInfo(await this.ipp.getPrinterAttributes(d.ipp, { timeoutMs: 8_000 }));
@@ -245,7 +298,8 @@ class PrintService {
         if (info.model && !d.model) d.model = info.model;
         if (info.location && !d.location) d.location = info.location;
         ok = true;
-      } catch (_e) {
+      } catch (e) {
+        this._certProblem(d, e);
         d.printer = d.printer ? { ...d.printer, state: 'offline', reasons: [] } : { state: 'offline', accepting: false, reasons: [], color: !!d.hints?.color, duplex: !!d.hints?.duplex, formats: d.hints?.formats || [], copiesMax: 1, markers: [] };
       }
     }
@@ -256,12 +310,14 @@ class PrintService {
         try { st = await this.escl.status(d.escl, { timeoutMs: 8_000 }); } catch (_e) { /* manche Geräte kennen kein ScannerStatus */ }
         d.scanner = { caps, state: st.state, adf: st.adf };
         ok = true;
-      } catch (_e) {
+      } catch (e) {
+        this._certProblem(d, e);
         d.scanner = d.scanner ? { ...d.scanner, state: 'offline' } : null;
       }
     }
     d.online = ok;
     if (ok) d.seenAt = this.now();
+    if (ok && d.problem === 'cert_changed' && [d.ipp, d.escl].every((ep) => !ep || !TLS_SCHEMES.has(ep.scheme))) d.problem = null;
   }
 
   /** Öffentliche Sicht eines Geräts (Vertrag §2) – ohne Endpunkte. */
@@ -271,6 +327,8 @@ class PrintService {
     return {
       id: d.id, name: d.name, model: d.model || null, ip: d.ip, location: d.location || null, source: d.source || 'mdns',
       online: !!d.online, seenAt: d.seenAt || null,
+      // `cert_changed`: ipps/https antwortet mit einem anderen Zertifikat als beim ersten Kontakt
+      problem: d.problem || null, ...(d.problem === 'cert_changed' ? { seenSha256: d.seenSha256 || null } : {}),
       printer: d.ipp && p ? { state: p.state, reasons: p.reasons || [], color: !!p.color, duplex: !!p.duplex, formats: p.formats || [], copiesMax: p.copiesMax || 1, markers: p.markers || [] } : null,
       scanner: d.escl && s && s.caps ? {
         state: s.state || 'idle', platen: !!s.caps.platen, feeder: !!s.caps.feeder, duplex: !!s.caps.duplex,
@@ -403,6 +461,8 @@ class PrintService {
         d.online = true;
         if (!a.accepting) return this._wait(t, 'printer_not_accepting');
       } catch (err) {
+        if (this._certProblem(d, err)) return this._wait(t, 'cert_changed');
+        if (err.code === 'no_pin') { await this._learnPins(d); return this._wait(t, 'printer_offline', 'no_pin'); }
         if (d.printer) d.printer.state = 'offline';
         return this._wait(t, 'printer_offline', err.code || err.message);
       }
@@ -411,6 +471,7 @@ class PrintService {
       try {
         res = await this.ipp.printJob(d.ipp, file, job.size, { name: job.name, user: job.user, format: job.format, copies: job.copies, duplex: d.printer.duplex ? job.duplex : undefined, color: job.color });
       } catch (err) {
+        if (this._certProblem(d, err)) return this._wait(t, 'cert_changed');
         return this._wait(t, 'printer_offline', err.code || err.message);
       }
       if (this.ipp.RETRY_STATUS.has(res.status)) return this._wait(t, 'printer_busy', `IPP 0x${res.status.toString(16)}`);
@@ -510,7 +571,8 @@ class PrintService {
       if (!r.pages) await report({ state: 'failed', pages: 0, error: settings.source === 'feeder' ? 'feeder_empty' : 'no_pages' });
       else await report({ state: 'done', pages: r.pages });
     } catch (err) {
-      const code = err.code === 'aborted' ? 'canceled' : (['scanner_busy', 'feeder_empty', 'too_large', 'timeout'].includes(err.code) ? err.code : 'scan_failed');
+      this._certProblem(d, err);
+      const code = err.code === 'aborted' ? 'canceled' : (['scanner_busy', 'feeder_empty', 'too_large', 'timeout', 'cert_changed'].includes(err.code) ? err.code : 'scan_failed');
       logger.warn({ err: err.code || err.message, device: d.id }, 'print: scan failed');
       await report({ state: 'failed', error: code, message: String(err.message || '').slice(0, 200) });
     } finally {

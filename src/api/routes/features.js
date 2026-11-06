@@ -10,7 +10,7 @@ const { normalizeMac } = require('../../features/macs');
 //   POST /api/dns/test          { domain, mac? }  – Was würde passieren?
 //   POST /api/cache/sync        {}                – Vorrat jetzt abgleichen
 //   POST /api/cache/clear       {}                – Zwischenspeicher leeren
-//   POST /api/print/discover    {}                – Drucker/Scanner neu suchen (Phase 3c)
+//   POST /api/print/discover    { retrust? }      – Drucker/Scanner neu suchen (Phase 3c); retrust: geändertes Zertifikat bestätigen
 //   POST /api/print/jobs        {}                – Druckaufträge jetzt abholen
 //   POST /api/print/scan        { scanId, deviceId, source, color, resolution, format, duplex }
 //   POST /api/print/scan/cancel { scanId }
@@ -59,7 +59,8 @@ function createFeaturesRouter({ featureMgr }) {
   // Phase 3c: Drucken & Scannen (src/print/print.js)
   const print = () => featureMgr.print || {};
   router.post('/print/discover', (req, res) => {
-    reply(res, print().requestSearch ? print().requestSearch() : 'disabled', 'search_running');
+    const retrust = req.body && typeof req.body.retrust === 'string' ? req.body.retrust : null;
+    reply(res, print().requestSearch ? print().requestSearch({ retrust }) : 'disabled', 'search_running');
   });
   router.post('/print/jobs', (req, res) => {
     reply(res, print().requestJobs ? print().requestJobs() : 'disabled', 'busy');

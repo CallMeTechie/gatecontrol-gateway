@@ -5,6 +5,7 @@
 // die eSCL-Aufrufe; merkt sich gedruckte Dokumente und Scan-Aufträge.
 
 const http = require('node:http');
+const https = require('node:https');
 const ipp = require('../../src/print/ipp');
 
 const { TAG, GROUP, OP } = ipp;
@@ -60,7 +61,7 @@ async function startFakePrinter(opts = {}) {
     printed: [], ippOps: [], scanJobs: [], deleted: [], opts: { ...opts },
     jobStates: new Map(), nextJobId: 100, pagesLeft: new Map(), busyLeft: new Map(),
   };
-  const server = http.createServer((req, res) => {
+  const handler = (req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -124,16 +125,18 @@ async function startFakePrinter(opts = {}) {
       if (dj && req.method === 'DELETE') { state.deleted.push(dj[1]); res.writeHead(200); res.end(); return; }
       res.writeHead(404); res.end();
     });
-  });
+  };
+  // opts.tls { cert, key }: IPP/eSCL über TLS (ipps/https) mit selbst signiertem Zertifikat
+  const server = opts.tls ? https.createServer({ cert: opts.tls.cert, key: opts.tls.key }, handler) : http.createServer(handler);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const port = server.address().port;
   return { port, state, close: () => new Promise((r) => { server.closeAllConnections?.(); server.close(r); }) };
 }
 
 /** mDNS-Antwort eines Geräts mit Drucker (_ipp) und Scanner (_uscan) */
-function mdnsPacket({ ip = '192.168.1.57', port = 631, esclPort = 80, uuid = 'F0D8A1B2-0000-1000-8000-00AABBCCDDEE', name = 'HP OfficeJet 8020 [A1B2C3]' } = {}) {
+function mdnsPacket({ ip = '192.168.1.57', port = 631, esclPort = 80, uuid = 'F0D8A1B2-0000-1000-8000-00AABBCCDDEE', name = 'HP OfficeJet 8020 [A1B2C3]', tls = false } = {}) {
   const txt = (o) => Object.entries(o).map(([k, v]) => Buffer.from(`${k}=${v}`));
-  return {
+  const p = {
     answers: [
       { type: 'PTR', name: '_ipp._tcp.local', data: `${name}._ipp._tcp.local` },
       { type: 'PTR', name: '_uscan._tcp.local', data: `${name}._uscan._tcp.local` },
@@ -146,6 +149,12 @@ function mdnsPacket({ ip = '192.168.1.57', port = 631, esclPort = 80, uuid = 'F0
       { type: 'A', name: 'HP-OJ.local', data: ip },
     ],
   };
+  if (tls) {
+    // nur die TLS-Dienste (_ipps/_uscans) ankündigen
+    const sw = (x) => String(x).replace('._ipp._tcp', '._ipps._tcp').replace('._uscan._tcp', '._uscans._tcp').replace(/^_ipp\._tcp/, '_ipps._tcp').replace(/^_uscan\._tcp/, '_uscans._tcp');
+    for (const r of [...p.answers, ...p.additionals]) { r.name = sw(r.name); if (r.type === 'PTR') r.data = sw(r.data); }
+  }
+  return p;
 }
 
 module.exports = { startFakePrinter, mdnsPacket, CAPS };

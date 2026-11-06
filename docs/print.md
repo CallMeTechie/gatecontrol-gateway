@@ -26,6 +26,14 @@ macht das Plugin „Drucken & Scannen“ (`gatecontrol-print`) am Server.
   Geräts und wird geprüft; der Ort eines Scan-Auftrags (`Location`) wird nur
   als Pfad auf demselben Gerät benutzt. Keine Weiterleitungen, Antworten
   begrenzt (IPP 1 MB, eSCL-XML 256 KB, Seite 50 MB).
+* **TLS nie ohne Prüfung:** bevorzugt wird `ipp`/`http` im LAN. Bietet ein
+  Gerät nur `ipps`/`https` an, lernt das Gateway beim ersten Kontakt den
+  SHA-256 des Leaf-Zertifikats (nur TLS-Handshake, `src/proxy/tlsPin.js`) und
+  verbindet sich danach nur mit genau diesem Zertifikat (Pin in
+  `print-devices.json`). Ein anderes Zertifikat → das Gerät meldet
+  `problem: 'cert_changed'` (+ `seenSha256`), Aufträge warten
+  (`cert_changed`); erst Mgmt `POST /api/print/discover { retrust: <id> }`
+  verwirft den alten Pin und lernt neu.
 * **Drucker aus:** nicht erreichbar, beschäftigt oder „nimmt nichts an“ →
   Zustand `waiting`, neuer Versuch alle 2 Min. Aufgeben (24 h) entscheidet der
   Server – der Auftrag verschwindet dann aus der Liste.
@@ -40,11 +48,11 @@ macht das Plugin „Drucken & Scannen“ (`gatecontrol-print`) am Server.
   zweiter Scan während eines Scans → 409 `scanner_busy`.
 
 Fehlercodes in den Zustandsmeldungen: `printer_offline`, `printer_busy`,
-`printer_not_accepting`, `device_not_found`, `download_failed` (→ `waiting`);
+`printer_not_accepting`, `device_not_found`, `download_failed`, `cert_changed` (→ `waiting`);
 `format_unsupported`, `printer_rejected`, `not_a_printer`,
 `device_not_allowed`, `canceled_at_printer`, `aborted_at_printer` (→
 `failed`); Scans: `scanner_busy`, `feeder_empty`, `no_pages`, `too_large`,
-`timeout`, `canceled`, `scan_failed`.
+`timeout`, `canceled`, `cert_changed`, `scan_failed`.
 
 Code: `src/print/` (`ipp.js` IPP-Kodierung und -Client, `escl.js`,
 `discovery.js`, `print.js`, `serverClient.js`), Tests mit einem Test-Drucker
