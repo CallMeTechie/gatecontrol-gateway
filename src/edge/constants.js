@@ -6,12 +6,23 @@
 
 const path = require('node:path');
 
-const EDGE_HOST_VERSION = '1.0.0';
+const EDGE_HOST_VERSION = '1.1.0';
 const PROTOCOL = 'gc-edge.v1';
 const PROTOCOL_VERSION = 1;
 
+// Gateway-Socket (docs/edge.md "Gateway-Socket"): der Gateway-Container
+// bindet ihn im tmpfs-Volume edge-run; der Edge-Host spricht darüber mit dem
+// Server (Relay), holt Pakete und lässt jede Netz-Ein-/Ausgabe der Edge-Teile
+// vom Gateway ausführen (RPC). So braucht der Edge-Container kein Netz.
+const SOCKET_NAME = 'gw.sock';
+const RPC_PATH = '/edge/rpc';
+const RPC_PROTOCOL = 'gc-edge-rpc.v1';
+const RPC_MAX_BYTES = 8 * 1024 * 1024; // http.request: 5 MB Antwort → ≈ 6,7 MB base64
+const PACKAGES_PATH = '/api/v1/gateway/edge/packages';
+
 // Feste UID/GID des Edge-Benutzers im Image (Dockerfile: Benutzer "gcedge").
-// Die Netzgrenze des Gateway-Containers (Owner-Match) hängt an dieser Zahl.
+// Gateway-Socket (Gruppe), Volumes und die Netzgrenze alter Compose-Dateien
+// (Owner-Match) hängen an dieser Zahl.
 const EDGE_UID = 61001;
 const EDGE_GID = 61001;
 
@@ -60,6 +71,9 @@ const TIMING = Object.freeze({
   statusDebounceMs: 1000,
   fenceCheckMs: 30000,
   fenceMarkerMaxAgeMs: 3 * 60 * 1000,
+  rpcCallTimeoutMs: 45000,          // länger als der längste gc.lan-Aufruf (30 s)
+  rpcReconnectMinMs: 500,
+  rpcReconnectMaxMs: 10000,
   startTimeoutMs: 15000,
   stopGraceMs: 3000,
   childPingMs: 30000,
@@ -88,7 +102,7 @@ function assertVersion(v) {
 function paths(env = process.env) {
   const stateDir = env.GC_EDGE_STATE_DIR || '/state-edge';
   return {
-    runDir: env.GC_EDGE_RUN_DIR || '/run/gc-edge',            // Gateway → Edge (nur lesbar)
+    runDir: env.GC_EDGE_RUN_DIR || '/run/gc-edge',            // Gateway → Edge (nur lesbar, mit gw.sock)
     statusDir: env.GC_EDGE_STATUS_DIR || '/run/gc-edge-status', // Edge → Gateway (Telemetrie)
     stateDir,
     packagesDir: path.join(stateDir, 'packages'),
@@ -98,6 +112,6 @@ function paths(env = process.env) {
 }
 
 module.exports = {
-  EDGE_HOST_VERSION, PROTOCOL, PROTOCOL_VERSION, EDGE_UID, EDGE_GID, LIMITS, TIMING, RESTART_BACKOFF_MS,
+  EDGE_HOST_VERSION, PROTOCOL, PROTOCOL_VERSION, SOCKET_NAME, RPC_PATH, RPC_PROTOCOL, RPC_MAX_BYTES, PACKAGES_PATH, EDGE_UID, EDGE_GID, LIMITS, TIMING, RESTART_BACKOFF_MS,
   ID_RE, VERSION_RE, assertId, assertVersion, paths,
 };

@@ -21,7 +21,10 @@ process.on('unhandledRejection', (reason) => {
 async function main() {
   const p = paths();
   for (const d of [p.stateDir, p.packagesDir, p.dataDir]) fs.mkdirSync(d, { recursive: true, mode: 0o700 });
-  // mDNS auf der primären LAN-Schnittstelle (wie der LAN-Scan), nicht auf Docker-/VPN-Netzen
+  // Nur für alte Compose-Dateien (Edge im Host-Netz): dann verwaltet der Edge-Host
+  // den Broker selbst und kündigt ihn per mDNS an (primäre LAN-Schnittstelle).
+  // Isoliert (network_mode: none) übernimmt beides das Gateway; gc.lan.* und
+  // mDNS der Edge-Teile laufen in beiden Fällen über den Gateway-Socket.
   const mdns = new MdnsService({ logger, getInterface: () => primaryLanIp(defaultGatewayIp()) });
   const mqtt = new MqttManager({ dir: p.mqttDir, logger, mdns });
   const host = new EdgeHost({ paths: p, logger, mdns, mqtt });
@@ -29,7 +32,7 @@ async function main() {
   // Die Zeitgeber des Hosts sind unref() (Tests); der Container-Prozess soll
   // aber auch ohne Verbindung und ohne Zugangsdatei weiterlaufen.
   const keepAlive = setInterval(() => {}, 60 * 60 * 1000);
-  logger.info({ uid: process.getuid && process.getuid() }, 'edge: host running');
+  logger.info({ uid: process.getuid && process.getuid(), mode: host.mode }, 'edge: host running');
   const shutdown = async (signal) => {
     logger.info({ signal }, 'edge: shutting down');
     clearInterval(keepAlive);

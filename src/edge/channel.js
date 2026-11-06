@@ -1,14 +1,17 @@
 'use strict';
 
-// Kanal zum Server (Vertrag Abschnitt 1): WebSocket, immer vom Edge-
-// Container aus aufgebaut. GET ${serverUrl}/api/v1/gateway/edge/ws,
-// Authorization: Bearer <apiToken>, Subprotokoll gc-edge.v1, JSON-Textframes
-// ≤ 64 KB, Ping alle 20 s (Abbruch nach 60 s ohne Lebenszeichen),
+// Kanal zum Server (Vertrag Abschnitt 1): WebSocket gc-edge.v1, JSON-
+// Textframes ≤ 64 KB, Ping alle 20 s (Abbruch nach 60 s ohne Lebenszeichen),
 // Wiederverbindung mit Backoff 1 s … 60 s (mit Zufallsanteil).
 //
-// Der Edge-Container löst den Servernamen nicht selbst auf: der Gateway-
-// Container schreibt die Adressen in die Zugangsdatei, und genau diese
-// Adressen gibt auch die Netzgrenze frei. TLS prüft weiterhin den Namen.
+// Der Edge-Host verbindet sich nicht selbst mit dem Server, sondern über den
+// Gateway-Socket (credentials() → { socketPath }): ws+unix://…/gw.sock:
+// /api/v1/gateway/edge/ws. Das Gateway baut die Verbindung zum Server mit
+// seinem Token auf und reicht die Frames durch (bridge.js) – der Edge-
+// Container braucht dafür weder Netz noch Token. Lehnt der Server ab, meldet
+// das Gateway dieselbe HTTP-Statuszeile, die Backoff-Regeln bleiben gleich.
+// Der direkte Weg (serverUrl + apiToken, gepinnte Adressen) bleibt für das
+// Relay des Gateways und die Tests erhalten.
 
 const EventEmitter = require('node:events');
 const WebSocket = require('ws');
@@ -24,6 +27,12 @@ function wsUrl(serverUrl) {
   u.search = '';
   u.hash = '';
   return u.toString();
+}
+
+/** ws+unix-URL für einen Pfad am Unix-Socket des Gateways (ws: ws+unix:///abs/sock:/pfad). */
+function unixWsUrl(socketPath, reqPath) {
+  if (typeof socketPath !== 'string' || !socketPath.startsWith('/')) throw new Error('socketPath must be absolute');
+  return `ws+unix://${socketPath}:${reqPath}`;
 }
 
 /** lookup() für net/tls, das nur die vom Gateway gelieferten Adressen kennt. */
@@ -102,22 +111,26 @@ class EdgeChannel extends EventEmitter {
     let creds;
     try {
       creds = this.credentials();
-      if (!creds || !creds.serverUrl || !creds.apiToken) throw new Error('no credentials');
+      if (!creds || (!creds.socketPath && (!creds.serverUrl || !creds.apiToken))) throw new Error('no credentials');
     } catch (e) {
       this.lastError = e.message;
       this.scheduleRetry(this.timing.reconnectMaxMs);
       return;
     }
     let url;
-    try { url = wsUrl(creds.serverUrl); } catch (e) { this.lastError = e.message; this.scheduleRetry(this.timing.reconnectMaxMs); return; }
     const opts = {
-      headers: { Authorization: `Bearer ${creds.apiToken}` },
       maxPayload: LIMITS.frameBytes,
       handshakeTimeout: 15000,
       perMessageDeflate: false,
       followRedirects: false,
     };
-    if (Array.isArray(creds.serverAddrs) && creds.serverAddrs.length) opts.lookup = pinnedLookup(() => creds.serverAddrs);
+    if (creds.socketPath) {
+      url = unixWsUrl(creds.socketPath, WS_PATH);
+    } else {
+      try { url = wsUrl(creds.serverUrl); } catch (e) { this.lastError = e.message; this.scheduleRetry(this.timing.reconnectMaxMs); return; }
+      opts.headers = { Authorization: `Bearer ${creds.apiToken}` };
+      if (Array.isArray(creds.serverAddrs) && creds.serverAddrs.length) opts.lookup = pinnedLookup(() => creds.serverAddrs);
+    }
     let ws;
     try {
       ws = new this.WS(url, PROTOCOL, opts);
@@ -226,4 +239,4 @@ class EdgeChannel extends EventEmitter {
   }
 }
 
-module.exports = { EdgeChannel, wsUrl, pinnedLookup, backoffDelay, WS_PATH };
+module.exports = { EdgeChannel, wsUrl, unixWsUrl, pinnedLookup, backoffDelay, WS_PATH };

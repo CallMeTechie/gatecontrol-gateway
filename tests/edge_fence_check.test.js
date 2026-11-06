@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { checkFence, probe } = require('../src/edge/fence');
+const { checkFence, checkIsolation, checkBoundary, externalInterfaces, probe } = require('../src/edge/fence');
 
 const blocked = async () => ({ v4: 'EPERM', v6: 'ENETUNREACH', blocked: true });
 const open = async () => ({ v4: 'SENT', v6: 'SENT', blocked: false });
@@ -36,4 +36,32 @@ test('Probe: nur EPERM bei IPv4 zählt; IPv6 darf auch ohne Route sein', async (
   assert.strictEqual((await probe({ send: mk('EPERM', 'SENT') })).blocked, false);
   assert.strictEqual((await probe({ send: mk('ENETUNREACH', 'EPERM') })).blocked, false);
   assert.strictEqual((await probe({ send: mk('SENT', 'EPERM') })).blocked, false);
+});
+
+const LO = { lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true }, { address: '::1', family: 'IPv6', internal: true }] };
+const HOSTNET = { ...LO, eth0: [{ address: '192.168.1.20', family: 'IPv4', internal: false }] };
+const unreachable = async () => ({ v4: 'ENETUNREACH', v6: 'ENETUNREACH', blocked: false });
+
+test('Isolation (network_mode: none): nur Loopback und keine Route nach außen', async () => {
+  assert.deepStrictEqual(externalInterfaces(LO), []);
+  assert.deepStrictEqual(externalInterfaces(HOSTNET), ['eth0']);
+  assert.deepStrictEqual(await checkIsolation({ interfaces: () => LO, probeFn: unreachable }), { isolated: true, reason: null, interfaces: [] });
+  // eine Schnittstelle mit Adresse → kein isolierter Container
+  assert.strictEqual((await checkIsolation({ interfaces: () => HOSTNET, probeFn: unreachable })).reason, 'network_interfaces');
+  // keine Schnittstelle zu sehen, aber die Probe geht raus → nicht isoliert
+  assert.strictEqual((await checkIsolation({ interfaces: () => LO, probeFn: open })).reason, 'probe_sent');
+  assert.strictEqual((await checkIsolation({ interfaces: () => LO, probeFn: async () => ({ v4: 'ENETUNREACH', v6: 'SENT' }) })).reason, 'probe6_sent');
+});
+
+test('Freigabe: isoliert ohne Netzgrenze; im Host-Netz nur mit Netzgrenze (fail closed)', async () => {
+  const noFence = async () => ({ active: false, backend: null, reason: 'no_marker' });
+  const fenced = async () => ({ active: true, backend: 'nft', reason: null });
+  assert.deepStrictEqual(await checkBoundary({ interfaces: () => LO, probeFn: unreachable, fenceFn: noFence }),
+    { mode: 'isolated', active: true, backend: 'isolated', reason: null });
+  assert.deepStrictEqual(await checkBoundary({ interfaces: () => HOSTNET, probeFn: unreachable, fenceFn: noFence }),
+    { mode: 'fence', active: false, backend: null, reason: 'no_marker' });
+  assert.deepStrictEqual(await checkBoundary({ interfaces: () => HOSTNET, probeFn: blocked, fenceFn: fenced }),
+    { mode: 'fence', active: true, backend: 'nft', reason: null });
+  assert.deepStrictEqual(await checkBoundary({ interfaces: () => LO, probeFn: open, fenceFn: fenced }),
+    { mode: 'isolated', active: false, backend: null, reason: 'probe_sent' });
 });
