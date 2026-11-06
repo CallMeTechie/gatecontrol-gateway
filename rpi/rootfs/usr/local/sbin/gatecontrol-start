@@ -18,6 +18,8 @@
 #     vom Gateway geschrieben) oder – solange GateControl nichts entschieden hat –
 #     gatecontrol-hwdetect ein Funkmodul erkannt hat; docker compose up.
 #     Ein/aus und das Gerät bestimmt danach das Gateway (docs/radio.md).
+#     ki (lokale KI, docs/local-ai.md), wenn sie in GateControl eingeschaltet ist
+#     (gateway-state/ai.json, vom Gateway geschrieben).
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
@@ -158,6 +160,12 @@ zigbee_wanted() {
   [ -n "$ZIGBEE_DEVICE" ]
 }
 
+# Lokale KI gewünscht? gateway-state/ai.json (vom Gateway, {"want":…}); ohne Datei: nein.
+ai_wanted() {
+  local f="$GC_DIR/gateway-state/ai.json"
+  [ -r "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 99999)" -lt 4096 ] && grep -q '"want":true' "$f"
+}
+
 compose() {
   local args=(-f docker-compose.yml)
   # Hat update.sh nach einem fehlgeschlagenen Update auf das alte Image
@@ -210,6 +218,15 @@ main() {
     # deCONZ eines früheren Starts entfernen (Modul abgezogen / in GateControl aus)
     compose rm -s -f deconz >/dev/null 2>&1 || true
   fi
+  local ai=0
+  if ai_wanted; then
+    ai=1
+    gc_log "Lokale KI in GateControl eingeschaltet — Dienst ki wird gestartet"
+    svc+=(ki)
+  else
+    # ki eines früheren Starts entfernen (in GateControl aus; die Modelle bleiben im Volume)
+    compose rm -s -f ki >/dev/null 2>&1 || true
+  fi
   compose up -d --remove-orphans "${svc[@]}"
   if [ "$imported" = 1 ]; then
     compose up -d --force-recreate gateway
@@ -218,6 +235,7 @@ main() {
   local msg
   msg="Gateway läuft (Hostname $(hostname))."
   [ "$zigbee" = 1 ] && msg="$msg deCONZ/Phoscon: Port 8090."
+  [ "$ai" = 1 ] && msg="$msg Lokale KI: an."
   [ "$rc" = 2 ] && msg="$msg ACHTUNG: eine neue gateway.env war ungültig, die bisherige wird weiter verwendet."
   gc_status "OK" "$msg"
 }

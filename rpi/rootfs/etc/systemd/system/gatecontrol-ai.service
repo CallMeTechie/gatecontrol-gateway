@@ -1,0 +1,14 @@
+[Unit]
+Description=GateControl Gateway: Dienst ki anlegen (lokale KI in GateControl eingeschaltet)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/local-ai.md
+Requires=docker.service
+After=docker.service gatecontrol-gateway.service
+ConditionPathExists=/opt/gatecontrol-gateway/config/gateway.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gatecontrol-ai
+# erster Start lädt das Ollama-Image (≈ 3 GB)
+TimeoutStartSec=60min
+StandardOutput=journal
+StandardError=journal

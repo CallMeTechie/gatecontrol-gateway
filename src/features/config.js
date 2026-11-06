@@ -12,6 +12,7 @@ const { normalizeDns } = require('../dns/config');
 const { normalizeCache } = require('../cache/config');
 const { normalizePrint } = require('../print/config');
 const { normalizeRadio } = require('../radio/config');
+const { normalizeAi } = require('../ai/config');
 
 const DEFAULT_TARGETS = Object.freeze(['1.1.1.1', '9.9.9.9']);
 const SPEEDTEST_PLANS = new Set(['off', '4x', 'hourly']);
@@ -52,6 +53,8 @@ function normalizeFeatures(raw) {
   print.enabled = present && print.enabled;
   // Phase 3c, Schritt 2: Funk (fehlt es: Zigbee automatisch wie bisher im Pi-Image, Bluetooth aus)
   const radio = normalizeRadio(f.radio);
+  // Phase 3c, Schritt 3: Lokale KI (fehlt es: aus)
+  const ai = normalizeAi(f.ai);
 
   const targets = Array.isArray(iq.targets)
     ? [...new Set(iq.targets.filter((t) => typeof t === 'string' && isUsableTarget(t)))].slice(0, MAX_TARGETS)
@@ -85,6 +88,7 @@ function normalizeFeatures(raw) {
     cache,
     print,
     radio,
+    ai,
   };
 }
 
