@@ -19,6 +19,8 @@ jobs:
         with: { node-version: 20 }
       - run: |
           find src tests -name "*.js" -exec node --check {} +
+      - name: gc-blescan (Funk, natives Hilfsprogramm) übersetzen
+        run: gcc -O2 -Wall -Wextra -Werror -o "$RUNNER_TEMP/gc-blescan" native/gc-blescan.c
       - name: Install shellcheck
         run: sudo apt-get install -y shellcheck
       - name: Shellcheck scripts/

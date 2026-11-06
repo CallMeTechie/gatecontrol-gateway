@@ -21,7 +21,7 @@ startet das Gateway. Nach einigen Minuten erscheint es in GateControl als
 
 Einstellungen in settings.txt (NAME=WERT, ohne Anführungszeichen):
   HOSTNAME            Gerätename im Netz
-  ZIGBEE              auto | on | off (RaspBee II / ConBee, deCONZ)
+  ZIGBEE              auto | on | off (RaspBee II / ConBee, deCONZ; GateControl › Funk hat Vorrang)
   TIMEZONE            Zeitzone, z. B. Europe/Berlin
   WIFI_SSID           WLAN-Name (leer = kein WLAN; LAN-Kabel hat Vorrang)
   WIFI_PSK            WLAN-Passwort, 8–63 Zeichen (leer = offenes Netz)

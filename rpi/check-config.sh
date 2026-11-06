@@ -33,6 +33,7 @@ mapfile -t sh_files < <(
   ls rpi/*.sh rpi/tests/*.sh rpi/stage-gatecontrol/*.sh rpi/stage-gatecontrol/*/*.sh
   echo "$R/usr/local/sbin/gatecontrol-start"
   echo "$R/usr/local/sbin/gatecontrol-settings"
+  echo "$R/usr/local/sbin/gatecontrol-radio"
   echo "$R/usr/local/lib/gatecontrol/common.sh"
   echo "$R/etc/update-motd.d/60-gatecontrol"
 )
@@ -77,8 +78,7 @@ step "docker compose config"
 CDIR="$(mktemp -d)"
 sed "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" "$R/opt/gatecontrol-gateway/docker-compose.yml" >"$CDIR/docker-compose.yml"
 mkdir -p "$CDIR/config"
-(cd "$CDIR" && docker compose config -q && COMPOSE_PROFILES=zigbee GC_ZIGBEE_DEVICE=/dev/ttyACM0 docker compose config -q) \
-  && echo "ok (mit und ohne Profil zigbee)" || die "docker compose config"
+(cd "$CDIR" && docker compose config -q) && echo ok || die "docker compose config"
 # Gleiche Sicherheits-Optionen wie docker-compose.example.yml
 cp docker-compose.example.yml "$CDIR/example.yml"
 pick='.services.gateway | {network_mode, cap_drop, cap_add, read_only, user, devices, tmpfs, volumes: [.volumes[] | {target, read_only}]}'
@@ -106,6 +106,17 @@ enet="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json 
 [ "$enet" = none ] || die "edge: network_mode muss none sein (ist: $enet)"
 mimg="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -r '.services.mqtt.image')"
 [[ "$mimg" =~ ^eclipse-mosquitto:[0-9.]+(-alpine)?@sha256:[0-9a-f]{64}$ ]] || die "mqtt: Image nicht per Tag+Digest gepinnt ($mimg)"
+# deCONZ (docs/radio.md): wie im Beispiel (dort mit Profil zigbee), Wächter statt devices:, nur die drei tty-Majors
+pick='.services.deconz | {image, entrypoint, network_mode, device_cgroup_rules, devices, privileged, cap_add, healthcheck, environment, volumes: [.volumes[] | {type, source, target, read_only}]}'
+a="$(cd "$CDIR" && docker compose -f example.yml --profile zigbee config --format json | jq -S "$pick")"
+b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
+if [ "$a" = "$b" ]; then echo "ok: Dienst deconz wie in docker-compose.example.yml"; else
+  diff <(echo "$a") <(echo "$b") || true; die "Dienst deconz weicht von docker-compose.example.yml ab"
+fi
+echo "$b" | jq -e '.devices == null and .privileged == null and .device_cgroup_rules == ["c 166:* rmw", "c 188:* rmw", "c 204:* rmw"]' >/dev/null \
+  || die "Dienst deconz: nur die tty-Majors 166/188/204, kein devices:, nicht privileged"
+prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx deconz || true)"
+[ "$prof" = 0 ] || die "docker-compose.example.yml: deconz muss im Profil zigbee stehen (sonst lädt jeder das Image)"
 vpick='.volumes | with_entries(.value |= {driver_opts})'
 a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$vpick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"

@@ -14,7 +14,10 @@
 #  3. Hostname setzen (settings.txt HOSTNAME → GC_HOSTNAME in der env →
 #     Name aus dem Raspberry Pi Imager bleibt → gc-<Peer-Name>).
 #  4. Dienste wählen: gateway, edge + mqtt (settings.txt EDGE=on|off, Standard on),
-#     deconz je nach Erkennung durch gatecontrol-hwdetect; docker compose up.
+#     deconz, wenn Zigbee in GateControl eingeschaltet ist (gateway-state/radio.json,
+#     vom Gateway geschrieben) oder – solange GateControl nichts entschieden hat –
+#     gatecontrol-hwdetect ein Funkmodul erkannt hat; docker compose up.
+#     Ein/aus und das Gerät bestimmt danach das Gateway (docs/radio.md).
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
@@ -134,11 +137,7 @@ write_compose_env() {
   tmp="$(mktemp "$GC_DIR/.env.XXXXXX")"
   {
     echo "# Automatisch geschrieben von gatecontrol-start — Änderungen gehen beim nächsten Start verloren."
-    echo "# Zigbee an/aus: /boot/firmware/gatecontrol/settings.txt (ZIGBEE=auto|on|off)"
-    if [ -n "$dev" ]; then
-      echo "COMPOSE_PROFILES=zigbee"
-      echo "GC_ZIGBEE_DEVICE=$dev"
-    fi
+    echo "# Zigbee an/aus: in GateControl (Gateway › Funk)"
     if [ -n "$tz" ]; then echo "TZ=$tz"; fi
     if [ -n "$cache" ]; then echo "GC_CACHE_DIR=$cache"; fi
   } >"$tmp"
@@ -146,6 +145,17 @@ write_compose_env() {
   mv -f "$tmp" "$GC_DIR/.env"
   ZIGBEE_DEVICE="$dev"
   ZIGBEE_TYPE="$type"
+}
+
+# Zigbee gewünscht? gateway-state/radio.json (vom Gateway, {"zigbee":…,"want":…})
+# entscheidet; ohne Datei (erster Start, älteres Gateway) zählt die Erkennung.
+zigbee_wanted() {
+  local f="$GC_DIR/gateway-state/radio.json"
+  if [ -r "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 99999)" -lt 4096 ]; then
+    if grep -q '"want":true' "$f"; then return 0; fi
+    if grep -q '"want":false' "$f"; then return 1; fi
+  fi
+  [ -n "$ZIGBEE_DEVICE" ]
 }
 
 compose() {
@@ -187,11 +197,17 @@ main() {
   else
     svc+=("${EDGE_SERVICES[@]}")
   fi
-  if [ -n "$ZIGBEE_DEVICE" ]; then
-    gc_log "Zigbee: ${ZIGBEE_TYPE:-?} an $ZIGBEE_DEVICE — deCONZ wird gestartet (Phoscon: http://$(hostname).local:8090)"
+  local zigbee=0
+  if zigbee_wanted; then
+    zigbee=1
+    if [ -n "$ZIGBEE_DEVICE" ]; then
+      gc_log "Zigbee: ${ZIGBEE_TYPE:-?} an $ZIGBEE_DEVICE — deCONZ wird gestartet (Phoscon: http://$(hostname).local:8090)"
+    else
+      gc_log "Zigbee in GateControl eingeschaltet — deCONZ-Dienst wartet auf ein Funkmodul"
+    fi
     svc+=(deconz)
   else
-    # deCONZ eines früheren Starts entfernen (Modul abgezogen / ZIGBEE=off)
+    # deCONZ eines früheren Starts entfernen (Modul abgezogen / in GateControl aus)
     compose rm -s -f deconz >/dev/null 2>&1 || true
   fi
   compose up -d --remove-orphans "${svc[@]}"
@@ -201,7 +217,7 @@ main() {
 
   local msg
   msg="Gateway läuft (Hostname $(hostname))."
-  [ -n "$ZIGBEE_DEVICE" ] && msg="$msg deCONZ/Phoscon: Port 8090."
+  [ "$zigbee" = 1 ] && msg="$msg deCONZ/Phoscon: Port 8090."
   [ "$rc" = 2 ] && msg="$msg ACHTUNG: eine neue gateway.env war ungültig, die bisherige wird weiter verwendet."
   gc_status "OK" "$msg"
 }

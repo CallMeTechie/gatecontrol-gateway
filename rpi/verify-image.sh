@@ -106,7 +106,7 @@ grep -E '^(docker-ce|containerd\.io|docker-compose-plugin|cloud-init|unattended-
 
 echo "== systemd-Units aktiviert"
 for u in docker.service containerd.service gatecontrol-settings.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
-         gatecontrol-gateway-update.path gatecontrol-gateway-update.timer apt-daily-upgrade.timer; do
+         gatecontrol-gateway-update.path gatecontrol-gateway-update.timer gatecontrol-radio.path apt-daily-upgrade.timer; do
   check "$u" enabled "$u"
 done
 check "ssh NICHT aktiviert (nur über Imager oder SSH_AUTHORIZED_KEY)" not enabled ssh.service
@@ -114,7 +114,8 @@ check "serial-getty@ttyAMA0 maskiert" test "$(readlink "$R/etc/systemd/system/se
 
 echo "== Boot-Partition"
 check "config.txt: enable_uart=1" grep -qx 'enable_uart=1' "$B/config.txt"
-check "config.txt: dtoverlay=disable-bt" grep -qx 'dtoverlay=disable-bt' "$B/config.txt"
+check "config.txt: dtoverlay=miniuart-bt (RaspBee am PL011, Bluetooth am Mini-UART)" grep -qx 'dtoverlay=miniuart-bt,krnbt=on' "$B/config.txt"
+check "config.txt: fester Kerntakt für den Mini-UART" grep -qx 'core_freq_min=500' "$B/config.txt"
 check "config.txt: arm_64bit=1" grep -qx 'arm_64bit=1' "$B/config.txt"
 check "cmdline.txt: keine serielle Konsole" not grep -q 'console=serial0' "$B/cmdline.txt"
 check "cmdline.txt: root=PARTUUID" grep -q 'root=PARTUUID=' "$B/cmdline.txt"
@@ -125,7 +126,7 @@ check "Kernel für Pi 3/4 (kernel8.img)" test -s "$B/kernel8.img"
 check "Kernel für Pi 5 (kernel_2712.img)" test -s "$B/kernel_2712.img"
 check "Device Tree Pi 3 B+" test -s "$B/bcm2710-rpi-3-b-plus.dtb"
 check "Device Tree Pi 4 B" test -s "$B/bcm2711-rpi-4-b.dtb"
-check "Overlay disable-bt" test -s "$B/overlays/disable-bt.dtbo"
+check "Overlay miniuart-bt" test -s "$B/overlays/miniuart-bt.dtbo"
 
 echo "== Sicherheit"
 check "kein Konto mit Passwort-Hash (keine Standard-Passwörter)" no_password_hashes "$R/etc/shadow"
