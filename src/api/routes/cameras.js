@@ -10,6 +10,7 @@
 
 const fs = require('node:fs');
 const express = require('express');
+const { rateLimit } = require('express-rate-limit');
 const { ID_RE, EVENT_ID_RE } = require('../../cameras/config');
 const fmp4 = require('../../cameras/fmp4');
 
@@ -38,8 +39,14 @@ function range(h, size) {
   return { start, end };
 }
 
-function createCamerasRouter({ featureMgr }) {
+// Alle Abrufe kommen vom Server (Tunnel-Adresse, ein Topf): Live-HLS holt je Zuschauer
+// etwa einmal pro Sekunde Liste oder Segment – 1800 je Minute reichen für viele Zuschauer
+// und bremsen einen Server, der durchdreht.
+const LIMIT = { windowMs: 60_000, limit: 1800 };
+
+function createCamerasRouter({ featureMgr, limit = LIMIT }) {
   const router = express.Router();
+  router.use('/cameras', rateLimit({ ...limit, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'rate_limited' } }));
   const cams = () => {
     const c = featureMgr.cameras;
     if (!c || !c.cfg || !c.cfg.enabled) throw Object.assign(new Error('off'), { code: 'feature_disabled', status: 503 });

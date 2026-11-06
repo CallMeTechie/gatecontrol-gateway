@@ -230,6 +230,19 @@ describe('cameras: playlist, range', () => {
   });
 });
 
+describe('cameras: mgmt rate limit', () => {
+  it('answers 429 once the limit is used up', async () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createCamerasRouter({ featureMgr: { cameras: { cfg: { enabled: true }, live: () => ({ ready: false }) } }, limit: { windowMs: 60_000, limit: 2 } }));
+    const srv = await new Promise((r) => { const x = app.listen(0, '127.0.0.1', () => r(x)); });
+    const u = `http://127.0.0.1:${srv.address().port}/api/cameras/live`;
+    const post = () => fetch(u, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"id":"c0123456789abcde"}' }).then((r) => r.status);
+    assert.deepEqual([await post(), await post(), await post()], [200, 200, 429]);
+    srv.close();
+  });
+});
+
 describe('cameras: ring, clips and the kameras watcher (real ffmpeg)', { skip: !HAS_FFMPEG && 'ffmpeg not installed' }, () => {
   let dir; let child; let svc; let app; let srv; let base;
   const id = 'c0123456789abcde';

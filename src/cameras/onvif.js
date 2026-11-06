@@ -35,7 +35,12 @@ class OnvifError extends Error {
 
 const esc = (s) => String(s).replace(/[<>&"']/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[c]));
 
-/** WS-Security-Kopf (UsernameToken, PasswordDigest = Base64(SHA1(Nonce + Created + Passwort))). */
+/**
+ * WS-Security-Kopf (UsernameToken, PasswordDigest = Base64(SHA1(Nonce + Created + Passwort))).
+ * Das ist kein Speichern eines Passworts, sondern die Anmeldung, die ONVIF vorschreibt
+ * (OASIS WSS UsernameToken Profile 1.0 §3.1, ONVIF Core §5.9.4): ein frischer Nonce und
+ * die Uhrzeit je Aufruf, der Wert geht nur an die Kamera. SHA-1 ist dort festgelegt.
+ */
 function security(user, password, offsetMs = 0) {
   if (!user) return '';
   const nonce = crypto.randomBytes(16);

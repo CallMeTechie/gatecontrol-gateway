@@ -29,7 +29,11 @@ function checkToken(body, user, password) {
 function checkDigest(h, user, password, method, realm, nonce) {
   if (!h || !h.startsWith('Digest ')) return false;
   const p = {};
-  h.slice(7).replace(/(\w+)=(?:"([^"]*)"|([^,\s]*))/g, (m, k, a, b) => { p[k] = a !== undefined ? a : b; });
+  for (const part of h.slice(7).split(',')) {
+    const i = part.indexOf('=');
+    if (i <= 0) continue;
+    p[part.slice(0, i).trim()] = part.slice(i + 1).trim().replace(/^"|"$/g, '');
+  }
   const H = (s) => crypto.createHash('md5').update(s).digest('hex');
   const ha1 = H(`${user}:${realm}:${password}`);
   const ha2 = H(`${method}:${p.uri}`);
