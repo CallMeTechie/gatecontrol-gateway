@@ -27,7 +27,7 @@ const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
 const WebSocket = require('ws');
-const { PROTOCOL, LIMITS, TIMING, SOCKET_NAME, RPC_PATH, RPC_PROTOCOL, RPC_MAX_BYTES, PACKAGES_PATH, ID_RE, VERSION_RE } = require('./constants');
+const { PROTOCOL, LIMITS, TIMING, SOCKET_NAME, RPC_PATH, RPC_PROTOCOL, RPC_MAX_BYTES, ID_RE, VERSION_RE } = require('./constants');
 const { wsUrl, pinnedLookup, WS_PATH } = require('./channel');
 const { parseState } = require('./protocol');
 const { validateCaps, intersectCaps } = require('./manifest');
@@ -42,7 +42,8 @@ const MAX_INFLIGHT = 128; // gleichzeitige RPC-Aufrufe insgesamt (der Edge-Host 
 const PUSH_BUFFER_MAX = 16 * 1024 * 1024; // darüber werden Ereignisse verworfen (Edge liest nicht)
 const SENDABLE_CLOSE = new Set([1000, 1001, 1002, 1003, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014]);
 const MQTT_OFF = { enabled: false, tls: false, accounts: [], pluginTopics: {} };
-const PACKAGE_RE = new RegExp(`^${PACKAGES_PATH.replace(/\//g, '\\/')}\\/([^/?]+)\\/([^/?]+)$`);
+// PACKAGES_PATH + /<id>/<version> (als Literal; tests/edge_bridge.test.js prüft die Übereinstimmung)
+const PACKAGE_RE = /^\/api\/v1\/gateway\/edge\/packages\/([^/?]+)\/([^/?]+)$/;
 
 function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 function validId(id) { return typeof id === 'string' && id.length >= 2 && id.length <= 64 && ID_RE.test(id); }
@@ -401,4 +402,4 @@ class EdgeBridge {
   }
 }
 
-module.exports = { EdgeBridge, MQTT_APIS, closeCode };
+module.exports = { EdgeBridge, MQTT_APIS, PACKAGE_RE, closeCode };

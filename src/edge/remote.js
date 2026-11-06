@@ -105,7 +105,7 @@ class GatewayRpc extends EventEmitter {
   onMessage(m) {
     switch (m.t) {
       case 'result': {
-        const p = this.pending.get(m.id);
+        const p = Number.isInteger(m.id) ? this.pending.get(m.id) : undefined;
         if (!p) return;
         this.pending.delete(m.id);
         clearTimeout(p.timer);

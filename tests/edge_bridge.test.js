@@ -25,6 +25,15 @@ let rpc;
 let sock;
 const pushes = [];
 
+// Antwort einem offenen Aufruf zuordnen: nur ganzzahlige ids, die dieser Client selbst vergeben hat
+function settle(pending, m) {
+  if (!Number.isInteger(m.id)) return;
+  const done = pending.get(m.id);
+  if (typeof done !== 'function') return;
+  pending.delete(m.id);
+  done(m);
+}
+
 function rpcClient() {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(unixWsUrl(sock, RPC_PATH), RPC_PROTOCOL);
@@ -32,7 +41,7 @@ function rpcClient() {
     let n = 0;
     ws.on('message', (d) => {
       const m = JSON.parse(d);
-      if (m.t === 'result' && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); }
+      if (m.t === 'result') settle(pending, m);
       if (m.t === 'push') pushes.push(m);
     });
     ws.call = (plugin, api, args, caps) => new Promise((r) => { const id = ++n; pending.set(id, r); ws.send(JSON.stringify({ t: 'call', id, plugin, api, args, caps })); });
@@ -63,6 +72,14 @@ after(async () => {
   await bridge.stop();
   server.close();
   fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('Paket-Pfad: das Muster der Bridge passt zu PACKAGES_PATH', () => {
+  const { PACKAGE_RE } = require('../src/edge/bridge');
+  const { PACKAGES_PATH } = require('../src/edge/constants');
+  assert.deepStrictEqual(PACKAGE_RE.exec(`${PACKAGES_PATH}/shelly/1.2.3`).slice(1), ['shelly', '1.2.3']);
+  assert.strictEqual(PACKAGE_RE.exec(`${PACKAGES_PATH}/shelly/1.2.3/x`), null);
+  assert.strictEqual(PACKAGE_RE.exec(`${PACKAGES_PATH}/shelly`), null);
 });
 
 test('Socket-Datei: nur Besitzer und Gruppe (0660)', () => {
@@ -208,7 +225,7 @@ test('MQTT im Gateway: Broker-Dateien aus dem mitgelesenen Sollzustand (0640, Pf
     const pending = new Map();
     let n = 0;
     const infos = [];
-    w.on('message', (d) => { const m = JSON.parse(d); if (m.t === 'info') infos.push(m); if (m.t === 'result') { pending.get(m.id)(m); pending.delete(m.id); } });
+    w.on('message', (d) => { const m = JSON.parse(d); if (m.t === 'info') infos.push(m); if (m.t === 'result') settle(pending, m); });
     w.call = (plugin, api, args, caps) => new Promise((r) => { const id = ++n; pending.set(id, r); w.send(JSON.stringify({ t: 'call', id, plugin, api, args, caps })); });
     w.infos = infos;
     w.once('open', () => resolve(w));
