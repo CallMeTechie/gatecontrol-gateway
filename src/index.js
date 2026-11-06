@@ -34,6 +34,9 @@ async function main() {
     logger.info({ signal }, 'Shutting down');
     try {
       ctx?.hb?.stop();
+      // Tell the server first (≤ 2 s): it shows "Update läuft" / "startet neu"
+      // right away instead of "online" until the heartbeat goes stale.
+      await require('./shutdownNotice').notifyGoingDown(ctx?.config);
       await ctx?.edgeLink?.stop();
       ctx?.featureMgr?.stop();
       ctx?.poller?.stop();
