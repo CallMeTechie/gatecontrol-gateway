@@ -1,0 +1,30 @@
+#!/bin/bash
+# GateControl Gateway (Raspberry-Pi-Image) — Dienst ki (lokale KI) auf Wunsch
+# des Gateways anlegen (docs/local-ai.md).
+#
+# Wird die lokale KI in GateControl eingeschaltet, während der Container ki
+# nicht läuft, legt der Gateway-Container gateway-state/ai-start an.
+# gatecontrol-ai.path startet dann dieses Skript: Flag entfernen,
+# `docker compose up -d ki` (beim ersten Mal mit Image-Download). Ein- und
+# ausgeschaltet wird danach allein über die Steuerdatei des Gateways
+# (ai-ctl/run) – hier passiert nichts weiter.
+set -euo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
+. "${GC_LIB:-/usr/local/lib/gatecontrol}/common.sh"
+
+FLAG="$GC_DIR/gateway-state/ai-start"
+
+main() {
+  [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen" >&2; exit 1; }
+  [ -e "$FLAG" ] || exit 0
+  # zuerst verbrauchen: ein neuer Wunsch des Gateways legt das Flag neu an
+  rm -f -- "$FLAG"
+  [ -s "$GC_DIR/config/gateway.env" ] || exit 0
+  local args=(-f docker-compose.yml)
+  [ -f "$GC_DIR/docker-compose.rollback.yml" ] && args+=(-f docker-compose.rollback.yml)
+  gc_log "Lokale KI in GateControl eingeschaltet — Dienst ki wird angelegt"
+  (cd "$GC_DIR" && docker compose "${args[@]}" up -d --no-deps ki)
+}
+
+main "$@"

@@ -2,6 +2,14 @@
 
 const express = require('express');
 const { normalizeMac } = require('../../features/macs');
+const { parseChat } = require('../../ai/ai');
+
+// nur diese Route bekommt einen großen Body (Mails, Dokumente); alle anderen bleiben bei 16 KB (server.js)
+const AI_CHAT_PATH = '/api/ai/chat';
+const AI_CHAT_LIMIT = '2mb';
+const AI_WAIT_MS = 10_000;
+const AI_FLUSH_MS = 250;
+const AI_ANSWER_MAX = 256 * 1024;
 
 // Management-Aufrufe des Servers (über den Tunnel, X-Gateway-Token):
 //   POST /api/netwatch/scan     { ports?: true }  – „Jetzt scannen“ (Phase 3a)
@@ -18,6 +26,11 @@ const { normalizeMac } = require('../../features/macs');
 //   POST /api/radio/zigbee/pair { seconds? }      – Zigbee-Geräte anlernen (60…254 s, Standard 180)
 //   POST /api/radio/zigbee/unlock {}              – deCONZ 60 s für neue Schlüssel öffnen (Smart Home)
 //   POST /api/radio/zigbee/retry {}               – deCONZ-Schlüssel neu holen
+//   POST /api/ai/status         {}                – Lokale KI: frischer Zustand (Phase 3c, Schritt 3, docs/local-ai.md)
+//   POST /api/ai/pull           { model }         – Modell herunterladen (Fortschritt über /api/ai/status)
+//   POST /api/ai/pull/cancel    {}                – Download abbrechen
+//   POST /api/ai/delete         { model }         – Modell löschen
+//   POST /api/ai/chat           { model, system, messages, … } – Antwort als NDJSON-Strom (Body ≤ 2 MB)
 // Aufträge antworten sofort (202); das Ergebnis kommt über die normalen Berichte.
 function reply(res, outcome, busyError) {
   if (outcome === 'accepted') return res.status(202).json({ accepted: true });
@@ -104,7 +117,78 @@ function createFeaturesRouter({ featureMgr }) {
   router.post('/radio/zigbee/retry', async (req, res) => {
     zigbeeReply(res, radio().requestRetry ? await radio().requestRetry() : 'disabled');
   });
+
+  // Phase 3c, Schritt 3: Lokale KI (src/ai/ai.js)
+  const ai = () => featureMgr.ai || {};
+  const aiReply = (res, r) => {
+    if (r === 'accepted') return res.status(202).json({ accepted: true });
+    if (r === 'invalid_model') return res.status(400).json({ error: r });
+    if (r === 'not_found') return res.status(404).json({ error: r });
+    if (r === 'not_running' || r === 'pull_running' || r === 'lan_source' || r === 'no_pull') return res.status(409).json({ error: r });
+    if (r === 'failed') return res.status(502).json({ error: 'ai_failed' });
+    return res.status(503).json({ error: 'feature_disabled' });
+  };
+  router.post('/ai/status', async (req, res) => {
+    if (!ai().status || !ai().cfg || !ai().cfg.enabled) return res.status(503).json({ error: 'feature_disabled' });
+    return res.json({ ai: await ai().status() });
+  });
+  router.post('/ai/pull', (req, res) => {
+    aiReply(res, ai().requestPull ? ai().requestPull(req.body && req.body.model) : 'disabled');
+  });
+  router.post('/ai/pull/cancel', (req, res) => {
+    aiReply(res, ai().cancelPull ? ai().cancelPull() : 'disabled');
+  });
+  router.post('/ai/delete', async (req, res) => {
+    const r = ai().removeModel ? await ai().removeModel(req.body && req.body.model) : 'disabled';
+    if (r === 'deleted') return res.json({ deleted: true });
+    return aiReply(res, r);
+  });
+  router.post('/ai/chat', express.json({ limit: AI_CHAT_LIMIT }), async (req, res) => {
+    const svc = ai();
+    if (!svc.chat) return res.status(503).json({ error: 'feature_disabled' });
+    const q = parseChat(req.body);
+    if (!q) return res.status(400).json({ error: 'invalid_request' });
+    const why = svc.canChat();
+    if (why === 'busy') return res.status(429).json({ error: 'busy' });
+    if (why === 'not_running') return res.status(409).json({ error: 'not_running' });
+    if (why) return res.status(503).json({ error: 'feature_disabled' });
+    // ab hier der Strom: eine JSON-Zeile je Ereignis (docs/local-ai.md §3)
+    const ctrl = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) ctrl.abort(); });
+    res.status(200).set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    const write = (o) => { if (!res.writableEnded && !res.destroyed) res.write(JSON.stringify(o) + '\n'); };
+    const started = Date.now();
+    let pending = '';
+    let size = 0;
+    let gotText = false;
+    let flushTimer = null;
+    const flush = () => { flushTimer = null; if (pending) { write({ d: pending }); pending = ''; } };
+    const wait = setInterval(() => { if (!gotText) write({ wait: 1 }); }, AI_WAIT_MS);
+    try {
+      const r = await svc.chat(q, {
+        signal: ctrl.signal,
+        onDelta: (piece) => {
+          size += Buffer.byteLength(piece);
+          if (size > AI_ANSWER_MAX) throw Object.assign(new Error('answer too large'), { code: 'too_large' });
+          gotText = true;
+          pending += piece;
+          if (!flushTimer) flushTimer = setTimeout(flush, AI_FLUSH_MS);
+        },
+      });
+      clearTimeout(flushTimer);
+      flush();
+      write({ done: true, model: r.model, inputTokens: r.inputTokens, outputTokens: r.outputTokens, finish: r.finish, ms: Date.now() - started });
+    } catch (e) {
+      clearTimeout(flushTimer);
+      const code = e && typeof e.code === 'string' && /^[a-z0-9_]{1,32}$/.test(e.code) ? e.code : 'error';
+      write({ error: code, message: String((e && e.message) || code).slice(0, 200) });
+    } finally {
+      clearInterval(wait);
+      if (!res.writableEnded) res.end();
+    }
+  });
   return router;
 }
 
-module.exports = { createFeaturesRouter };
+module.exports = { createFeaturesRouter, AI_CHAT_PATH };

@@ -14,7 +14,10 @@ function createApiServer({ bindIp, port, expectedToken, routerFactories = {} }) 
 
   const app = express();
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '16kb' }));
+  // 16 KB für alles – außer /api/ai/chat (Lokale KI, eigener Parser mit 2 MB
+  // nach der Anmeldung, src/api/routes/features.js)
+  const json16 = express.json({ limit: '16kb' });
+  app.use((req, res, next) => (req.path === '/api/ai/chat' ? next() : json16(req, res, next)));
 
   // Health endpoint — must be registered BEFORE the auth-guarded /api mount,
   // otherwise the auth middleware on /api/* rejects the probe with 401.

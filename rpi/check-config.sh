@@ -21,6 +21,8 @@ step "versions.env: Pins"
 [[ "$PI_GEN_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "PI_GEN_COMMIT ist kein voller Commit-Hash"
 [[ "$DOCKER_GPG_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]] || die "DOCKER_GPG_FINGERPRINT ungültig"
 [[ "$DECONZ_IMAGE" =~ ^deconzcommunity/deconz:[0-9.]+@sha256:[0-9a-f]{64}$ ]] || die "DECONZ_IMAGE nicht per Tag+Digest gepinnt"
+[[ "$OLLAMA_IMAGE" =~ ^ollama/ollama:[0-9.]+@sha256:[0-9a-f]{64}$ ]] || die "OLLAMA_IMAGE nicht per Tag+Digest gepinnt"
+grep -qF "image: $OLLAMA_IMAGE" docker-compose.example.yml || die "OLLAMA_IMAGE weicht von docker-compose.example.yml ab"
 [[ "$BUILD_CONTAINER" =~ @sha256:[0-9a-f]{64}$ ]] || die "BUILD_CONTAINER nicht per Digest gepinnt"
 echo "$DOCKER_GPG_SHA256  rpi/stage-gatecontrol/00-docker/files/docker.asc" | sha256sum -c - || die "docker.asc: SHA-256 passt nicht"
 GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
@@ -34,6 +36,7 @@ mapfile -t sh_files < <(
   echo "$R/usr/local/sbin/gatecontrol-start"
   echo "$R/usr/local/sbin/gatecontrol-settings"
   echo "$R/usr/local/sbin/gatecontrol-radio"
+  echo "$R/usr/local/sbin/gatecontrol-ai"
   echo "$R/usr/local/lib/gatecontrol/common.sh"
   echo "$R/etc/update-motd.d/60-gatecontrol"
 )
@@ -76,7 +79,7 @@ rm -rf "$VROOT"
 
 step "docker compose config"
 CDIR="$(mktemp -d)"
-sed "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" "$R/opt/gatecontrol-gateway/docker-compose.yml" >"$CDIR/docker-compose.yml"
+sed -e "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" -e "s|@OLLAMA_IMAGE@|$OLLAMA_IMAGE|" "$R/opt/gatecontrol-gateway/docker-compose.yml" >"$CDIR/docker-compose.yml"
 mkdir -p "$CDIR/config"
 (cd "$CDIR" && docker compose config -q) && echo ok || die "docker compose config"
 # Gleiche Sicherheits-Optionen wie docker-compose.example.yml
@@ -117,8 +120,20 @@ echo "$b" | jq -e '.devices == null and .privileged == null and .device_cgroup_r
   || die "Dienst deconz: nur die tty-Majors 166/188/204, kein devices:, nicht privileged"
 prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx deconz || true)"
 [ "$prof" = 0 ] || die "docker-compose.example.yml: deconz muss im Profil zigbee stehen (sonst lädt jeder das Image)"
+# Lokale KI (docs/local-ai.md): wie im Beispiel (dort mit Profil ki), nur 127.0.0.1, Vorrang für das Gateway
+pick='.services.ki | {image, entrypoint, network_mode, cpu_shares, oom_score_adj, devices, privileged, cap_add, healthcheck, environment, volumes: [.volumes[] | {type, source, target, read_only}]}'
+a="$(cd "$CDIR" && docker compose -f example.yml --profile ki config --format json | jq -S "$pick")"
+b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
+if [ "$a" = "$b" ]; then echo "ok: Dienst ki wie in docker-compose.example.yml"; else
+  diff <(echo "$a") <(echo "$b") || true; die "Dienst ki weicht von docker-compose.example.yml ab"
+fi
+echo "$b" | jq -e '.devices == null and .privileged == null and .cap_add == null and (.environment.OLLAMA_HOST | startswith("127.0.0.1:"))' >/dev/null \
+  || die "Dienst ki: nur 127.0.0.1, keine Geräte, nicht privileged"
+prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx ki || true)"
+[ "$prof" = 0 ] || die "docker-compose.example.yml: ki muss im Profil ki stehen (sonst lädt jeder das ≈ 3-GB-Image)"
 vpick='.volumes | with_entries(.value |= {driver_opts})'
-a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$vpick")"
+# ki-models gehört nur dem Dienst ki (Profil ki im Beispiel)
+a="$(cd "$CDIR" && docker compose -f example.yml --profile ki config --format json | jq -S "$vpick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"
 if [ "$a" = "$b" ]; then echo "ok: Volumes wie in docker-compose.example.yml"; else
   diff <(echo "$a") <(echo "$b") || true; die "Volumes weichen von docker-compose.example.yml ab"

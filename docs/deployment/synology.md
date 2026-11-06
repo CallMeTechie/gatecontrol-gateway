@@ -140,6 +140,19 @@ startet kein Edge-Teil (fail closed), und GateControl zeigt „Compose-Datei
 veraltet“. Statt das Modul von Hand zu laden: die Compose-Datei wie oben aus
 GateControl holen.
 
+## Lokale KI
+
+Schaltet man in GateControl die **lokale KI** für dieses Gateway ein
+(Einstellungen › Erweiterungen › KI-Anbieter oder Gateway › Funktionen,
+[docs/local-ai.md](../local-ai.md)), braucht die NAS einmal die aktuelle
+Compose-Datei mit dem Dienst `ki` (Ollama). Fehlt er, zeigt GateControl bei der
+Zeile „Lokale KI“ den Knopf **„docker-compose.yml herunterladen“** – dann wie oben
+unter „Compose-Datei aus GateControl holen“ (Projekt stoppen, YAML ersetzen, neu
+erstellen). Das Ollama-Image ist ≈ 3 GB groß, jedes Modell 1–6 GB (Volume
+`ki-models`); beides kommt von Docker Hub bzw. `registry.ollama.ai`. Die
+Grafikkarte nutzt der Dienst nicht – auf einer NAS ohne GPU antwortet ein
+3B-Modell in einigen Sekunden bis Minuten.
+
 ## DSM 7.0/7.1 (Legacy)
 
 Container Manager auf älteren DSM-Versionen hat eingeschränkten docker-compose-Support. Empfohlen: Standalone Docker via SSH:

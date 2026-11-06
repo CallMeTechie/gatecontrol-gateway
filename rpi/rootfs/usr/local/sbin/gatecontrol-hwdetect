@@ -351,6 +351,8 @@ def hardware_profile(zigbee):
         # dieses Image legt den deCONZ-Dienst auf Wunsch des Gateways an
         # (gateway-state/radio-start → gatecontrol-radio.path, docs/radio.md)
         "radio_start": True,
+        # ebenso den Dienst ki der lokalen KI (gateway-state/ai-start → gatecontrol-ai.path, docs/local-ai.md)
+        "ai_start": True,
         "detected_at": int(time.time() * 1000),
     }
 
