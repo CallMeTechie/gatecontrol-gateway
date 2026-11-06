@@ -51,6 +51,11 @@ Der 3 B+ reicht für Gateway + deCONZ, hat aber Grenzen:
   booten. Das schont die SD-Karte und ist deutlich schneller.
 - Spätere Zusatzfunktionen des Gateways laufen grundsätzlich auch hier; bei
   schwacher Hardware gibt es einen Hinweis, aber kein Verbot.
+- **Lokale KI** ([docs/local-ai.md](../local-ai.md)): mit 1 GB RAM passt kein Modell
+  sinnvoll – GateControl zeigt das als Hinweis und empfiehlt einen vorhandenen
+  KI-Server im Heimnetz (z. B. Ollama oder LM Studio auf einem PC), den der Pi
+  nur weiterleitet. Auf einem Pi 4/5 mit 4–8 GB geht ein kleines Modell
+  (Llama 3.2 1B/3B), langsam (wenige Wörter je Sekunde).
 
 ---
 
@@ -257,6 +262,7 @@ sudo gatecontrol-start
 | **Sicherheitsupdates OS** | `unattended-upgrades` spielt täglich die Debian-Sicherheitsupdates und neue Docker-Engine-Versionen ein. Docker läuft mit `live-restore`, die Container laufen dabei weiter. Kein automatischer Neustart. |
 | **Kernel/Firmware** (Raspberry-Pi-Archiv) | nicht automatisch: gelegentlich `sudo apt update && sudo apt full-upgrade && sudo reboot`. Automatisch: in `/etc/apt/apt.conf.d/52gatecontrol-unattended-upgrades` die Zeile `"origin=Raspberry Pi Foundation,codename=${distro_codename},label=Raspberry Pi Foundation";` ergänzen. |
 | **deCONZ** | Version steht fest im Image (Tag + Digest in `docker-compose.yml`). Neuere Versionen kommen mit neueren Images; von Hand: die `image:`-Zeile des Dienstes `deconz` ändern, dann `sudo gatecontrol-start`. |
+| **Lokale KI (Ollama)** | wie deCONZ: Version fest im Image (Dienst `ki`). Der Dienst wird nur angelegt, wenn die lokale KI in GateControl eingeschaltet ist ([docs/local-ai.md](../local-ai.md)); die Modelle lädt GateControl. |
 | **neues Image** | nicht nötig – ein laufender Pi bleibt über die Wege oben aktuell. |
 
 ---

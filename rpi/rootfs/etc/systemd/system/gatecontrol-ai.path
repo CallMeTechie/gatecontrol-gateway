@@ -1,0 +1,10 @@
+[Unit]
+Description=GateControl Gateway: Dienst ki (lokale KI) auf Wunsch des Gateways anlegen
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/local-ai.md
+
+[Path]
+PathExists=/opt/gatecontrol-gateway/gateway-state/ai-start
+Unit=gatecontrol-ai.service
+
+[Install]
+WantedBy=multi-user.target
