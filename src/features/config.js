@@ -13,6 +13,7 @@ const { normalizeCache } = require('../cache/config');
 const { normalizePrint } = require('../print/config');
 const { normalizeRadio } = require('../radio/config');
 const { normalizeAi } = require('../ai/config');
+const { normalizeCameras } = require('../cameras/config');
 
 const DEFAULT_TARGETS = Object.freeze(['1.1.1.1', '9.9.9.9']);
 const SPEEDTEST_PLANS = new Set(['off', '4x', 'hourly']);
@@ -55,6 +56,8 @@ function normalizeFeatures(raw) {
   const radio = normalizeRadio(f.radio);
   // Phase 3c, Schritt 3: Lokale KI (fehlt es: aus)
   const ai = normalizeAi(f.ai);
+  // Phase 3c, Schritt 4: Kameras (fehlt es: aus)
+  const cameras = normalizeCameras(f.cameras);
 
   const targets = Array.isArray(iq.targets)
     ? [...new Set(iq.targets.filter((t) => typeof t === 'string' && isUsableTarget(t)))].slice(0, MAX_TARGETS)
@@ -89,6 +92,7 @@ function normalizeFeatures(raw) {
     print,
     radio,
     ai,
+    cameras,
   };
 }
 

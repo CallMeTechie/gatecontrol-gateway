@@ -20,6 +20,8 @@
 #     Ein/aus und das Gerät bestimmt danach das Gateway (docs/radio.md).
 #     ki (lokale KI, docs/local-ai.md), wenn sie in GateControl eingeschaltet ist
 #     (gateway-state/ai.json, vom Gateway geschrieben).
+#     kameras (Kameras im Heimnetz, docs/cameras.md), wenn sie in GateControl
+#     eingeschaltet sind (gateway-state/cameras.json, vom Gateway geschrieben).
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
@@ -166,6 +168,12 @@ ai_wanted() {
   [ -r "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 99999)" -lt 4096 ] && grep -q '"want":true' "$f"
 }
 
+# Kameras gewünscht? gateway-state/cameras.json (vom Gateway, {"want":…}); ohne Datei: nein.
+cameras_wanted() {
+  local f="$GC_DIR/gateway-state/cameras.json"
+  [ -r "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 99999)" -lt 4096 ] && grep -q '"want":true' "$f"
+}
+
 compose() {
   local args=(-f docker-compose.yml)
   # Hat update.sh nach einem fehlgeschlagenen Update auf das alte Image
@@ -227,6 +235,15 @@ main() {
     # ki eines früheren Starts entfernen (in GateControl aus; die Modelle bleiben im Volume)
     compose rm -s -f ki >/dev/null 2>&1 || true
   fi
+  local cams=0
+  if cameras_wanted; then
+    cams=1
+    gc_log "Kameras in GateControl eingeschaltet — Dienst kameras wird gestartet"
+    svc+=(kameras)
+  else
+    # kameras eines früheren Starts entfernen (in GateControl aus; die Clips bleiben im Volume)
+    compose rm -s -f kameras >/dev/null 2>&1 || true
+  fi
   compose up -d --remove-orphans "${svc[@]}"
   if [ "$imported" = 1 ]; then
     compose up -d --force-recreate gateway
@@ -236,6 +253,7 @@ main() {
   msg="Gateway läuft (Hostname $(hostname))."
   [ "$zigbee" = 1 ] && msg="$msg deCONZ/Phoscon: Port 8090."
   [ "$ai" = 1 ] && msg="$msg Lokale KI: an."
+  [ "$cams" = 1 ] && msg="$msg Kameras: an."
   [ "$rc" = 2 ] && msg="$msg ACHTUNG: eine neue gateway.env war ungültig, die bisherige wird weiter verwendet."
   gc_status "OK" "$msg"
 }

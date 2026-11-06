@@ -35,6 +35,7 @@ const { EdgeLink } = require('./edge/gatewayLink');
 const { createFeatureManager } = require('./features/manager');
 const { configHash } = require('./features/config');
 const { createFeaturesRouter } = require('./api/routes/features');
+const { createCamerasRouter } = require('./api/routes/cameras');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
 
@@ -187,6 +188,7 @@ async function bootstrap() {
         mergeRouter.use(createSelfUpdateRouter({ stateDir: config.stateDir }));
         mergeRouter.use(createLanScanRouter({ scanMgr, defaultGatewayIp }));
         mergeRouter.use(createFeaturesRouter({ featureMgr }));
+        mergeRouter.use(createCamerasRouter({ featureMgr }));
         return mergeRouter;
       },
     },

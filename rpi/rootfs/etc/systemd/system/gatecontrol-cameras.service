@@ -1,0 +1,14 @@
+[Unit]
+Description=GateControl Gateway: Dienst kameras anlegen (Kameras in GateControl eingeschaltet)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/cameras.md
+Requires=docker.service
+After=docker.service gatecontrol-gateway.service
+ConditionPathExists=/opt/gatecontrol-gateway/config/gateway.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gatecontrol-cameras
+# erster Start lädt das ffmpeg-Image (≈ 80 MB)
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal

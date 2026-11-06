@@ -353,6 +353,8 @@ def hardware_profile(zigbee):
         "radio_start": True,
         # ebenso den Dienst ki der lokalen KI (gateway-state/ai-start → gatecontrol-ai.path, docs/local-ai.md)
         "ai_start": True,
+        # ebenso den Dienst kameras (gateway-state/cameras-start → gatecontrol-cameras.path, docs/cameras.md)
+        "cameras_start": True,
         "detected_at": int(time.time() * 1000),
     }
 

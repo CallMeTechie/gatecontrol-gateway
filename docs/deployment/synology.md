@@ -164,3 +164,20 @@ sudo docker compose up -d
 ```
 
 Für User die lieber beim alten Setup bleiben: [`docker-wireguard-go`](https://github.com/CallMeTechie/docker-wireguard-go) ist weiterhin als einfacher WG-Client ohne Gateway-Features verfügbar.
+
+## Kameras
+
+Schaltet man in GateControl **Kameras** für dieses Gateway ein (Gateway ›
+Funktionen › „Geräte im Heimnetz“, [docs/cameras.md](../cameras.md)), braucht die
+NAS einmal die aktuelle Compose-Datei mit dem Dienst `kameras` (nur ffmpeg, ≈ 80 MB
+Image). Fehlt er, zeigt GateControl bei der Zeile „Kameras“ den Knopf
+**„docker-compose.yml herunterladen“** – dann wie oben unter „Compose-Datei aus
+GateControl holen“. Ohne den Dienst gehen Suche, Testbild und Bewegungsmeldungen
+schon, Live-Video und Clips noch nicht.
+
+Clips liegen im Volume `cam-recordings`. Für einen sichtbaren Ordner der NAS
+(z. B. `/volume1/kameras`) den Ordner in der File Station anlegen und
+`GC_CAMERA_DIR=/volume1/kameras` in die `.env` des Projekts schreiben. In den
+Kameras ONVIF und RTSP einschalten (Reolink: Einstellungen › Netzwerk › Erweitert ›
+Server-Einstellungen; Tapo: App › Kamera › Erweitert › Kamerakonto anlegen –
+dieses Konto ist dann „Benutzer der Kamera“ in GateControl).

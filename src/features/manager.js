@@ -2,7 +2,7 @@
 
 // Hält die Funktionen des Gateways zusammen: Netzwerk-Wächter,
 // Internetqualität, Anwesenheit, USV (Phase 3a), DNS-Filter, Zwischenspeicher
-// und Zeitzone (Phase 3b), Drucken & Scannen, Funk und Lokale KI (Phase 3c). Schaltet sie nach `features` aus dem Config-Pull
+// und Zeitzone (Phase 3b), Drucken & Scannen, Funk, Lokale KI und Kameras (Phase 3c). Schaltet sie nach `features` aus dem Config-Pull
 // (fehlt es → alles aus) und liefert ihren Zustand für die Telemetrie. Alles
 // läuft im Gateway-Prozess, Zustand in /state.
 
@@ -15,6 +15,7 @@ const { HomeCache } = require('../cache/cache');
 const { PrintService } = require('../print/print');
 const { RadioService } = require('../radio/radio');
 const { AiService } = require('../ai/ai');
+const { CameraService } = require('../cameras/cameras');
 const { makeReporter } = require('./reporter');
 const { NetWatch } = require('../netwatch/netwatch');
 const { createScanner } = require('../netwatch/scanner');
@@ -26,13 +27,14 @@ const { lanSubnets, isPrivateIpv4 } = require('../discovery/lanInterfaces');
 const { localIpForSubnet } = require('../discovery/scanEngine');
 const logger = require('../logger');
 
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'radio', 'ai']);
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'radio', 'ai', 'cameras']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';
 const noop = { apply: async () => {}, stop() {}, telemetry: () => null, featureTelemetry: () => ({ enabled: false }) };
 const noopPrint = { ...noop, requestSearch: () => 'disabled', requestJobs: () => 'disabled', requestScan: () => 'disabled', cancelScan: () => 'disabled' };
 const noopRadio = { ...noop, requestPair: async () => 'disabled', requestUnlock: async () => 'disabled', requestRetry: async () => 'disabled', status: async () => null };
+const noopCameras = { ...noop, cfg: { enabled: false } };
 const noopAi = { ...noop, cfg: { enabled: false }, requestPull: () => 'disabled', cancelPull: () => 'disabled', removeModel: async () => 'disabled', canChat: () => 'disabled', status: async () => null };
 
 /** Eigene private LAN-Subnetze mit der eigenen Adresse darin. */
@@ -43,8 +45,8 @@ function privateSubnets(defaultGatewayIp) {
 }
 
 class FeatureManager {
-  constructor({ netwatch, inetq, presence, ups, dns = noop, cache = noop, print = noopPrint, radio = noopRadio, ai = noopAi, stateDir = null }) {
-    Object.assign(this, { netwatch, inetq, presence, ups, dns, cache, print, radio, ai, stateDir });
+  constructor({ netwatch, inetq, presence, ups, dns = noop, cache = noop, print = noopPrint, radio = noopRadio, ai = noopAi, cameras = noopCameras, stateDir = null }) {
+    Object.assign(this, { netwatch, inetq, presence, ups, dns, cache, print, radio, ai, cameras, stateDir });
     this.features = normalizeFeatures(undefined);
     this.chain = Promise.resolve(); // DNS/Zwischenspeicher nacheinander anwenden
   }
@@ -91,7 +93,7 @@ class FeatureManager {
       netwatch: f.netwatch.enabled, portscan: f.netwatch.portscan, inetq: f.inetq.enabled,
       speedtest: f.inetq.speedtest, presence: f.presence.enabled, presenceMacs: f.presence.macs.length, ups: f.ups.enabled,
       dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, cache: f.cache.enabled, print: f.print.enabled,
-      zigbee: f.radio.zigbee, ble: f.radio.ble, ai: f.ai.enabled, aiSource: f.ai.source, timezone: f.timezone,
+      zigbee: f.radio.zigbee, ble: f.radio.ble, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
     }, 'features applied');
     return this._serial(async () => {
       await this.dns.apply(f.dns);
@@ -99,11 +101,12 @@ class FeatureManager {
       await this.print.apply(f.print);
       await this.radio.apply(f.radio);
       await this.ai.apply(f.ai);
+      await this.cameras.apply(f.cameras);
     });
   }
 
   stop() {
-    for (const x of [this.netwatch, this.inetq, this.presence, this.ups, this.dns, this.cache, this.print, this.radio, this.ai]) {
+    for (const x of [this.netwatch, this.inetq, this.presence, this.ups, this.dns, this.cache, this.print, this.radio, this.ai, this.cameras]) {
       try { x.stop(); } catch (_e) { /* best effort */ }
     }
   }
@@ -123,6 +126,7 @@ class FeatureManager {
         print: this.print.featureTelemetry(),
         radio: this.radio.featureTelemetry(),
         ai: this.ai.featureTelemetry(),
+        cameras: this.cameras.featureTelemetry(),
       },
       ups: this.ups.telemetry(),
       dns: this.dns.telemetry(),
@@ -162,7 +166,10 @@ function createFeatureManager({ config, defaultGatewayIp }) {
   });
   const radio = new RadioService({ reporter, stateDir: config.stateDir });
   const ai = new AiService({ stateDir: config.stateDir });
-  return new FeatureManager({ netwatch, inetq, presence, ups, dns, cache, print, radio, ai, stateDir: config.stateDir });
+  const cameras = new CameraService({
+    reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,
+  });
+  return new FeatureManager({ netwatch, inetq, presence, ups, dns, cache, print, radio, ai, cameras, stateDir: config.stateDir });
 }
 
 module.exports = { FeatureManager, createFeatureManager, privateSubnets, CAPABILITIES };

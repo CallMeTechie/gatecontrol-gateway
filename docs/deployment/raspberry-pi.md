@@ -51,6 +51,9 @@ Der 3 B+ reicht für Gateway + deCONZ, hat aber Grenzen:
   booten. Das schont die SD-Karte und ist deutlich schneller.
 - Spätere Zusatzfunktionen des Gateways laufen grundsätzlich auch hier; bei
   schwacher Hardware gibt es einen Hinweis, aber kein Verbot.
+- **Kameras** ([docs/cameras.md](../cameras.md)): ein Pi 3 B+ schafft eine Kamera mit
+  Bewegungserkennung und Clips (Stream-Kopie, kein Umkodieren); GateControl zeigt das
+  als Hinweis. Für mehrere Kameras besser ein Pi 4/5 oder die NAS.
 - **Lokale KI** ([docs/local-ai.md](../local-ai.md)): mit 1 GB RAM passt kein Modell
   sinnvoll – GateControl zeigt das als Hinweis und empfiehlt einen vorhandenen
   KI-Server im Heimnetz (z. B. Ollama oder LM Studio auf einem PC), den der Pi
@@ -263,6 +266,7 @@ sudo gatecontrol-start
 | **Kernel/Firmware** (Raspberry-Pi-Archiv) | nicht automatisch: gelegentlich `sudo apt update && sudo apt full-upgrade && sudo reboot`. Automatisch: in `/etc/apt/apt.conf.d/52gatecontrol-unattended-upgrades` die Zeile `"origin=Raspberry Pi Foundation,codename=${distro_codename},label=Raspberry Pi Foundation";` ergänzen. |
 | **deCONZ** | Version steht fest im Image (Tag + Digest in `docker-compose.yml`). Neuere Versionen kommen mit neueren Images; von Hand: die `image:`-Zeile des Dienstes `deconz` ändern, dann `sudo gatecontrol-start`. |
 | **Lokale KI (Ollama)** | wie deCONZ: Version fest im Image (Dienst `ki`). Der Dienst wird nur angelegt, wenn die lokale KI in GateControl eingeschaltet ist ([docs/local-ai.md](../local-ai.md)); die Modelle lädt GateControl. |
+| **Kameras (ffmpeg)** | wie deCONZ: Version fest im Image (Dienst `kameras`), nur angelegt, wenn Kameras in GateControl eingeschaltet sind ([docs/cameras.md](../cameras.md)). Clips im Volume `cam-recordings` auf der SD-Karte. |
 | **neues Image** | nicht nötig – ein laufender Pi bleibt über die Wege oben aktuell. |
 
 ---

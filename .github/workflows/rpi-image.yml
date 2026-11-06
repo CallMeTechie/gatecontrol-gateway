@@ -103,7 +103,7 @@ jobs:
         run: |
           set -a; . rpi/versions.env; set +a
           D="$(mktemp -d)"; mkdir -p "$D/config" "$D/deconz" "$D/gateway-state"
-          sed -e "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" -e "s|@OLLAMA_IMAGE@|$OLLAMA_IMAGE|" rpi/rootfs/opt/gatecontrol-gateway/docker-compose.yml > "$D/docker-compose.yml"
+          sed -e "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" -e "s|@OLLAMA_IMAGE@|$OLLAMA_IMAGE|" -e "s|@KAMERAS_IMAGE@|$KAMERAS_IMAGE|" rpi/rootfs/opt/gatecontrol-gateway/docker-compose.yml > "$D/docker-compose.yml"
           cd "$D"
           # Ohne Funkmodul: /dev/null als Gerät — deCONZ startet trotzdem REST-API/Phoscon.
           GC_ZIGBEE_DEVICE=/dev/null docker compose up -d deconz

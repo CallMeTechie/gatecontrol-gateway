@@ -176,6 +176,7 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(len(p["radios"]), 1)
         self.assertIs(p["radio_start"], True)
         self.assertIs(p["ai_start"], True)
+        self.assertIs(p["cameras_start"], True)
         self.assertIsInstance(p["cpu_cores"], int)
         # ZIGBEE=off: ohne Gerät trotzdem gemeldet (das Gateway soll es wissen), ohne Modul und auto: nichts
         off = hw.hardware_profile({"kind": "zigbee", "device": None, "detected": False, "enabled": False, "mode": "off"})
