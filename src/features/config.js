@@ -10,6 +10,7 @@ const { normalizeMac } = require('./macs');
 const { validTimezone } = require('./timezone');
 const { normalizeDns } = require('../dns/config');
 const { normalizeCache } = require('../cache/config');
+const { normalizePrint } = require('../print/config');
 
 const DEFAULT_TARGETS = Object.freeze(['1.1.1.1', '9.9.9.9']);
 const SPEEDTEST_PLANS = new Set(['off', '4x', 'hourly']);
@@ -45,6 +46,9 @@ function normalizeFeatures(raw) {
   dns.enabled = present && dns.enabled;
   const cache = normalizeCache(f.cache);
   if (!present) Object.assign(cache, { enabled: false, requested: false, problem: null });
+  // Phase 3c: Drucken & Scannen
+  const print = normalizePrint(f.print);
+  print.enabled = present && print.enabled;
 
   const targets = Array.isArray(iq.targets)
     ? [...new Set(iq.targets.filter((t) => typeof t === 'string' && isUsableTarget(t)))].slice(0, MAX_TARGETS)
@@ -76,6 +80,7 @@ function normalizeFeatures(raw) {
     timezone: present ? validTimezone(f.timezone) : null,
     dns,
     cache,
+    print,
   };
 }
 

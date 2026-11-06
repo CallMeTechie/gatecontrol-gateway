@@ -2,7 +2,7 @@
 
 // Hält die Funktionen des Gateways zusammen: Netzwerk-Wächter,
 // Internetqualität, Anwesenheit, USV (Phase 3a), DNS-Filter, Zwischenspeicher
-// und Zeitzone (Phase 3b). Schaltet sie nach `features` aus dem Config-Pull
+// und Zeitzone (Phase 3b), Drucken & Scannen (Phase 3c). Schaltet sie nach `features` aus dem Config-Pull
 // (fehlt es → alles aus) und liefert ihren Zustand für die Telemetrie. Alles
 // läuft im Gateway-Prozess, Zustand in /state.
 
@@ -12,6 +12,7 @@ const { readJson, writeJson } = require('./persist');
 const { normalizeDns } = require('../dns/config');
 const { DnsFilter } = require('../dns/dns');
 const { HomeCache } = require('../cache/cache');
+const { PrintService } = require('../print/print');
 const { makeReporter } = require('./reporter');
 const { NetWatch } = require('../netwatch/netwatch');
 const { createScanner } = require('../netwatch/scanner');
@@ -23,11 +24,12 @@ const { lanSubnets, isPrivateIpv4 } = require('../discovery/lanInterfaces');
 const { localIpForSubnet } = require('../discovery/scanEngine');
 const logger = require('../logger');
 
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone']);
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';
 const noop = { apply: async () => {}, stop() {}, telemetry: () => null, featureTelemetry: () => ({ enabled: false }) };
+const noopPrint = { ...noop, requestSearch: () => 'disabled', requestJobs: () => 'disabled', requestScan: () => 'disabled', cancelScan: () => 'disabled' };
 
 /** Eigene private LAN-Subnetze mit der eigenen Adresse darin. */
 function privateSubnets(defaultGatewayIp) {
@@ -37,8 +39,8 @@ function privateSubnets(defaultGatewayIp) {
 }
 
 class FeatureManager {
-  constructor({ netwatch, inetq, presence, ups, dns = noop, cache = noop, stateDir = null }) {
-    Object.assign(this, { netwatch, inetq, presence, ups, dns, cache, stateDir });
+  constructor({ netwatch, inetq, presence, ups, dns = noop, cache = noop, print = noopPrint, stateDir = null }) {
+    Object.assign(this, { netwatch, inetq, presence, ups, dns, cache, print, stateDir });
     this.features = normalizeFeatures(undefined);
     this.chain = Promise.resolve(); // DNS/Zwischenspeicher nacheinander anwenden
   }
@@ -84,21 +86,22 @@ class FeatureManager {
     logger.info({
       netwatch: f.netwatch.enabled, portscan: f.netwatch.portscan, inetq: f.inetq.enabled,
       speedtest: f.inetq.speedtest, presence: f.presence.enabled, presenceMacs: f.presence.macs.length, ups: f.ups.enabled,
-      dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, cache: f.cache.enabled, timezone: f.timezone,
+      dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, cache: f.cache.enabled, print: f.print.enabled, timezone: f.timezone,
     }, 'features applied');
     return this._serial(async () => {
       await this.dns.apply(f.dns);
       await this.cache.apply(f.cache);
+      await this.print.apply(f.print);
     });
   }
 
   stop() {
-    for (const x of [this.netwatch, this.inetq, this.presence, this.ups, this.dns, this.cache]) {
+    for (const x of [this.netwatch, this.inetq, this.presence, this.ups, this.dns, this.cache, this.print]) {
       try { x.stop(); } catch (_e) { /* best effort */ }
     }
   }
 
-  /** Telemetrie-Teile: { capabilities, features, ups, dns, cache, timezone, process_mem } */
+  /** Telemetrie-Teile: { capabilities, features, ups, dns, cache, timezone, process_mem } (Drucken: nur features.print, die Geräte gehen als eigener Bericht) */
   telemetry() {
     const mem = process.memoryUsage();
     return {
@@ -110,6 +113,7 @@ class FeatureManager {
         ups: this.ups.featureTelemetry(),
         dns: this.dns.featureTelemetry(),
         cache: this.cache.featureTelemetry(),
+        print: this.print.featureTelemetry(),
       },
       ups: this.ups.telemetry(),
       dns: this.dns.telemetry(),
@@ -144,7 +148,10 @@ function createFeatureManager({ config, defaultGatewayIp }) {
   const cache = new HomeCache({
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, tunnelIp: config.tunnelIp,
   });
-  return new FeatureManager({ netwatch, inetq, presence, ups, dns, cache, stateDir: config.stateDir });
+  const print = new PrintService({
+    reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,
+  });
+  return new FeatureManager({ netwatch, inetq, presence, ups, dns, cache, print, stateDir: config.stateDir });
 }
 
 module.exports = { FeatureManager, createFeatureManager, privateSubnets, CAPABILITIES };
