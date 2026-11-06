@@ -346,7 +346,11 @@ def hardware_profile(zigbee):
         "mem_total": mem_total(),
         "storage": storage(GC_DIR),
         "disks": disks(),
-        "radios": [zigbee] if zigbee.get("device") else [],
+        # mit ZIGBEE=off auch ohne Gerät: das Gateway soll die Einstellung kennen
+        "radios": [zigbee] if (zigbee.get("device") or zigbee.get("mode") == "off") else [],
+        # dieses Image legt den deCONZ-Dienst auf Wunsch des Gateways an
+        # (gateway-state/radio-start → gatecontrol-radio.path, docs/radio.md)
+        "radio_start": True,
         "detected_at": int(time.time() * 1000),
     }
 

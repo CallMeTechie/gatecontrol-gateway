@@ -1,0 +1,14 @@
+[Unit]
+Description=GateControl Gateway: deCONZ-Dienst anlegen (Zigbee in GateControl eingeschaltet)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/radio.md
+Requires=docker.service
+After=docker.service gatecontrol-gateway.service
+ConditionPathExists=/opt/gatecontrol-gateway/config/gateway.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gatecontrol-radio
+# erster Start lädt das deCONZ-Image (≈ 350 MB)
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal

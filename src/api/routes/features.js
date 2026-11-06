@@ -14,6 +14,10 @@ const { normalizeMac } = require('../../features/macs');
 //   POST /api/print/jobs        {}                – Druckaufträge jetzt abholen
 //   POST /api/print/scan        { scanId, deviceId, source, color, resolution, format, duplex }
 //   POST /api/print/scan/cancel { scanId }
+//   POST /api/radio/status      {}                – Funk: frischer Zustand + Bluetooth-Sensoren (Phase 3c, Schritt 2)
+//   POST /api/radio/zigbee/pair { seconds? }      – Zigbee-Geräte anlernen (60…254 s, Standard 180)
+//   POST /api/radio/zigbee/unlock {}              – deCONZ 60 s für neue Schlüssel öffnen (Smart Home)
+//   POST /api/radio/zigbee/retry {}               – deCONZ-Schlüssel neu holen
 // Aufträge antworten sofort (202); das Ergebnis kommt über die normalen Berichte.
 function reply(res, outcome, busyError) {
   if (outcome === 'accepted') return res.status(202).json({ accepted: true });
@@ -74,6 +78,31 @@ function createFeaturesRouter({ featureMgr }) {
   router.post('/print/scan/cancel', (req, res) => {
     const id = req.body && typeof req.body.scanId === 'string' ? req.body.scanId : '';
     reply(res, print().cancelScan ? print().cancelScan(id) : 'disabled', 'busy');
+  });
+
+  // Phase 3c, Schritt 2: Funk (src/radio/radio.js)
+  const radio = () => featureMgr.radio || {};
+  router.post('/radio/status', async (req, res) => {
+    const r = radio().status ? await radio().status() : null;
+    if (!r) return res.status(503).json({ error: 'feature_disabled' });
+    return res.json({ radio: r });
+  });
+  const zigbeeReply = (res, r) => {
+    if (r === 'accepted') return res.status(202).json({ accepted: true });
+    if (r === 'not_running' || r === 'key_needed') return res.status(409).json({ error: r });
+    if (r === 'failed') return res.status(502).json({ error: 'deconz_failed' });
+    return res.status(503).json({ error: 'feature_disabled' });
+  };
+  router.post('/radio/zigbee/pair', async (req, res) => {
+    const s = req.body && req.body.seconds;
+    if (s !== undefined && !(Number.isInteger(s) && s >= 60 && s <= 254)) return res.status(400).json({ error: 'invalid_request' });
+    zigbeeReply(res, radio().requestPair ? await radio().requestPair({ seconds: s }) : 'disabled');
+  });
+  router.post('/radio/zigbee/unlock', async (req, res) => {
+    zigbeeReply(res, radio().requestUnlock ? await radio().requestUnlock() : 'disabled');
+  });
+  router.post('/radio/zigbee/retry', async (req, res) => {
+    zigbeeReply(res, radio().requestRetry ? await radio().requestRetry() : 'disabled');
   });
   return router;
 }

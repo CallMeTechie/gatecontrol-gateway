@@ -174,7 +174,13 @@ class DetectTest(unittest.TestCase):
         self.assertEqual(p["schema"], 1)
         self.assertEqual(p["source"], "rpi-image")
         self.assertEqual(len(p["radios"]), 1)
+        self.assertIs(p["radio_start"], True)
         self.assertIsInstance(p["cpu_cores"], int)
+        # ZIGBEE=off: ohne Gerät trotzdem gemeldet (das Gateway soll es wissen), ohne Modul und auto: nichts
+        off = hw.hardware_profile({"kind": "zigbee", "device": None, "detected": False, "enabled": False, "mode": "off"})
+        self.assertEqual(off["radios"][0]["mode"], "off")
+        none = hw.hardware_profile({"kind": "zigbee", "device": None, "detected": False, "enabled": False, "mode": "auto"})
+        self.assertEqual(none["radios"], [])
 
         self.assertIsInstance(p["disks"], list)
 

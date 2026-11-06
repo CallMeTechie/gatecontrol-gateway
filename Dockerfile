@@ -44,6 +44,14 @@ RUN wget -q -O /tmp/ipt.tar.xz "https://www.netfilter.org/projects/iptables/file
 # NOTE: --enable-static-iptables is NOT a real iptables-1.8.x flag (ignored). The static
 # binary comes from LDFLAGS="-static" (musl static) + --enable-static --disable-shared.
 
+# --- Stage: gc-blescan (passiver Bluetooth-Scan für Funk, docs/radio.md) ---
+# Kleines statisches C-Programm ohne Abhängigkeiten (keine BlueZ-Header).
+FROM alpine:${ALPINE_VERSION} AS blescan
+# hadolint ignore=DL3018
+RUN apk add --no-cache build-base linux-headers
+COPY native/gc-blescan.c /src/gc-blescan.c
+RUN gcc -O2 -Wall -Wextra -static -o /gc-blescan /src/gc-blescan.c && strip /gc-blescan
+
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # hadolint ignore=DL3018
@@ -62,6 +70,7 @@ RUN addgroup -g 61001 gcedge && \
     install -d -m 0700 -o gcedge -g gcedge /state-edge /gc-mqtt
 
 COPY --from=wg-build /wireguard-go /usr/local/bin/wireguard-go
+COPY --from=blescan /gc-blescan /usr/local/bin/gc-blescan
 COPY --from=node-build /build/node_modules /app/node_modules
 COPY --from=node-build /build/src /app/src
 COPY --chown=gateway:gateway package.json /app/package.json

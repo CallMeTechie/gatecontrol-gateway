@@ -11,11 +11,13 @@
 #   ./deconz/              ← deCONZ-Daten (nur mit RaspBee II / ConBee)
 #   Volumes edge-*         ← Edge-Container (Pakete, Zugangsdaten, Status)
 #   ./.env                 ← schreibt gatecontrol-start bei jedem Start
-#                            (COMPOSE_PROFILES, GC_ZIGBEE_DEVICE, TZ, GC_CACHE_DIR)
+#                            (TZ, GC_CACHE_DIR)
 #
-# Profil "zigbee": deCONZ/Phoscon, wird automatisch aktiviert, wenn beim
-# Start ein RaspBee II / ConBee erkannt wird (abschaltbar über
-# /boot/firmware/gatecontrol/settings.txt → ZIGBEE=off).
+# deCONZ/Phoscon (docs/radio.md): gatecontrol-start nimmt den Dienst mit, wenn
+# beim Start ein RaspBee II / ConBee erkannt wird oder Zigbee in GateControl
+# eingeschaltet ist (gateway-state/radio.json); schaltet man Zigbee später
+# ein, legt gatecontrol-radio.path ihn an. Ein/aus und das Gerät bestimmt das
+# Gateway über radio-ctl (zigbee.env) – der Wächter im Dienst führt aus.
 #
 # Ports (alle host network):
 #   Gateway:  GC_PROXY_PORT (8080) + GC_API_PORT (9876) — nur Tunnel-IP,
@@ -74,6 +76,10 @@ services:
         source: edge-mqtt
         target: /gc-mqtt
         read_only: true
+      - type: volume            # Funk (docs/radio.md): Steuerdatei für den deCONZ-Dienst
+        source: radio-ctl
+        target: /gc-radio
+        volume: { nocopy: true }
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
@@ -194,20 +200,57 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Zigbee (docs/radio.md) – wie in docker-compose.example.yml, nur ohne Profil
   deconz:
-    profiles: ["zigbee"]
     image: @DECONZ_IMAGE@
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        C=/gc-radio; p=""; s=""; st=idle; dt=-
+        say() { st="$$1"; dt="$${2:--}"; printf '%s %s %s\n' "$$st" "$$dt" "$$(date +%s)" >"$$C/.deconz.state" && mv -f "$$C/.deconz.state" "$$C/deconz.state"; }
+        halt() { if [ -n "$$p" ]; then kill "$$p" 2>/dev/null; wait "$$p" 2>/dev/null; fi; p=""; }
+        dead() { [ ! -e "/proc/$$1" ] || grep -q '^State:[[:space:]]*Z' "/proc/$$1/status" 2>/dev/null; }
+        trap 'halt; say idle; exit 0' TERM INT
+        while :; do
+          if [ -f "$$C/zigbee.env" ]; then
+            n="$$(cksum <"$$C/zigbee.env")"
+            if [ -n "$$p" ] && dead "$$p"; then wait "$$p"; say exit "$$?"; p=""; sleep 8; fi
+            if [ -z "$$p" ] || [ "$$n" != "$$s" ]; then
+              halt; s="$$n"
+              dv="$$(sed -n 's/^DEVICE=\(tty[A-Z]\{3\}[0-9]\{1,3\}\)$$/\1/p' "$$C/zigbee.env")"
+              mm="$$(sed -n 's/^DEV=\([0-9]\{3\}\):\([0-9]\{1,7\}\)$$/\1 \2/p' "$$C/zigbee.env")"
+              bd="$$(sed -n 's/^BAUD=\([0-9]\{1,6\}\)$$/\1/p' "$$C/zigbee.env")"
+              case "$$dv:$${mm%% *}" in
+                ttyACM*:166|ttyUSB*:188|ttyAMA*:204)
+                  rm -f "/dev/$$dv"
+                  if mknod "/dev/$$dv" c $$mm && chgrp dialout "/dev/$$dv" && chmod 660 "/dev/$$dv"; then
+                    DECONZ_DEVICE="/dev/$$dv" DECONZ_BAUDRATE="$${bd:-0}" /start.sh & p=$$!; say running "$$dv"
+                  else say wait mknod; fi ;;
+                *) say wait invalid ;;
+              esac
+            else say "$$st" "$$dt"; fi
+          else
+            halt; s=""; say idle
+          fi
+          sleep 2 & wait $$!
+        done
     restart: unless-stopped
     network_mode: host
-    # Gerät wird beim Start erkannt (gatecontrol-hwdetect) und über ./.env
-    # gesetzt; /dev/ttyAMA0 = RaspBee II auf der GPIO-Leiste.
-    devices:
-      - ${GC_ZIGBEE_DEVICE:-/dev/ttyAMA0}:${GC_ZIGBEE_DEVICE:-/dev/ttyAMA0}
+    # nur diese Gerätearten darf der Wächter anlegen und deCONZ öffnen: ttyACM
+    # (ConBee II), ttyUSB (ConBee III/ConBee), ttyAMA (RaspBee auf der GPIO-Leiste)
+    device_cgroup_rules:
+      - "c 166:* rmw"
+      - "c 188:* rmw"
+      - "c 204:* rmw"
     volumes:
       - ./deconz:/opt/deCONZ
+      - type: volume            # Steuerdatei vom Gateway, Zustand zurück
+        source: radio-ctl
+        target: /gc-radio
+        volume: { nocopy: true }
     environment:
       - TZ=${TZ:-Etc/UTC}
-      - DECONZ_DEVICE=${GC_ZIGBEE_DEVICE:-/dev/ttyAMA0}
       - DECONZ_WEB_PORT=8090
       - DECONZ_WS_PORT=8091
       - DECONZ_VNC_MODE=0
@@ -218,6 +261,12 @@ services:
       - DEBUG_ZDP=0
       - DEBUG_OTA=0
       - DEBUG_HTTP=0
+    healthcheck:
+      test: ["CMD-SHELL", "case \"$$(cut -d' ' -f1 /gc-radio/deconz.state 2>/dev/null)\" in running) curl -fs -m 4 -o /dev/null http://127.0.0.1:8090/api/config ;; *) true ;; esac"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     logging:
       driver: json-file
       options:
@@ -242,3 +291,8 @@ volumes:
       o: "size=1m,uid=0,gid=61001,mode=2750"
   edge-state:
   edge-mqtt:
+  radio-ctl:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=0,mode=0755"

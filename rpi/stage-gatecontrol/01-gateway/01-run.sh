@@ -26,6 +26,6 @@ printf '%s\n' "${GC_IMAGE_VERSION}" >"${ROOTFS_DIR}/etc/gatecontrol/image-releas
 
 on_chroot <<CHROOT
 systemctl enable gatecontrol-settings.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
-	gatecontrol-gateway-update.path gatecontrol-gateway-update.timer \
+	gatecontrol-gateway-update.path gatecontrol-gateway-update.timer gatecontrol-radio.path \
 	unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer
 CHROOT

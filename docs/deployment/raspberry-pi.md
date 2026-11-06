@@ -265,17 +265,24 @@ sudo gatecontrol-start
 
 Das Image ist für den RaspBee II vorbereitet:
 
-- `config.txt`: `enable_uart=1`, `dtoverlay=disable-bt` (Pi 3/4/Zero 2 W: Bluetooth
-  wird vom PL011-UART gelöst, damit `/dev/ttyAMA0` an GPIO 14/15 frei ist), auf dem
-  Pi 5 zusätzlich `dtparam=uart0=on`.
+- `config.txt`: `enable_uart=1`, `dtoverlay=miniuart-bt,krnbt=on` (Pi 3/4/Zero 2 W:
+  Bluetooth wechselt auf den Mini-UART, damit `/dev/ttyAMA0` an GPIO 14/15 frei ist und
+  Bluetooth trotzdem läuft; dazu fester Kerntakt `core_freq`/`core_freq_min`), auf dem
+  Pi 5 `dtparam=uart0=on`. Images bis 1.24 hatten `disable-bt` (Bluetooth aus).
 - Keine serielle Login-Konsole (aus `cmdline.txt` entfernt, `serial-getty@ttyAMA0` maskiert).
 
 **Erkennung:** Bei jedem Start spricht `gatecontrol-hwdetect` – bevor Docker startet –
 das deCONZ-Protokoll (Anfrage `VERSION`) auf `/dev/ttyAMA0` und auf ConBee-Sticks
-unter `/dev/serial/by-id`. Antwortet ein Modul, startet das Compose-Profil `zigbee`
-mit dem Container `deconzcommunity/deconz` (Version gepinnt). Ohne Modul läuft kein
-deCONZ. Wird das Modul später abgezogen, wird der deCONZ-Container beim nächsten Start
-entfernt (die Daten bleiben erhalten).
+unter `/dev/serial/by-id`. Antwortet ein Modul, startet der Dienst `deconz`
+(`deconzcommunity/deconz`, Version gepinnt). **Ein- und ausgeschaltet wird in
+GateControl** (Gateway › Funk, [docs/radio.md](../radio.md)) – ohne Neustart und ohne
+`settings.txt`: das Gateway schreibt die Steuerdatei, der Wächter im Dienst startet oder
+beendet deCONZ. Wird Zigbee eingeschaltet, während der Dienst fehlt (beim Start war kein
+Modul da), legt `gatecontrol-radio.path` ihn an. Ist Zigbee in GateControl aus, wird der
+Container beim nächsten Start entfernt (die Daten bleiben erhalten). Anlernen: in
+GateControl „Anlernen starten“.
+
+Die Werte in `settings.txt` gelten nur, solange in GateControl „automatisch“ eingestellt ist:
 
 | Einstellung in `bootfs/gatecontrol/settings.txt` | Wirkung |
 |---|---|
@@ -302,9 +309,10 @@ sofort das **Phoscon-Passwort** setzen – bis dahin kann jeder im LAN das Zigbe
 Daten (Zigbee-Netz, Geräte, Backups) liegen in `/opt/gatecontrol-gateway/deconz/`.
 Umzug von einem anderen deCONZ: dort in Phoscon ein Backup erstellen und hier einspielen.
 
-**Bluetooth** ist durch `disable-bt` aus. Wer Bluetooth braucht (und keinen RaspBee
-nutzt), ersetzt in `config.txt` `dtoverlay=disable-bt` durch `dtoverlay=miniuart-bt`
-(Pi 3 zusätzlich `core_freq=250`).
+**Bluetooth** läuft über den Mini-UART und wird in GateControl (Gateway › Funk)
+eingeschaltet: das Gateway hört dann Bluetooth-Sensoren passiv mit (BTHome, Xiaomi mit
+ATC/pvvx-Firmware). Wer Bluetooth gar nicht will, ersetzt in `config.txt`
+`dtoverlay=miniuart-bt,krnbt=on` durch `dtoverlay=disable-bt`.
 
 ---
 
