@@ -1,45 +1,70 @@
 # Deployment: Linux / Debian / Ubuntu / Raspberry Pi
 
+> **Schritt-für-Schritt-Anleitung für Einsteiger:** das [GateControl-Handbuch](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/handbuch) (Kapitel 3.4 „Linux-Rechner mit Docker“, Kapitel 6 „Bestehendes Gateway aktualisieren“, FAQ) · English: [user guide](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/guide). Diese Seite ist die technische Ergänzung dazu. Für den Raspberry Pi gibt es ein [fertiges Image](raspberry-pi.md).
+
 ## Voraussetzungen
 
-- Docker 24+ und docker-compose
+- Docker 24+ und das Compose-Plugin (`docker compose`)
 - Host muss im gleichen L2-Segment wie die Ziel-LAN-Geräte sein (für WoL)
 - Admin-Rechte für `NET_ADMIN` + `NET_BIND_SERVICE` Capabilities
+- WireGuard-Kernelmodul (Standard ab Debian 11 / Ubuntu 22.04 / Kernel ≥ 5.6) – die Compose-Datei des Assistenten nutzt Kernel-WireGuard
 
 ## Schritte
 
-1. **Gateway-Peer in GateControl-UI anlegen**
+1. **Gateway in GateControl anlegen**
 
-   UI → Peers → „Neuer Peer" → „Home Gateway"-Checkbox aktivieren → API-Port 9876 (Standard) → Speichern.
+   GateControl → Gateways → „Gateway hinzufügen“ → Plattform „Anderer
+   Linux-Rechner“ → „Gateway anlegen und weiter“. Netzwerkmodus „Host
+   (empfohlen)“ – nur damit gehen L4-Routen, Wake-on-LAN, Edge-Plugins
+   ([docs/edge.md](../edge.md)) und DNS-Filter/Zwischenspeicher
+   ([docs/dns-cache.md](../dns-cache.md)).
 
-2. **`gateway.env` herunterladen**
+2. **Dateien herunterladen**
 
-   Auf der Peer-Detail-Seite: Button „Gateway-Config herunterladen" → die Datei landet lokal.
+   Im Assistenten `docker-compose.yml`, `gateway.env` und `update.sh`
+   herunterladen. Ein erneuter Download der `gateway.env` erzeugt einen neuen
+   Zugangsschlüssel (die alte Datei gilt dann nicht mehr).
 
 3. **Compose-Setup**
 
    ```bash
-   mkdir -p /opt/gatecontrol-gateway/config
+   sudo mkdir -p /opt/gatecontrol-gateway/config /opt/gatecontrol-gateway/gateway-state /opt/gatecontrol-gateway/gateway-cache
    cd /opt/gatecontrol-gateway
-   cp /path/to/gateway-<id>.env config/gateway.env
-   wget https://raw.githubusercontent.com/CallMeTechie/gatecontrol-gateway/main/docker-compose.example.yml -O docker-compose.yml
+   sudo mv ~/docker-compose.yml ~/update.sh .
+   sudo mv ~/gateway.env config/
+   sudo chmod 600 config/gateway.env
+   sudo chmod +x update.sh
    ```
+
+   Alternativ zur Compose-Datei des Assistenten:
+   [`docker-compose.example.yml`](../../docker-compose.example.yml) (zusätzlich
+   mit den Capabilities für keepalived/Scan-Egress, siehe [scan-egress.md](scan-egress.md)).
 
 4. **Starten**
 
    ```bash
-   docker compose up -d
-   docker compose logs -f
+   sudo docker compose up -d
+   sudo docker compose logs -f gateway
    ```
 
    Erwartet: Logs zeigen WireGuard up, Config-Poll erfolgreich, HTTP-Proxy/API-Server binden auf Tunnel-IP.
 
-5. **Verifikation**
+5. **Auto-Update** (einmalig): `sudo crontab -e`, Zeile aus dem Assistenten:
 
-   Im GateControl-UI sollte der Gateway als „online" erscheinen (nach ~2-5 min Hysteresis-Cooldown).
+   ```
+   * * * * * PATH=/usr/local/bin:$PATH GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state GC_GW_COMPOSE_DIR=/opt/gatecontrol-gateway bash /opt/gatecontrol-gateway/update.sh
+   ```
+
+   Oder die systemd-`.path`-Unit aus [Auto-Update](../auto-update.md). Das
+   Auto-Update tauscht nur das Image, nie die `docker-compose.yml`.
+
+6. **Verifikation**
+
+   Der Assistent zeigt „Gateway hat sich gemeldet“; danach steht das Gateway in GateControl als „online“.
 
 ## Troubleshooting
 
 - **„Refused to bind on 0.0.0.0"** → `GC_TUNNEL_IP` in `gateway.env` fehlt oder ist falsch
 - **WoL funktioniert nicht** → Gateway ist nicht im gleichen L2-Segment wie Ziel, oder Host-Bridge statt NAT notwendig
-- **Gateway zeigt als offline in UI** → Check `docker logs`, häufig sind es DNS-Auflösung oder Tunnel-Probleme
+- **Gateway zeigt als offline in UI** → `sudo docker compose logs gateway`, häufig sind es DNS-Auflösung oder Tunnel-Probleme
+- **„Edge-Dienst fehlt“ / Zwischenspeicher „Ordner nicht beschreibbar“** → ältere Compose-Datei ohne `edge`/`mqtt` bzw. ohne `${GC_CACHE_DIR:-./gateway-cache}:/cache`; aktuelle Datei aus dem Assistenten nehmen (Handbuch Kapitel 6)

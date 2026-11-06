@@ -1,5 +1,7 @@
 # Scan-Egress (Near-Side) — Gateway Deployment & Verification
 
+> Basic gateway set-up (server and gateways, step by step): the [GateControl user guide](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/guide) · Deutsch: [Handbuch](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/handbuch). Note: the compose file of the gateway assistant (and the guide's example) has no `NET_RAW`/`SETGID`/`SETUID`; for scan-egress add them as described below (or as in [`docker-compose.example.yml`](../../docker-compose.example.yml)).
+
 Scan-Egress lets a WireGuard-less LAN device (e.g. an HP OfficeJet printer/scanner)
 reach a remote network share through a GateControl gateway: the device writes to
 `\\<VIP>\share` (SMB :445), an **iptables REDIRECT** sends `<VIP>:445 → high-port`

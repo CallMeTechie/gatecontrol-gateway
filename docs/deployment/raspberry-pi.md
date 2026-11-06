@@ -1,5 +1,7 @@
 # Deployment: Raspberry Pi (fertiges Image)
 
+> **Schritt-für-Schritt-Anleitung für Einsteiger:** das [GateControl-Handbuch](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/handbuch) (Kapitel 3.3 „Raspberry Pi“, FAQ) · English: [user guide](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/guide). Diese Seite ist die technische Ergänzung dazu.
+
 Für den Raspberry Pi gibt es ein fertiges SD-Karten-Image: **Raspberry Pi OS
 Lite (64 bit, Debian 13 „trixie“)** mit Docker, dem GateControl Home Gateway,
 Auto-Update und – optional, automatisch erkannt – **deCONZ/Phoscon für das
@@ -112,8 +114,9 @@ anderes Schreibprogramm). Dann gibt es **keine** Imager-Einstellungen:
    enthält `gatecontrol/gateway.env` und `gatecontrol/settings.txt` (WLAN, Zeitzone, SSH …).
    WLAN-Passwort und SSH-Schlüssel erzeugt der Browser in die ZIP – sie gehen nicht an
    den Server.
-3. **Von Hand:** das Gateway anlegen (Peers → „Neuer Peer“ → „Home Gateway“), im
-   Einrichtungsdialog die Konfiguration herunterladen (`gateway-<id>.env`) und in den Ordner
+3. **Von Hand:** das Gateway anlegen (GateControl → Gateways → „Gateway hinzufügen“ →
+   „Raspberry Pi“), aus der `gatecontrol-setup.zip` nur die `gateway.env` nehmen (oder eine
+   `gateway-<id>.env` aus dem bisherigen Token-Dialog) und in den Ordner
    **`bootfs/gatecontrol/`** kopieren. Der Name darf `gateway-<id>.env` bleiben oder
    `gateway.env` heißen. (Direkt nach `bootfs/` geht auch.) Optional
    `bootfs/gatecontrol/settings.txt` anpassen (siehe nächster Abschnitt).
@@ -141,6 +144,7 @@ Ordnung. Gelesen bei jedem Start.
 | `WIFI_COUNTRY` | ISO-3166-Ländercode, Standard `DE` | Funk-Regulierung (Kanäle, Sendeleistung) |
 | `WIFI_HIDDEN` | `0` \| `1` | `1` = verstecktes Netz (SSID wird nicht ausgestrahlt) |
 | `SSH_AUTHORIZED_KEY` | eine Zeile aus `~/.ssh/id_ed25519.pub` (ed25519, ecdsa, RSA ≥ 3072 Bit) | SSH nur mit diesem Schlüssel, Benutzer `gcadmin` |
+| `CACHE_DIR` | Ordner auf einem per `/etc/fstab` eingehängten Datenträger (z. B. USB-Platte) | Ordner des Zwischenspeichers ([docs/dns-cache.md](../dns-cache.md)); nur übernommen, wenn er beim Start existiert, sonst `/opt/gatecontrol-gateway/gateway-cache` |
 
 Ungültige Werte (z. B. zu kurzes Passwort, unbekannte Zeitzone, falscher Schlüsseltyp)
 werden in **`bootfs/gatecontrol/STATUS.txt`** und im Journal benannt (Status
@@ -305,6 +309,10 @@ nutzt), ersetzt in `config.txt` `dtoverlay=disable-bt` durch `dtoverlay=miniuart
 ---
 
 ## 6. deCONZ im Smart-Home-Plugin einbinden
+
+**Einfacher:** Der Gateway-Assistent bietet in Schritt 4 „Im Smart Home einbinden“ an –
+das legt die interne Route an und weist sie dem Plugin zu (Schritte 1 und 2 unten).
+Danach nur noch Schritt 3.
 
 Das Smart-Home-Plugin spricht deCONZ per HTTP über eine GateControl-Route an. Da deCONZ
 auf demselben Pi läuft wie das Gateway, zeigt die Route auf das Gateway selbst:

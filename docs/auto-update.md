@@ -85,9 +85,9 @@ DSM does not support systemd. Use the built-in Task Scheduler with a short polli
    - **Schedule**: Repeat every **1 minute** (or 2 minutes to reduce overhead)
    - **Run command**:
      ```bash
-     GC_GW_COMPOSE_DIR=/opt/gatecontrol-gateway GATEWAY_STATE_DIR=/opt/gatecontrol-gateway/gateway-state /opt/gatecontrol-gateway/deploy/update.sh
+     PATH=/usr/local/bin:$PATH GATEWAY_STATE_DIR=/volume1/docker/gatecontrol-gateway/gateway-state GC_GW_COMPOSE_DIR=/volume1/docker/gatecontrol-gateway bash /volume1/docker/gatecontrol-gateway/update.sh
      ```
-     Adjust the paths if the gateway lives elsewhere (e.g. `/volume1/docker/gatecontrol-gateway`). `GATEWAY_STATE_DIR` must point to the host directory mounted as `/state` — without it the script looks for the flag in `/state`, which only exists inside the container.
+     This is the command the GateControl gateway assistant shows; its NAS package puts `update.sh` next to `docker-compose.yml`. `PATH=/usr/local/bin:$PATH` lets the task find `docker` on DSM. Adjust the paths if the gateway lives elsewhere (another volume, or `deploy/update.sh` in a hand-made layout). `GATEWAY_STATE_DIR` must point to the host directory mounted as `/state` — without it the script looks for the flag in `/state`, which only exists inside the container.
 3. Save and enable the task.
 
 The script is safe to run on every invocation — if no `pending-update` flag exists in the state directory it exits immediately (after acquiring the lock, which takes < 1 ms). The flock lock also prevents overlap if a run takes longer than one polling interval.

@@ -27,6 +27,8 @@ Internet -> GateControl (VPS) -WireGuard-> Home Gateway -LAN-> NAS / Desktop / I
 
 ## Platform Support
 
+**Step by step for beginners:** the [GateControl user guide](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/guide) (Deutsch: [Handbuch](https://github.com/CallMeTechie/gatecontrol/tree/master/docs/handbuch)) – server set-up, gateway assistant, Synology, Raspberry Pi, Linux/Docker, edge plugins, FAQ.
+
 See [Deployment Docs](docs/deployment/) for platform-specific instructions:
 
 - [Linux / Pi / VM](docs/deployment/linux-docker.md) — Tier 1
@@ -45,10 +47,10 @@ and starts the gateway as a systemd service. **Run on the Proxmox host
 shell**, not inside any container.
 
 ```bash
-# 1. In the GateControl Dashboard: Peers → your Gateway-Peer → Download
-#    Config. Saves `gateway.env`.
-# 2. scp gateway.env to your Proxmox host (e.g. /root/gateway.env)
-# 3. On the Proxmox shell:
+# Easiest: GateControl → Gateways → "Add gateway" → Proxmox shows this
+# command with a one-time pairing code (no file copying).
+# By hand: copy a gateway.env to the Proxmox host (e.g. /root/gateway.env),
+# then on the Proxmox shell:
 
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/CallMeTechie/gatecontrol-gateway/main/scripts/install-pve.sh)"
 ```
@@ -73,14 +75,14 @@ for the exact `lxc.conf` patches applied.
 
 ## Quick Start
 
-1. **GateControl-UI** → Peers → „Neuer Peer" → Checkbox „Home Gateway" → Speichern
-2. Auf Peer-Detail: „Gateway-Config herunterladen" → ergibt `gateway-<id>.env`
+1. **GateControl-UI** → Gateways → „Gateway hinzufügen“ → Plattform wählen (Raspberry Pi, Synology NAS, Proxmox, anderer Linux-Rechner)
+2. Den Anweisungen des Assistenten folgen; für Linux: `docker-compose.yml`, `gateway.env` und `update.sh` herunterladen
 3. Auf deinem Heimnetz-Host:
    ```bash
-   mkdir -p /opt/gatecontrol-gateway/config
-   cp gateway-*.env /opt/gatecontrol-gateway/config/gateway.env
-   curl -L https://raw.githubusercontent.com/CallMeTechie/gatecontrol-gateway/main/docker-compose.example.yml -o /opt/gatecontrol-gateway/docker-compose.yml
-   cd /opt/gatecontrol-gateway && docker compose up -d
+   sudo mkdir -p /opt/gatecontrol-gateway/config /opt/gatecontrol-gateway/gateway-state /opt/gatecontrol-gateway/gateway-cache
+   sudo mv docker-compose.yml update.sh /opt/gatecontrol-gateway/
+   sudo mv gateway.env /opt/gatecontrol-gateway/config/gateway.env
+   cd /opt/gatecontrol-gateway && sudo docker compose up -d
    ```
 4. Fertig — Gateway meldet sich beim Server. In der UI kannst du jetzt Routes mit `target_kind=gateway` anlegen.
 
