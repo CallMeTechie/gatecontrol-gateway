@@ -12,7 +12,8 @@ GateControl unter Gateway › Funk:
 erkannt ist (wie bisher im Raspberry-Pi-Image) – „automatisch“ gilt nur für
 deCONZ; mit `stack: "zigbee2mqtt"` läuft zigbee2mqtt, außer `zigbee` ist
 `false`. Fehlt `features.radio` (älterer Server) oder ein Feld, gilt deCONZ
-automatisch, Bluetooth und Thread aus. Capability `radio`, Zustand in
+automatisch, Bluetooth und Thread aus. Capability `radio` (zigbee2mqtt, Thread
+und Sensor-Schlüssel zusätzlich `radio-stacks`), Zustand in
 `telemetry.features.radio` (`stack`, `sticks[].use`, `zigbee`, `zigbee2mqtt`,
 `ble`, `thread`).
 
