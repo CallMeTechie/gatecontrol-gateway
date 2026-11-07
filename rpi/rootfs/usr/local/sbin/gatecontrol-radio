@@ -1,13 +1,14 @@
 #!/bin/bash
-# GateControl Gateway (Raspberry-Pi-Image) — deCONZ-Dienst auf Wunsch des
+# GateControl Gateway (Raspberry-Pi-Image) — Funk-Dienste auf Wunsch des
 # Gateways anlegen (docs/radio.md).
 #
-# Wird Zigbee in GateControl eingeschaltet, während der deCONZ-Container nicht
-# läuft (beim Start war kein Funkmodul da), legt der Gateway-Container
-# gateway-state/radio-start an. gatecontrol-radio.path startet dann dieses
-# Skript: Flag entfernen, `docker compose up -d deconz` (beim ersten Mal mit
+# Wird Zigbee (deCONZ oder zigbee2mqtt) oder Thread in GateControl eingeschaltet,
+# während der Container nicht läuft, legt der Gateway-Container
+# gateway-state/radio-start an ({"services":["zigbee2mqtt","otbr"]}; ohne
+# "services": deconz wie bisher). gatecontrol-radio.path startet dann dieses
+# Skript: Flag entfernen, `docker compose up -d <Dienste>` (beim ersten Mal mit
 # Image-Download). Ein- und ausgeschaltet wird danach allein über die
-# Steuerdatei des Gateways (radio-ctl/zigbee.env) – hier passiert nichts weiter.
+# Steuerdateien des Gateways (radio-ctl/*.env) – hier passiert nichts weiter.
 set -euo pipefail
 
 # shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
@@ -19,13 +20,22 @@ main() {
   [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen" >&2; exit 1; }
   [ -e "$FLAG" ] || exit 0
   # zuerst verbrauchen: ein neuer Wunsch des Gateways legt das Flag neu an
+  local want
+  want="$(head -c 4096 -- "$FLAG" 2>/dev/null || true)"
   rm -f -- "$FLAG"
   [ -s "$GC_DIR/config/gateway.env" ] || exit 0
+  # nur bekannte Dienste – der Inhalt kommt aus dem Gateway-Container
+  local svc=() s
+  for s in deconz zigbee2mqtt otbr; do
+    if printf '%s' "$want" | grep -q "\"$s\""; then svc+=("$s"); fi
+  done
+  if ! printf '%s' "$want" | grep -q '"services"'; then svc=(deconz); fi
+  [ "${#svc[@]}" -gt 0 ] || exit 0
   install -d -m 0755 "$GC_DIR/deconz"
   local args=(-f docker-compose.yml)
   [ -f "$GC_DIR/docker-compose.rollback.yml" ] && args+=(-f docker-compose.rollback.yml)
-  gc_log "Zigbee in GateControl eingeschaltet — deCONZ-Dienst wird angelegt"
-  (cd "$GC_DIR" && docker compose "${args[@]}" up -d --no-deps deconz)
+  gc_log "Funk in GateControl eingeschaltet — Dienst(e) ${svc[*]} werden angelegt"
+  (cd "$GC_DIR" && docker compose "${args[@]}" up -d --no-deps "${svc[@]}")
 }
 
 main "$@"

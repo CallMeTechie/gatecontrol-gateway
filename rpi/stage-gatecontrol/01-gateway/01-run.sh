@@ -10,7 +10,8 @@ GW="${ROOTFS_DIR}/opt/gatecontrol-gateway"
 rsync -rlptD --chown=root:root --exclude __pycache__ "${SRC}/" "${ROOTFS_DIR}/"
 
 # deCONZ-, Ollama- und Kamera-Image (Tag + Digest) in die Compose-Datei eintragen.
-sed -i -e "s|@DECONZ_IMAGE@|${DECONZ_IMAGE}|" -e "s|@OLLAMA_IMAGE@|${OLLAMA_IMAGE}|" -e "s|@KAMERAS_IMAGE@|${KAMERAS_IMAGE}|" "${GW}/docker-compose.yml"
+sed -i -e "s|@DECONZ_IMAGE@|${DECONZ_IMAGE}|" -e "s|@OLLAMA_IMAGE@|${OLLAMA_IMAGE}|" -e "s|@KAMERAS_IMAGE@|${KAMERAS_IMAGE}|" \
+  -e "s|@Z2M_IMAGE@|${Z2M_IMAGE}|" -e "s|@OTBR_IMAGE@|${OTBR_IMAGE}|" "${GW}/docker-compose.yml"
 if grep -q '@[A-Z_]*@' "${GW}/docker-compose.yml"; then
 	echo "Platzhalter in docker-compose.yml nicht ersetzt" >&2
 	exit 1

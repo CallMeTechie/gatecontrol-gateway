@@ -25,6 +25,10 @@ step "versions.env: Pins"
 grep -qF "image: $OLLAMA_IMAGE" docker-compose.example.yml || die "OLLAMA_IMAGE weicht von docker-compose.example.yml ab"
 [[ "$KAMERAS_IMAGE" =~ ^bluenviron/mediamtx:[0-9.]+-ffmpeg@sha256:[0-9a-f]{64}$ ]] || die "KAMERAS_IMAGE nicht per Tag+Digest gepinnt"
 grep -qF "image: $KAMERAS_IMAGE" docker-compose.example.yml || die "KAMERAS_IMAGE weicht von docker-compose.example.yml ab"
+[[ "$Z2M_IMAGE" =~ ^koenkk/zigbee2mqtt:[0-9.]+@sha256:[0-9a-f]{64}$ ]] || die "Z2M_IMAGE nicht per Tag+Digest gepinnt"
+grep -qF "image: $Z2M_IMAGE" docker-compose.example.yml || die "Z2M_IMAGE weicht von docker-compose.example.yml ab"
+[[ "$OTBR_IMAGE" =~ ^openthread/otbr:[a-z0-9.]+@sha256:[0-9a-f]{64}$ ]] || die "OTBR_IMAGE nicht per Digest gepinnt"
+grep -qF "image: $OTBR_IMAGE" docker-compose.example.yml || die "OTBR_IMAGE weicht von docker-compose.example.yml ab"
 [[ "$BUILD_CONTAINER" =~ @sha256:[0-9a-f]{64}$ ]] || die "BUILD_CONTAINER nicht per Digest gepinnt"
 echo "$DOCKER_GPG_SHA256  rpi/stage-gatecontrol/00-docker/files/docker.asc" | sha256sum -c - || die "docker.asc: SHA-256 passt nicht"
 GNUPGHOME="$(mktemp -d)"; export GNUPGHOME
@@ -85,7 +89,8 @@ rm -rf "$VROOT"
 
 step "docker compose config"
 CDIR="$(mktemp -d)"
-sed -e "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" -e "s|@OLLAMA_IMAGE@|$OLLAMA_IMAGE|" -e "s|@KAMERAS_IMAGE@|$KAMERAS_IMAGE|" "$R/opt/gatecontrol-gateway/docker-compose.yml" >"$CDIR/docker-compose.yml"
+sed -e "s|@DECONZ_IMAGE@|$DECONZ_IMAGE|" -e "s|@OLLAMA_IMAGE@|$OLLAMA_IMAGE|" -e "s|@KAMERAS_IMAGE@|$KAMERAS_IMAGE|" \
+  -e "s|@Z2M_IMAGE@|$Z2M_IMAGE|" -e "s|@OTBR_IMAGE@|$OTBR_IMAGE|" "$R/opt/gatecontrol-gateway/docker-compose.yml" >"$CDIR/docker-compose.yml"
 mkdir -p "$CDIR/config"
 (cd "$CDIR" && docker compose config -q) && echo ok || die "docker compose config"
 # Gleiche Sicherheits-Optionen wie docker-compose.example.yml
@@ -126,6 +131,23 @@ echo "$b" | jq -e '.devices == null and .privileged == null and .device_cgroup_r
   || die "Dienst deconz: nur die tty-Majors 166/188/204, kein devices:, nicht privileged"
 prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx deconz || true)"
 [ "$prof" = 0 ] || die "docker-compose.example.yml: deconz muss im Profil zigbee stehen (sonst lädt jeder das Image)"
+# zigbee2mqtt und Thread (docs/radio.md): wie im Beispiel (dort mit Profil zigbee2mqtt bzw. thread), Wächter statt
+# eines festen Geräts, nur die tty-Majors; der Border Router braucht NET_ADMIN/NET_RAW und /dev/net/tun, nie privileged
+for pair in zigbee2mqtt:zigbee2mqtt otbr:thread; do
+  svc="${pair%%:*}"; prf="${pair##*:}"
+  pick=".services.$svc | {image, entrypoint, working_dir, network_mode, device_cgroup_rules, devices, privileged, cap_add, cpu_shares, oom_score_adj, mem_limit, healthcheck, environment, volumes: [.volumes[] | {type, source, target, read_only}]}"
+  a="$(cd "$CDIR" && docker compose -f example.yml --profile "$prf" config --format json | jq -S "$pick")"
+  b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
+  if [ "$a" = "$b" ]; then echo "ok: Dienst $svc wie in docker-compose.example.yml"; else
+    diff <(echo "$a") <(echo "$b") || true; die "Dienst $svc weicht von docker-compose.example.yml ab"
+  fi
+  prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx "$svc" || true)"
+  [ "$prof" = 0 ] || die "docker-compose.example.yml: $svc muss im Profil $prf stehen (sonst lädt jeder das Image)"
+done
+echo "$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S '.services.zigbee2mqtt')" | jq -e '.devices == null and .privileged == null and .cap_add == null' >/dev/null \
+  || die "Dienst zigbee2mqtt: keine Geräte, keine Capabilities, nicht privileged"
+echo "$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S '.services.otbr')" | jq -e '.privileged == null and (.cap_add | sort) == ["NET_ADMIN", "NET_RAW"] and .device_cgroup_rules == ["c 166:* rmw", "c 188:* rmw"]' >/dev/null \
+  || die "Dienst otbr: nur NET_ADMIN/NET_RAW, nur ttyACM/ttyUSB, nicht privileged"
 # Lokale KI (docs/local-ai.md): wie im Beispiel (dort mit Profil ki), nur 127.0.0.1, Vorrang für das Gateway
 pick='.services.ki | {image, entrypoint, network_mode, cpu_shares, oom_score_adj, devices, privileged, cap_add, healthcheck, environment, volumes: [.volumes[] | {type, source, target, read_only}]}'
 a="$(cd "$CDIR" && docker compose -f example.yml --profile ki config --format json | jq -S "$pick")"
@@ -160,8 +182,8 @@ echo "$b" | jq -e '.network_mode == "none" and .cap_drop == ["ALL"] and .cap_add
 prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx office || true)"
 [ "$prof" = 0 ] || die "docker-compose.example.yml: office muss im Profil office stehen (sonst lädt jeder das ≈ 700-MB-Image)"
 vpick='.volumes | with_entries(.value |= {driver_opts})'
-# ki-models gehört nur dem Dienst ki (Profil ki im Beispiel)
-a="$(cd "$CDIR" && docker compose -f example.yml --profile ki --profile kameras --profile office config --format json | jq -S "$vpick")"
+# ki-models gehört nur dem Dienst ki (Profil ki im Beispiel), z2m-data/otbr-data den Funk-Diensten
+a="$(cd "$CDIR" && docker compose -f example.yml --profile ki --profile kameras --profile zigbee2mqtt --profile thread --profile office config --format json | jq -S "$vpick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"
 if [ "$a" = "$b" ]; then echo "ok: Volumes wie in docker-compose.example.yml"; else
   diff <(echo "$a") <(echo "$b") || true; die "Volumes weichen von docker-compose.example.yml ab"

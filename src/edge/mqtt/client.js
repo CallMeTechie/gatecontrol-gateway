@@ -8,7 +8,8 @@
 const net = require('node:net');
 const EventEmitter = require('node:events');
 
-const MAX_PACKET = 512 * 1024;
+// zigbee2mqtt meldet die Geräteliste (bridge/devices) in einer Nachricht – mit vielen Geräten einige 100 KB
+const MAX_PACKET = 4 * 1024 * 1024;
 const T = { CONNECT: 1, CONNACK: 2, PUBLISH: 3, PUBACK: 4, SUBSCRIBE: 8, SUBACK: 9, UNSUBSCRIBE: 10, UNSUBACK: 11, PINGREQ: 12, PINGRESP: 13, DISCONNECT: 14 };
 
 function encodeLength(n) {

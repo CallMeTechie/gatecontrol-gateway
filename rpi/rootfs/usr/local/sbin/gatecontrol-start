@@ -164,6 +164,12 @@ zigbee_wanted() {
   [ -n "$ZIGBEE_DEVICE" ]
 }
 
+# zigbee2mqtt / Thread gewünscht? gateway-state/radio.json ({"z2m":true,"thread":true}); ohne Datei: nein.
+radio_flag() {
+  local f="$GC_DIR/gateway-state/radio.json"
+  [ -r "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 99999)" -lt 4096 ] && grep -q "\"$1\":true" "$f"
+}
+
 # Lokale KI gewünscht? gateway-state/ai.json (vom Gateway, {"want":…}); ohne Datei: nein.
 ai_wanted() {
   local f="$GC_DIR/gateway-state/ai.json"
@@ -234,6 +240,16 @@ main() {
     # deCONZ eines früheren Starts entfernen (Modul abgezogen / in GateControl aus)
     compose rm -s -f deconz >/dev/null 2>&1 || true
   fi
+  # zigbee2mqtt und Thread Border Router (docs/radio.md): nur wenn in GateControl gewählt
+  local s
+  for s in z2m:zigbee2mqtt thread:otbr; do
+    if radio_flag "${s%%:*}"; then
+      gc_log "Funk: Dienst ${s##*:} wird gestartet (in GateControl eingeschaltet)"
+      svc+=("${s##*:}")
+    else
+      compose rm -s -f "${s##*:}" >/dev/null 2>&1 || true
+    fi
+  done
   local ai=0
   if ai_wanted; then
     ai=1

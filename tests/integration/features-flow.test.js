@@ -86,7 +86,7 @@ describe('integration: Phase-3a features against a fake server', () => {
   it('old server (no features): everything off, telemetry says so', () => {
     mgr.apply(undefined);
     const t = mgr.telemetry();
-    assert.deepEqual(t.capabilities, ['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'ai', 'cameras']);
+    assert.deepEqual(t.capabilities, ['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'ai', 'cameras']);
     for (const k of ['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache']) assert.equal(t.features[k].enabled, false, k);
     assert.equal(t.ups, null);
     assert.equal(t.dns, null);

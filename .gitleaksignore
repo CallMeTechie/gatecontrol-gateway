@@ -4,3 +4,8 @@
 # Beispielwert für features.ai.lan.keyRev (Revisionsnummer, kein Schlüssel) in docs/local-ai.md
 # aus Commit 235bc5c – im Folge-Commit durch einen Platzhalter ersetzt.
 235bc5ceda41a839462eb3d68401e93d78430002:docs/local-ai.md:generic-api-key:21
+# Test-Fixtures der Funk-Nachträge aus Commit c2c92dd (Stand der Schlüssel, Netzschlüssel einer
+# Border-Router-Attrappe) – im Folge-Commit durch zur Laufzeit erzeugte Werte ersetzt.
+c2c92dd4ae00faaa683e983f8817ab29bb908676:tests/radio.test.js:generic-api-key:369
+c2c92dd4ae00faaa683e983f8817ab29bb908676:tests/radio.test.js:generic-api-key:370
+c2c92dd4ae00faaa683e983f8817ab29bb908676:tests/radio_stacks.test.js:generic-api-key:278
