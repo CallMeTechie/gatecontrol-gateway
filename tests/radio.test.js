@@ -82,7 +82,7 @@ describe('radio: BLE formats', () => {
   it('BTHome v2 (Shelly BLU H&T): battery, humidity, temperature', () => {
     // 0x40 = v2 unverschlüsselt; 0x00 Paket 14; 0x01 Batterie 100; 0x2e Feuchte 71; 0x45 Temperatur 14,2 °C
     const p = parseAdvert('7C:C6:B6:00:11:22', adv(0xfcd2, [0x44, 0x00, 0x0e, 0x01, 0x64, 0x2e, 0x47, 0x45, 0x8e, 0x00], 'SBHT-003C'));
-    assert.deepEqual(p, { format: 'bthome', encrypted: false, values: { battery: 100, humidity: 71, temperature: 14.2 }, name: 'SBHT-003C' });
+    assert.deepEqual(p, { format: 'bthome', encrypted: false, keyState: null, decrypted: false, values: { battery: 100, humidity: 71, temperature: 14.2 }, name: 'SBHT-003C' });
   });
   it('BTHome v2: 0.01 values, signed temperature, binary window, button; unknown object stops reading', () => {
     const r = parseBthome(Buffer.from([0x40, 0x02, 0x18, 0xfc, 0x03, 0xbf, 0x13, 0x2d, 0x01, 0x3a, 0x01, 0x99, 0x01, 0x02]));
@@ -99,12 +99,13 @@ describe('radio: BLE formats', () => {
     assert.deepEqual(parseAdvert(mac, adv(0x181a, atc)).values, { temperature: 8.9, humidity: 64, battery: 82, voltage: 2.95 });
     assert.equal(parseAdvert('A4:C1:38:99:99:99', adv(0x181a, atc)), null);
     const pv = [0x33, 0x22, 0x11, 0x38, 0xc1, 0xa4, 0x66, 0x08, 0xa0, 0x11, 0xb8, 0x0b, 90, 7, 0];
-    assert.deepEqual(parseAdvert(mac, adv(0x181a, pv)), { format: 'pvvx', encrypted: false, values: { temperature: 21.5, humidity: 45.12, voltage: 3, battery: 90 }, name: null });
+    assert.deepEqual(parseAdvert(mac, adv(0x181a, pv)), { format: 'pvvx', encrypted: false, keyState: null, decrypted: false, values: { temperature: 21.5, humidity: 45.12, voltage: 3, battery: 90 }, name: null });
   });
   it('MiBeacon (Xiaomi firmware): recognised, values encrypted', () => {
     const p = parseAdvert('A4:C1:38:11:22:33', adv(0xfe95, [0x58, 0x58, 0x5b, 0x05, 0x01, 0x33, 0x22]));
     assert.equal(p.format, 'mibeacon');
     assert.equal(p.encrypted, true);
+    assert.equal(p.keyState, 'no_key', 'without a bindkey from GateControl');
   });
   it('other adverts and broken lengths → null', () => {
     assert.equal(parseAdvert('00:11:22:33:44:55', Buffer.from([2, 0x01, 0x06, 5, 0xff, 0x4c, 0x00, 1, 2])), null);
@@ -361,11 +362,14 @@ describe('radio: BLE scanner', () => {
 
 describe('radio: service, config, routes', () => {
   it('normalizeRadio / features.radio', () => {
-    assert.deepEqual(normalizeRadio(undefined), { zigbee: null, ble: false });
-    assert.deepEqual(normalizeRadio({ zigbee: 'yes', ble: 1 }), { zigbee: null, ble: false });
-    assert.deepEqual(normalizeRadio({ zigbee: false, ble: true }), { zigbee: false, ble: true });
-    assert.deepEqual(normalizeFeatures(undefined).radio, { zigbee: null, ble: false });
-    assert.deepEqual(normalizeFeatures({ radio: { zigbee: true } }).radio, { zigbee: true, ble: false });
+    const off = { stack: 'deconz', thread: false, bleKeys: null };
+    assert.deepEqual(normalizeRadio(undefined), { zigbee: null, ble: false, ...off });
+    assert.deepEqual(normalizeRadio({ zigbee: 'yes', ble: 1, stack: 'zha', thread: 'yes', bleKeys: 'XYZ' }), { zigbee: null, ble: false, ...off });
+    assert.deepEqual(normalizeRadio({ zigbee: false, ble: true }), { zigbee: false, ble: true, ...off });
+    assert.deepEqual(normalizeRadio({ zigbee: true, stack: 'zigbee2mqtt', thread: true, bleKeys: 'abcdef0123456789' }),
+      { zigbee: true, ble: false, stack: 'zigbee2mqtt', thread: true, bleKeys: 'abcdef0123456789' });
+    assert.deepEqual(normalizeFeatures(undefined).radio, { zigbee: null, ble: false, ...off });
+    assert.deepEqual(normalizeFeatures({ radio: { zigbee: true } }).radio, { zigbee: true, ble: false, ...off });
   });
 
   it('RadioService: telemetry stays small and names sticks, Thread and Bluetooth', async () => {
@@ -381,7 +385,12 @@ describe('radio: service, config, routes', () => {
     r.stop();
     assert.equal(t.enabled, true);
     assert.deepEqual(t.sticks.map((s) => s.kind), ['zigbee', 'multi', 'bluetooth']);
-    assert.deepEqual(t.thread, { sticks: 1, models: ['Home Assistant Connect ZBT-1'], otbr: false });
+    assert.deepEqual({ sticks: t.thread.sticks, models: t.thread.models, otbr: t.thread.otbr, state: t.thread.state }, { sticks: 1, models: ['Home Assistant Connect ZBT-1'], otbr: false, state: 'off' });
+    assert.deepEqual(t.sticks.map((s) => s.use), ['deconz', null, null], 'the ConBee serves deCONZ');
+    assert.equal(t.sticks[1].z2m, 'ember');
+    assert.equal(t.sticks[1].thread, true);
+    assert.equal(t.zigbee.stack, 'deconz');
+    assert.equal(t.zigbee2mqtt, null);
     assert.equal(t.ble.adapter.name, 'hci0');
     assert.ok(JSON.stringify(t).length < 3000, 'heartbeat limit 16 KB');
     assert.ok(fs.existsSync(path.join(ctl, 'zigbee.env')));

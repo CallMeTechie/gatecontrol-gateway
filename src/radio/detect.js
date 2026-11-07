@@ -21,19 +21,26 @@ const MAX_STICKS = 8;
 /**
  * Bekannte Funksticks. kind: zigbee | thread | multi (Zigbee oder Thread, je nach Firmware).
  * deconz: nur Funkmodule von dresden elektronik spricht deCONZ; baud wie deCONZ sie erwartet.
+ * z2m:    Adapter für zigbee2mqtt (ember = Silicon Labs EFR32, zstack = TI CC26xx, deconz = ConBee/RaspBee),
+ *         z2mBaud wenn nicht der Standard des Adapters (115200).
+ * thread: kann mit RCP-Firmware (OpenThread) als Thread-Funk dienen; threadBaud für den Border Router.
  */
 const KNOWN = [
-  { vid: '1cf1', pid: '0030', model: 'ConBee II', kind: 'zigbee', deconz: true, baud: 115200 },
-  { vid: '0403', pid: '6015', product: /conbee\s*iii/i, model: 'ConBee III', kind: 'zigbee', deconz: true, baud: 115200 },
-  { vid: '0403', pid: '6015', product: /conbee/i, model: 'ConBee', kind: 'zigbee', deconz: true, baud: 38400 },
-  { vid: '10c4', pid: 'ea60', product: /skyconnect/i, model: 'Home Assistant SkyConnect', kind: 'multi', deconz: false },
-  { vid: '10c4', pid: 'ea60', product: /zbt-1/i, model: 'Home Assistant Connect ZBT-1', kind: 'multi', deconz: false },
-  { product: /zbt-2/i, manufacturer: /nabu\s*casa/i, model: 'Home Assistant Connect ZBT-2', kind: 'multi', deconz: false },
-  { vid: '1a86', pid: '55d4', product: /dongle plus v2|zbdongle-e/i, model: 'Sonoff ZBDongle-E', kind: 'multi', deconz: false },
-  { vid: '10c4', pid: 'ea60', product: /sonoff.*dongle plus|zbdongle-p/i, model: 'Sonoff ZBDongle-P', kind: 'zigbee', deconz: false },
-  { vid: '1915', product: /openthread/i, model: 'nRF52840 (OpenThread)', kind: 'thread', deconz: false },
+  { vid: '1cf1', pid: '0030', model: 'ConBee II', kind: 'zigbee', deconz: true, baud: 115200, z2m: 'deconz' },
+  { vid: '0403', pid: '6015', product: /conbee\s*iii/i, model: 'ConBee III', kind: 'zigbee', deconz: true, baud: 115200, z2m: 'deconz' },
+  { vid: '0403', pid: '6015', product: /conbee/i, model: 'ConBee', kind: 'zigbee', deconz: true, baud: 38400, z2m: 'deconz', z2mBaud: 38400 },
+  { vid: '10c4', pid: 'ea60', product: /skyconnect/i, model: 'Home Assistant SkyConnect', kind: 'multi', deconz: false, z2m: 'ember', thread: true, threadBaud: 460800 },
+  { vid: '10c4', pid: 'ea60', product: /zbt-1/i, model: 'Home Assistant Connect ZBT-1', kind: 'multi', deconz: false, z2m: 'ember', thread: true, threadBaud: 460800 },
+  { product: /zbt-2/i, manufacturer: /nabu\s*casa/i, model: 'Home Assistant Connect ZBT-2', kind: 'multi', deconz: false, z2m: 'ember', z2mBaud: 460800, thread: true, threadBaud: 460800 },
+  { vid: '1a86', pid: '55d4', product: /dongle plus v2|zbdongle-e/i, model: 'Sonoff ZBDongle-E', kind: 'multi', deconz: false, z2m: 'ember', thread: true, threadBaud: 460800 },
+  { vid: '10c4', pid: 'ea60', product: /sonoff.*dongle plus|zbdongle-p/i, model: 'Sonoff ZBDongle-P', kind: 'zigbee', deconz: false, z2m: 'zstack' },
+  { vid: '10c4', pid: 'ea60', product: /slzb-07/i, model: 'SMLIGHT SLZB-07', kind: 'multi', deconz: false, z2m: 'ember', thread: true, threadBaud: 460800 },
+  { vid: '10c4', pid: 'ea60', product: /slae\.sh|cc2652/i, model: 'CC2652 (slae.sh)', kind: 'zigbee', deconz: false, z2m: 'zstack' },
+  { vid: '0451', pid: '16a8', model: 'TI CC2531', kind: 'zigbee', deconz: false, z2m: 'zstack' },
+  { vid: '0451', pid: 'bef3', model: 'TI CC26x2R LaunchPad', kind: 'zigbee', deconz: false, z2m: 'zstack' },
+  { vid: '1915', product: /openthread/i, model: 'nRF52840 (OpenThread)', kind: 'thread', deconz: false, thread: true, threadBaud: 460800 },
   // sonst jedes Funkmodul von dresden elektronik (deCONZ erkennt den Typ an der Firmware)
-  { manufacturer: /dresden.?elektronik/i, model: 'ConBee', kind: 'zigbee', deconz: true, baud: 115200 },
+  { manufacturer: /dresden.?elektronik/i, model: 'ConBee', kind: 'zigbee', deconz: true, baud: 115200, z2m: 'deconz' },
 ];
 
 /** Text aus sysfs: ohne Steuerzeichen, getrimmt, höchstens n Zeichen. */
@@ -86,7 +93,7 @@ function devNumbers(sys, tty) {
   return { major, minor: Number(m[2]) };
 }
 
-/** USB-Funksticks: [{ id, kind, model, bus: 'usb', tty, dev, deconz, baud, vid, pid }]. */
+/** USB-Funksticks: [{ id, kind, model, bus: 'usb', tty, dev, deconz, baud, z2m, z2mBaud, thread, threadBaud, vid, pid }]. */
 function usbSticks(sys) {
   const ttyDir = path.join(sys, 'class', 'tty');
   let names = [];
@@ -115,6 +122,10 @@ function usbSticks(sys) {
       dev: numbers ? `${numbers.major}:${numbers.minor}` : null,
       deconz: k.deconz === true,
       baud: k.baud || null,
+      z2m: k.z2m || null,
+      z2mBaud: k.z2mBaud || null,
+      thread: k.thread === true,
+      threadBaud: k.threadBaud || null,
       vid: info.vid,
       pid: info.pid,
     });
@@ -143,6 +154,10 @@ function hostZigbee(sys, hostProfile) {
     dev: numbers ? `${numbers.major}:${numbers.minor}` : null,
     deconz: true,
     baud: 38400,
+    z2m: 'deconz',
+    z2mBaud: 38400,
+    thread: false,
+    threadBaud: null,
     firmware: typeof r.firmware === 'string' && /^0x[0-9a-f]{8}$/i.test(r.firmware) ? r.firmware.toLowerCase() : null,
   };
 }

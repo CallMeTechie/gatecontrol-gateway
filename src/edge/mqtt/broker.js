@@ -57,7 +57,7 @@ function buildConf({ dir, listenAddrs, tls }) {
     'log_type warning',
     'log_type notice',
     'connection_messages true',
-    'max_packet_size 262144',
+    'max_packet_size 4194304', // bridge/devices von zigbee2mqtt (Funk) – Edge-Teile senden weiter höchstens 256 KB
     'max_queued_messages 1000',
     '',
     `listener ${PORT} 127.0.0.1`,

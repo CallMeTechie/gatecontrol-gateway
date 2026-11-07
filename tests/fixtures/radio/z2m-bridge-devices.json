@@ -1,0 +1,56 @@
+[
+  { "ieee_address": "0x00124b0024c2f1a0", "type": "Coordinator", "friendly_name": "Coordinator", "network_address": 0, "supported": true, "interview_completed": true, "interviewing": false, "disabled": false },
+  {
+    "ieee_address": "0x001788010b2c3d4e", "type": "Router", "friendly_name": "Wohnzimmer/Decke", "network_address": 12345, "supported": true,
+    "interview_completed": true, "interviewing": false, "disabled": false, "power_source": "Mains (single phase)", "model_id": "LCT015", "manufacturer": "Signify Netherlands B.V.",
+    "definition": {
+      "model": "9290012573A", "vendor": "Philips", "description": "Hue white and color ambiance E26/E27/E14",
+      "exposes": [
+        { "type": "light", "features": [
+          { "type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON", "value_off": "OFF" },
+          { "type": "numeric", "name": "brightness", "property": "brightness", "access": 7, "value_min": 0, "value_max": 254 },
+          { "type": "numeric", "name": "color_temp", "property": "color_temp", "access": 7, "value_min": 153, "value_max": 500 },
+          { "type": "composite", "name": "color_xy", "property": "color", "access": 7, "features": [
+            { "type": "numeric", "name": "x", "property": "x", "access": 7 }, { "type": "numeric", "name": "y", "property": "y", "access": 7 } ] }
+        ] },
+        { "type": "enum", "name": "effect", "property": "effect", "access": 2, "values": ["blink", "breathe"] },
+        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
+      ]
+    }
+  },
+  {
+    "ieee_address": "0x000d6ffffe1a2b3c", "type": "Router", "friendly_name": "Steckdose Kaffee", "network_address": 2222, "supported": true,
+    "interview_completed": true, "interviewing": false, "disabled": false, "power_source": "Mains (single phase)",
+    "definition": {
+      "model": "E1603/E1702/E1708", "vendor": "IKEA", "description": "TRADFRI control outlet",
+      "exposes": [ { "type": "switch", "features": [ { "type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON", "value_off": "OFF" } ] },
+        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 } ]
+    }
+  },
+  {
+    "ieee_address": "0x00158d0001a2b3c4", "type": "EndDevice", "friendly_name": "Bad Klima", "network_address": 3333, "supported": true,
+    "interview_completed": true, "interviewing": false, "disabled": false, "power_source": "Battery",
+    "definition": {
+      "model": "WSDCGQ11LM", "vendor": "Aqara", "description": "Temperature and humidity sensor",
+      "exposes": [
+        { "type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%" },
+        { "type": "numeric", "name": "temperature", "property": "temperature", "access": 1, "unit": "°C" },
+        { "type": "numeric", "name": "humidity", "property": "humidity", "access": 1, "unit": "%" },
+        { "type": "numeric", "name": "pressure", "property": "pressure", "access": 1, "unit": "hPa" },
+        { "type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1 }
+      ]
+    }
+  },
+  {
+    "ieee_address": "0x00158d0002c3d4e5", "type": "EndDevice", "friendly_name": "Haustür", "network_address": 4444, "supported": true,
+    "interview_completed": true, "interviewing": false, "disabled": false, "power_source": "Battery",
+    "definition": {
+      "model": "MCCGQ11LM", "vendor": "Aqara", "description": "Door and window sensor",
+      "exposes": [ { "type": "binary", "name": "contact", "property": "contact", "access": 1, "value_on": false, "value_off": true },
+        { "type": "numeric", "name": "battery", "property": "battery", "access": 1 } ]
+    }
+  },
+  { "ieee_address": "0xa4c138aabbccddee", "type": "EndDevice", "friendly_name": "0xa4c138aabbccddee", "network_address": 5555, "supported": false,
+    "interview_completed": false, "interviewing": true, "disabled": false, "model_id": "TS0201", "manufacturer": "_TZ3000_xyz" },
+  { "ieee_address": "not-an-ieee", "type": "Router", "friendly_name": "kaputt" }
+]
