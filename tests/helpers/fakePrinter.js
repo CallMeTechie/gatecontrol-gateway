@@ -50,7 +50,22 @@ function printerAttrs(o) {
     [TAG.integer, 'marker-levels', o.levels || [70, 55, 8, 40]],
     [TAG.keyword, 'marker-types', ['ink-cartridge', 'ink-cartridge', 'ink-cartridge', 'ink-cartridge']],
     [TAG.integer, 'marker-low-levels', [10, 10, 10, 10]],
+    // Raster-Fähigkeiten (fürs Umwandeln von PDF, src/print/convert.js) – nur wenn der Test sie nennt
+    ...(o.pwgTypes ? [[TAG.keyword, 'pwg-raster-document-type-supported', o.pwgTypes]] : []),
+    ...(o.sheetBack ? [[TAG.keyword, 'pwg-raster-document-sheet-back', o.sheetBack]] : []),
+    ...(o.urf ? [[TAG.keyword, 'urf-supported', o.urf]] : []),
+    ...(o.media ? [[TAG.keyword, 'media-default', o.media]] : []),
   ];
+}
+
+/** resolution-Werte (RFC 8010: x, y, Einheit 3 = dpi) als Rohbytes */
+function resolutions(name, list) {
+  return Buffer.concat(list.map((dpi, i) => {
+    const n = Buffer.from(i === 0 ? name : '');
+    const v = Buffer.alloc(9); v.writeInt32BE(dpi, 0); v.writeInt32BE(dpi, 4); v[8] = 3;
+    const len = Buffer.alloc(2); len.writeUInt16BE(n.length);
+    return Buffer.concat([Buffer.from([TAG.resolution]), len, n, Buffer.from([0, 9]), v]);
+  }));
 }
 
 const rangeOf = (lo, hi) => { const b = Buffer.alloc(8); b.writeInt32BE(lo, 0); b.writeInt32BE(hi, 4); return b; };
@@ -80,9 +95,11 @@ async function startFakePrinter(opts = {}) {
           const attrs = printerAttrs(state.opts.printer || {});
           msg = Buffer.concat([ipp.encodeMessage(0, m.requestId, [[GROUP.operation, base], [GROUP.printer, attrs]]).subarray(0, -1),
             // copies-supported als rangeOfInteger (Rohwert)
-            Buffer.from([TAG.rangeOfInteger, 0, 16]), Buffer.from('copies-supported'), Buffer.from([0, 8]), rangeOf(1, 99), Buffer.from([GROUP.end])]);
+            Buffer.from([TAG.rangeOfInteger, 0, 16]), Buffer.from('copies-supported'), Buffer.from([0, 8]), rangeOf(1, 99),
+            resolutions('pwg-raster-document-resolution-supported', (state.opts.printer || {}).pwgRes || []), Buffer.from([GROUP.end])]);
         } else if (op === OP.PRINT_JOB) {
-          const status = state.opts.printStatus || 0;
+          // refuse: Formate, die der Drucker trotz Nennung ablehnt (client-error-document-format-not-supported)
+          const status = (state.opts.refuse || []).includes(opAttrs['document-format'][0]) ? 0x040a : (state.opts.printStatus || 0);
           if (status === 0) {
             const id = state.nextJobId++;
             state.printed.push({ id, format: opAttrs['document-format'][0], name: opAttrs['job-name'][0], user: opAttrs['requesting-user-name'][0], copies: (jobAttrs.copies || [1])[0], sides: (jobAttrs.sides || [null])[0], color: (jobAttrs['print-color-mode'] || [null])[0], data: m.data });

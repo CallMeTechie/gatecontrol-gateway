@@ -27,6 +27,8 @@ jobs:
         run: npm ci
         env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN }}' }
 
+      - name: poppler-utils (PDF umwandeln, tests/print_convert.test.js – wie im Image)
+        run: sudo apt-get install -y poppler-utils || (sudo apt-get update && sudo apt-get install -y poppler-utils)
       - name: Tests
         run: node --test --test-force-exit tests/
 

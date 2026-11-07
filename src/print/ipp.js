@@ -248,6 +248,9 @@ const PRINTER_ATTRS = [
   'printer-state', 'printer-state-reasons', 'printer-is-accepting-jobs', 'printer-make-and-model', 'printer-name',
   'printer-info', 'printer-location', 'printer-uuid', 'color-supported', 'sides-supported', 'print-color-mode-supported',
   'document-format-supported', 'copies-supported', 'marker-names', 'marker-colors', 'marker-levels', 'marker-types', 'marker-low-levels',
+  // fürs Umwandeln von PDF (convert.js): Raster-Auflösungen und -Farbarten, Rückseiten-Lage, Papier
+  'pwg-raster-document-resolution-supported', 'pwg-raster-document-type-supported', 'pwg-raster-document-sheet-back',
+  'urf-supported', 'media-default', 'media-ready',
 ];
 
 async function getPrinterAttributes(ep, opts = {}) {
@@ -260,6 +263,7 @@ async function getPrinterAttributes(ep, opts = {}) {
 }
 
 const { cleanText } = require('./config');
+const { rasterInfo } = require('./convert');
 
 const clip = (s, n) => (typeof s === 'string' ? cleanText(s, n) : null);
 const COLOR_RE = /^#[0-9A-Fa-f]{6}/;
@@ -293,6 +297,8 @@ function printerInfo(a) {
     formats: [...new Set(list('document-format-supported').filter((f) => typeof f === 'string').map((f) => f.toLowerCase().slice(0, 60)))].slice(0, 24),
     copiesMax: copies && Number.isInteger(copies.upper) ? Math.max(1, Math.min(999, copies.upper)) : 1,
     markers,
+    // nur im Gateway (nicht im Bericht): woraus convert.js das Rasterformat wählt
+    raster: rasterInfo(a),
     model: clip(first('printer-make-and-model'), 120),
     name: clip(first('printer-info'), 120) || clip(first('printer-name'), 120),
     location: clip(first('printer-location'), 120),

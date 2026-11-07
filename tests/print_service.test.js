@@ -9,6 +9,7 @@ const path = require('node:path');
 const express = require('express');
 const ippLib = require('../src/print/ipp');
 const esclLib = require('../src/print/escl');
+const convertLib = require('../src/print/convert');
 const { PrintService } = require('../src/print/print');
 const { FeatureManager } = require('../src/features/manager');
 const { normalizeFeatures } = require('../src/features/config');
@@ -143,17 +144,20 @@ test('Drucker aus: Auftrag wartet und geht raus, sobald er wieder da ist', async
 });
 
 test('Format passt nicht: abgelehnt ohne Versuch; Drucker lehnt ab: failed', async () => {
-  const fp = await startFakePrinter({ printer: { formats: ['image/urf', 'image/jpeg'] } });
+  // nur ein Herstellerformat, kein Raster, kein JPEG: das Gateway kann PDF nicht umwandeln
+  const fp = await startFakePrinter({ printer: { formats: ['application/vnd.hp-pcl'] } });
   const srv = fakeServer();
-  const { ps } = service(fp, srv);
+  const { ps } = service(fp, srv, { converter: { ...convertLib, available: () => true } });
   try {
     await ps.apply({ enabled: true, manual: [] });
     await ps.search();
     srv.addJob('job_cccccccc3', Buffer.from('%PDF'));
     await ps.pollJobs();
-    assert.deepEqual(srv.of('/api/v1/gateway/print/jobs/job_cccccccc3').map((b) => [b.state, b.error]), [['failed', 'format_unsupported']]);
+    assert.deepEqual(srv.of('/api/v1/gateway/print/jobs/job_cccccccc3').map((b) => [b.state, b.error, b.message]), [['failed', 'format_unsupported', 'no_raster_format']]);
     assert.equal(fp.state.printed.length, 0);
     srv.jobs = [];
+    fp.state.opts.printer = { formats: ['application/vnd.hp-pcl', 'image/jpeg'] };
+    await ps.search();
     fp.state.opts.printStatus = 0x040b; // client-error-attributes-or-values-not-supported
     srv.addJob('job_dddddddd4', Buffer.from([0xff, 0xd8, 0xff]), { format: 'image/jpeg' });
     await ps.pollJobs();
@@ -212,7 +216,8 @@ test('settingsFor: Glas statt Einzug, wenn es keinen gibt; kleinste Auflösung a
 
 test('Feature-Manager: print aus dem Config-Pull, Capability, Mgmt-Routen', async () => {
   const f = normalizeFeatures({ print: { enabled: true, manual: ['192.168.1.70'] } });
-  assert.deepEqual(f.print, { enabled: true, manual: ['192.168.1.70'] });
+  assert.deepEqual(f.print, { enabled: true, manual: ['192.168.1.70'], convert: true });
+  assert.equal(normalizeFeatures({ print: { enabled: true, convert: false } }).print.convert, false);
   assert.equal(normalizeFeatures(undefined).print.enabled, false);
   assert.equal(normalizeFeatures({}).print.enabled, false);
   const calls = [];
@@ -220,9 +225,10 @@ test('Feature-Manager: print aus dem Config-Pull, Capability, Mgmt-Routen', asyn
   const print = { apply: async (c) => calls.push(c), stop() {}, featureTelemetry: () => ({ enabled: true, devices: 1 }), requestSearch: () => 'accepted', requestJobs: () => 'accepted', requestScan: (b) => (b.deviceId === 'x' ? 'unknown_device' : 'accepted'), cancelScan: () => 'accepted' };
   const mgr = new FeatureManager({ netwatch: stub, inetq: stub, presence: stub, ups: { ...stub, featureTelemetry: () => ({}) }, print });
   await mgr.apply({ print: { enabled: true } });
-  assert.deepEqual(calls[0], { enabled: true, manual: [] });
+  assert.deepEqual(calls[0], { enabled: true, manual: [], convert: true });
   const tel = mgr.telemetry();
   assert.ok(tel.capabilities.includes('print'));
+  assert.ok(tel.capabilities.includes('print-convert'), 'PDF-Umwandlung für Drucker ohne PDF');
   assert.deepEqual(tel.features.print, { enabled: true, devices: 1 });
 
   const app = express();
