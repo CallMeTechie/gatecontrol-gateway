@@ -64,7 +64,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
       fonts-liberation2 fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu-core && \
     rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
-    soffice --version
+    test -x /usr/lib/libreoffice/program/soffice.bin
+# Kein `soffice --version` beim Bauen: unter QEMU (arm64/armv7 im Release) stürzt
+# LibreOffice mit SIGSEGV (139) ab. Ausgeführt wird es nativ im Test-Workflow (amd64).
 ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-office/office.sh ]; do sleep 2; done; exec /bin/sh /gc-office/office.sh"]
 
 # --- Stage 3: runtime ---
