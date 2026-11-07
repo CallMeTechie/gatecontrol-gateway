@@ -5,9 +5,10 @@
 // signierte Abgabe per HTTPS im LAN, Bestand/Statistik an den Server.
 
 const path = require('node:path');
+const { setImmediate: tick } = require('node:timers/promises');
 const logger = require('../logger');
 const { FeatureStatus, loop } = require('../features/status');
-const { BlobStore } = require('./store');
+const { BlobStore, SLICE_MS } = require('./store');
 const { makeCacheClient } = require('./fetcher');
 const { makeHandler, LanBlobServer } = require('./lanServer');
 const { loadOrCreate } = require('./selfsigned');
@@ -174,20 +175,27 @@ class HomeCache {
       this.want = all.filter((w) => kinds[w.kind] === true).sort((a, b) => b.priority - a.priority);
       this.lastSyncAt = this.now();
       const prio = new Map(this.want.map((w) => [w.sha256, w.priority]));
+      // Zuerst raus: nicht (mehr) im Vorrat (LRU), dann niedrigere Priorität (LRU); gleich/höher bleibt.
+      // Reihenfolge einmal je Abgleich – nicht je gewolltem Blob (bei 20 000 Einträgen
+      // und vollem Speicher sonst O(n² log n) am Stück, das Gateway antwortet minutenlang nicht).
+      await tick();
+      const plan = store.evictionPlan((sha) => (prio.has(sha) ? prio.get(sha) : -Infinity));
+      await tick();
       let fetchedAny = false;
       const failures = [];
+      let limit = this.effectiveMax();
+      let sliceAt = performance.now();
       for (const w of this.want) {
+        // Ereignisschleife regelmäßig freigeben (Heartbeat, Proxy, Probe, LAN-Abgabe).
+        if (performance.now() - sliceAt >= SLICE_MS) {
+          await tick();
+          sliceAt = performance.now();
+          if (this.store === store && this.cfg.enabled) limit = this.effectiveMax();
+        }
         if (this.store !== store || !this.cfg.enabled) break;
         if (store.has(w.sha256)) continue;
-        const limit = this.effectiveMax();
         if (w.size > limit) continue;
-        // Zuerst raus: nicht (mehr) im Vorrat (LRU), dann niedrigere Priorität (LRU); gleich/höher bleibt.
-        const ok = await store.makeRoom(w.size, limit, (sha) => {
-          if (!prio.has(sha)) return -1e15;
-          const p = prio.get(sha);
-          return p < w.priority ? p : null;
-        });
-        if (!ok) continue;
+        if (!(await plan.makeRoom(w.size, limit, w.priority))) continue;
         this.downloading = { sha256: w.sha256, size: w.size, bytes: 0, kind: w.kind };
         this.abort = new AbortController();
         try {
@@ -207,8 +215,10 @@ class HomeCache {
           this.downloading = null;
           this.abort = null;
         }
+        limit = this.effectiveMax();
+        sliceAt = performance.now();
       }
-      store.persist();
+      await store.save();
       if (failures.length) this.status.fail(`download: ${failures[0]}`); else this.status.ok();
       if (fetchedAny) await this.report();
     } catch (err) {
@@ -267,7 +277,7 @@ class HomeCache {
     } else {
       this.needFull = true;
     }
-    store.persist();
+    await store.save();
   }
 
   /** Mgmt „Zwischenspeicher leeren“. */
