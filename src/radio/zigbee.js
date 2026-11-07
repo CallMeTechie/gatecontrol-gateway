@@ -82,7 +82,8 @@ class Zigbee {
     this.askHostFn = askHost;     // radio.js: ein Flag für alle Funk-Dienste des Pi-Hosts
     this.wish = wish;             // radio.js: zigbee2mqtt/Thread für radio.json
     this.mode = null;            // null = automatisch, true/false aus GateControl
-    this.sticks = [];
+    this.sticks = [];            // Sticks, die „automatisch“ zu haben sind
+    this.manual = null;          // von Hand für Zigbee festgelegt: { stick } (stick null = nicht eingesteckt)
     this.hostProfile = null;
     this.reachable = false;
     this.info = null;            // { channel, firmware, devicename, rfconnected }
@@ -103,19 +104,24 @@ class Zigbee {
     const z = radios.find((x) => x && x.kind === 'zigbee');
     return z && typeof z.mode === 'string' ? z.mode : 'auto';
   }
-  device() { return this.sticks.find((s) => s.deconz && s.tty && s.dev) || null; }
+  device() {
+    if (this.manual) { const s = this.manual.stick; return s && s.tty && s.dev ? s : null; }
+    return this.sticks.find((s) => s.deconz && s.tty && s.dev) || null;
+  }
   modeName() { return this.mode === true ? 'on' : this.mode === false ? 'off' : 'auto'; }
   want() {
     if (this.mode !== null) return this.mode;
     const host = this._hostMode();          // settings.txt ZIGBEE= (Pi-Image) zählt nur bei „automatisch“
     if (host === 'off') return false;
-    return host === 'on' || !!this.device();
+    // ein von Hand für Zigbee festgelegter Stick zählt wie ein erkanntes Funkmodul (auch wenn er gerade fehlt)
+    return host === 'on' || !!this.device() || !!this.manual;
   }
 
   /** Neue Einstellung / neue Hardware → Steuerdatei (und Wunsch für den Pi-Host) schreiben. */
-  apply({ mode, sticks, hostProfile }) {
+  apply({ mode, sticks, hostProfile, manual }) {
     if (mode !== undefined) this.mode = typeof mode === 'boolean' ? mode : null;
     if (Array.isArray(sticks)) this.sticks = sticks;
+    if (manual !== undefined) this.manual = manual && typeof manual === 'object' ? { stick: manual.stick || null } : null;
     if (hostProfile !== undefined) this.hostProfile = hostProfile;
     const want = this.want();
     if (want && !this.wantSince) this.wantSince = this.now();
@@ -294,7 +300,10 @@ class Zigbee {
       return 'running';
     }
     if (!want) return 'off';
-    if (!this.device()) return this.sticks.some((s) => s.kind !== 'thread' && !s.deconz) ? 'unsupported' : 'no_stick';
+    if (!this.device()) {
+      if (this.manual) return this.manual.stick ? 'no_stick' : 'stick_missing';
+      return this.sticks.some((s) => s.kind !== 'thread' && !s.deconz) ? 'unsupported' : 'no_stick';
+    }
     if (svc === 'missing') return 'service_missing';
     if (svc === 'absent') return this.hostProfile && this.hostProfile.radio_start === true ? 'starting' : 'service_missing';
     const w = this.watcher();

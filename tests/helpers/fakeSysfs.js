@@ -16,7 +16,7 @@ function write(file, text) {
 }
 
 /**
- * @param {{ usb?: Array<{ port, vid, pid, manufacturer?, product?, tty, dev }>, uart?: Array<{ tty, dev }>, bt?: Array<{ name, usbPort?, product? }> }} spec
+ * @param {{ usb?: Array<{ port, vid, pid, manufacturer?, product?, serial?, tty, dev }>, uart?: Array<{ tty, dev }>, bt?: Array<{ name, usbPort?, product? }> }} spec
  * @returns {string} Wurzel (statt /sys)
  */
 function makeSysfs(spec = {}) {
@@ -28,6 +28,7 @@ function makeSysfs(spec = {}) {
     write(path.join(dev, 'idProduct'), u.pid + '\n');
     if (u.manufacturer) write(path.join(dev, 'manufacturer'), u.manufacturer + '\n');
     if (u.product) write(path.join(dev, 'product'), u.product + '\n');
+    if (u.serial) write(path.join(dev, 'serial'), u.serial + '\n');
     const iface = path.join(dev, `${u.port}:1.0`);
     const ttyDev = u.tty.startsWith('ttyUSB') ? path.join(iface, u.tty) : path.join(iface, 'tty', u.tty);
     fs.mkdirSync(ttyDev, { recursive: true });
@@ -64,7 +65,19 @@ function makeSysfs(spec = {}) {
   return root;
 }
 
+/**
+ * Ein kleines /dev mit serial/by-id: { '<by-id-Name>': 'ttyACM0' } → Wurzel (statt /dev).
+ * Die Links zeigen wie bei udev auf ../../ttyACM0 (das Ziel muss es nicht geben).
+ */
+function makeDevById(links = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-dev-'));
+  const dir = path.join(root, 'serial', 'by-id');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [name, tty] of Object.entries(links)) fs.symlinkSync(path.join('..', '..', tty), path.join(dir, name));
+  return root;
+}
+
 const CONBEE2 = { port: '1-1.2', vid: '1cf1', pid: '0030', manufacturer: 'dresden elektronik ingenieurtechnik GmbH', product: 'ConBee II', tty: 'ttyACM0', dev: '166:0' };
 const ZBT1 = { port: '1-1.3', vid: '10c4', pid: 'ea60', manufacturer: 'Nabu Casa', product: 'Home Assistant Connect ZBT-1', tty: 'ttyUSB0', dev: '188:0' };
 
-module.exports = { makeSysfs, CONBEE2, ZBT1 };
+module.exports = { makeSysfs, makeDevById, CONBEE2, ZBT1 };

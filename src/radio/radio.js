@@ -9,6 +9,8 @@
 //
 // Ein Stick bedient genau einen Funk: zuerst Zigbee (der gewählte Dienst), dann
 // Thread mit einem anderen Stick. Passt nur ein Stick, meldet Thread „stick_busy“.
+// In GateControl lässt sich je Stick von Hand festlegen, wofür er dient
+// (features.radio.sticks, Capability radio-stick-assign) – das geht vor.
 
 const fs = require('node:fs');
 const os = require('node:os');
@@ -56,30 +58,101 @@ function lanInterface() {
   return null;
 }
 
-/** Welcher Stick welchen Funk bedient (ein Stick – ein Dienst). */
-function assignSticks(sticks, { z2m, thread, deconzStick }) {
-  const usable = (s) => s && s.tty && s.dev;
+const usable = (s) => !!(s && s.tty && s.dev);
+
+/**
+ * Welcher Stick welchen Funk bedient (ein Stick – ein Dienst).
+ *
+ * choices: Map Kennung → 'zigbee' | 'thread' | 'none' (von Hand in GateControl festgelegt,
+ * features.radio.sticks). Die Wahl von Hand geht vor; „automatisch“ verteilt nur Sticks ohne
+ * Wahl – und nur an einen Funk, für den kein Stick von Hand festgelegt ist. Fehlt der von Hand
+ * gewählte Stick, wartet der Funk auf ihn (`…Missing`) und nimmt keinen anderen.
+ *
+ * @returns {{ autoSticks, zigbeeManual, zigbeePick, zigbeeMissing, z2mStick, z2mMissing,
+ *   threadManual, threadStick, threadMissing, threadBusy, z2mWant?, deconzStick? }}
+ */
+function planSticks(sticks, choices = new Map()) {
+  const choice = (s) => choices.get(s.id) || 'auto';
+  const autoSticks = sticks.filter((s) => choice(s) === 'auto');
+  const wanted = (use) => [...choices.values()].includes(use);
+  const zigbeeManual = wanted('zigbee');
+  const threadManual = wanted('thread');
+  // mehrere Sticks für denselben Funk: der zuerst festgelegte, der eingesteckt ist (Reihenfolge der Einstellung, nie die ttyACM-Nummer)
+  const pick = (use) => {
+    for (const [id, u] of choices) {
+      if (u !== use) continue;
+      const s = sticks.find((x) => x.id === id);
+      if (s) return s;
+    }
+    return null;
+  };
+  const zigbeePick = zigbeeManual ? pick('zigbee') : null;
+  const threadPick = threadManual ? pick('thread') : null;
+  return {
+    autoSticks, choice, zigbeeManual, zigbeePick, zigbeeMissing: zigbeeManual && !zigbeePick,
+    threadManual, threadPick, threadMissing: threadManual && !threadPick,
+  };
+}
+
+/** Welcher Stick welchen Funk bedient (ein Stick – ein Dienst); deconzStick hat Zigbee schon (deCONZ). */
+function assignSticks(sticks, { z2m, thread, deconzStick, choices = new Map() }) {
+  const p = planSticks(sticks, choices);
   let z2mStick = null;
-  // zigbee2mqtt: zuerst Sticks, die deCONZ nicht spricht (reine Zigbee-Sticks vor Multi-Sticks), dann ConBee/RaspBee
   if (z2m) {
-    z2mStick = sticks.find((s) => usable(s) && s.z2m && !s.deconz && s.kind === 'zigbee')
-      || sticks.find((s) => usable(s) && s.z2m && !s.deconz) || sticks.find((s) => usable(s) && s.z2m) || null;
+    if (p.zigbeeManual) z2mStick = p.zigbeePick && usable(p.zigbeePick) && p.zigbeePick.z2m ? p.zigbeePick : null;
+    else {
+      // zigbee2mqtt: zuerst Sticks, die deCONZ nicht spricht (reine Zigbee-Sticks vor Multi-Sticks), dann ConBee/RaspBee
+      const a = p.autoSticks;
+      z2mStick = a.find((s) => usable(s) && s.z2m && !s.deconz && s.kind === 'zigbee')
+        || a.find((s) => usable(s) && s.z2m && !s.deconz) || a.find((s) => usable(s) && s.z2m) || null;
+    }
   }
   const zigbeeStick = deconzStick || z2mStick;
   let threadStick = null;
   let busy = false;
   if (thread) {
-    const cand = sticks.filter((s) => usable(s) && s.thread);
-    threadStick = cand.find((s) => s.kind === 'thread' && s !== zigbeeStick) || cand.find((s) => s !== zigbeeStick) || null;
-    busy = !threadStick && cand.length > 0;
+    if (p.threadManual) threadStick = p.threadPick && usable(p.threadPick) ? p.threadPick : null;
+    else {
+      const cand = p.autoSticks.filter((s) => usable(s) && s.thread);
+      threadStick = cand.find((s) => s.kind === 'thread' && s !== zigbeeStick) || cand.find((s) => s !== zigbeeStick) || null;
+      // der einzige passende Stick dient schon Zigbee (automatisch oder von Hand)
+      busy = !threadStick && sticks.some((s) => usable(s) && s.thread && s === zigbeeStick);
+    }
   }
-  return { z2mStick, threadStick, threadBusy: busy };
+  return {
+    z2mStick, threadStick, threadBusy: busy,
+    zigbeeManual: p.zigbeeManual, zigbeeMissing: p.zigbeeMissing, zigbeePick: p.zigbeePick,
+    threadManual: p.threadManual, threadMissing: p.threadMissing, threadPick: p.threadPick, choice: p.choice,
+  };
+}
+
+/**
+ * Hinweis zu einem von Hand festgelegten Stick (null = passt):
+ *   second     ein anderer Stick ist schon für diesen Funk festgelegt – dieser bleibt frei
+ *   radio_off  der gewählte Funk ist aus
+ *   no_adapter zigbee2mqtt kennt keinen Adapter für diesen Stick (er bleibt frei)
+ *   fit        laut Erkennung passt der Stick nicht zum Dienst (er wird trotzdem genommen – Hinweis, keine Sperre)
+ */
+function stickNote(s, use, { a, stack, zigbeeOn, threadOn }) {
+  if (use === 'zigbee') {
+    if (s !== a.zigbeePick) return 'second';
+    if (!zigbeeOn) return 'radio_off';
+    if (stack === 'zigbee2mqtt' && !s.z2m) return 'no_adapter';
+    if ((stack !== 'zigbee2mqtt' && !s.deconz) || s.kind === 'thread') return 'fit';
+    return null;
+  }
+  if (use === 'thread') {
+    if (s !== a.threadPick) return 'second';
+    if (!threadOn) return 'radio_off';
+    return s.thread ? null : 'fit';
+  }
+  return null;
 }
 
 class RadioService {
-  constructor({ reporter = null, stateDir = null, ctlDir = '/gc-radio', sysRoot = '/sys', procRoot = '/proc', client = createDeconzClient(), now = Date.now, ble = null,
+  constructor({ reporter = null, stateDir = null, ctlDir = '/gc-radio', sysRoot = '/sys', devRoot = '/dev', procRoot = '/proc', client = createDeconzClient(), now = Date.now, ble = null,
     z2m = null, thread = null, keys = null, serverUrl = null, apiToken = null, getInfra = lanInterface }) {
-    Object.assign(this, { stateDir, sysRoot, now, getInfra });
+    Object.assign(this, { stateDir, sysRoot, devRoot, now, getInfra });
     this.cfg = normalizeRadio(undefined);
     this.hostProfile = null;
     this.hostWants = new Set();
@@ -93,7 +166,7 @@ class RadioService {
     this.ble = ble || new BleScanner({ reporter, now, keys: this.keys });
     if (!this.ble.keys) this.ble.keys = this.keys;
     this.found = { sticks: [], bluetooth: [] };
-    this.assigned = { z2mStick: null, threadStick: null, threadBusy: false };
+    this.assigned = assignSticks([], { z2m: false, thread: false, deconzStick: null });
     this.started = false;
     this.detectLoop = loop(() => this.refresh(), () => DETECT_MS);
     this.zigbeeLoop = loop(() => this._tick(), () => (this.zigbee.pairing() || this.z2m.pairing() ? PAIR_MS : ZIGBEE_MS));
@@ -129,15 +202,19 @@ class RadioService {
     try {
       const hostProfile = readHostProfile(this.stateDir);
       this.hostProfile = hostProfile;
-      this.found = detect({ sysRoot: this.sysRoot, hostProfile });
+      this.found = detect({ sysRoot: this.sysRoot, devRoot: this.devRoot, hostProfile });
       const z2mMode = this.cfg.stack === 'zigbee2mqtt';
       // „automatisch“ schaltet nur deCONZ von selbst ein; wer zigbee2mqtt wählt, will es (außer ausdrücklich aus)
       const z2mWant = z2mMode && this.cfg.zigbee !== false;
-      this.zigbee.apply({ mode: z2mMode ? false : this.cfg.zigbee, sticks: this.found.sticks, hostProfile });
+      const choices = new Map(this.cfg.sticks.map((e) => [e.id, e.use]));
+      const plan = planSticks(this.found.sticks, choices);
+      // deCONZ: von Hand gewählt → genau dieser Stick, sonst der erste ConBee/RaspBee unter den automatischen
+      this.zigbee.apply({ mode: z2mMode ? false : this.cfg.zigbee, sticks: plan.autoSticks, hostProfile, manual: !z2mMode && plan.zigbeeManual ? { stick: plan.zigbeePick } : null });
       const deconzStick = !z2mMode && this.zigbee.want() ? this.zigbee.device() : null;
-      this.assigned = assignSticks(this.found.sticks, { z2m: z2mWant, thread: this.cfg.thread, deconzStick });
-      this.z2m.apply({ want: z2mWant, stick: this.assigned.z2mStick });
-      this.thread.apply({ want: this.cfg.thread, stick: this.assigned.threadStick, infra: this.cfg.thread ? this.getInfra() : null, busy: this.assigned.threadBusy });
+      this.assigned = assignSticks(this.found.sticks, { z2m: z2mWant, thread: this.cfg.thread, deconzStick, choices });
+      const a = this.assigned;
+      this.z2m.apply({ want: z2mWant, stick: a.zigbeeManual ? (usable(a.zigbeePick) ? a.zigbeePick : null) : a.z2mStick, missing: a.zigbeeMissing });
+      this.thread.apply({ want: this.cfg.thread, stick: a.threadStick, infra: this.cfg.thread ? this.getInfra() : null, busy: a.threadBusy, manual: a.threadManual, missing: a.threadMissing });
       this.ble.apply({ enabled: this.cfg.ble, adapters: this.found.bluetooth });
       if (this.hostWants.size && this.stateDir && !fs.existsSync(path.join(this.stateDir, START_FLAG))) {
         // der Host hat das Flag verbraucht: nur noch fragen, was weiter fehlt
@@ -233,17 +310,28 @@ class RadioService {
   featureTelemetry() {
     const thread = this.found.sticks.filter((s) => s.kind === 'thread' || s.kind === 'multi');
     const deconzDev = this.zigbee.want() ? this.zigbee.device() : null;
+    const a = this.assigned;
     const useOf = (s) => {
-      if (s === this.assigned.z2mStick) return 'zigbee2mqtt';
-      if (s === this.assigned.threadStick) return 'thread';
+      if (s === a.z2mStick) return 'zigbee2mqtt';
+      if (s === a.threadStick) return 'thread';
       return s === deconzDev ? 'deconz' : null;
+    };
+    const ctx = { a, stack: this.cfg.stack, zigbeeOn: this._z2m() ? this.z2m.wanted : this.zigbee.want(), threadOn: this.cfg.thread };
+    const stick = (s) => {
+      const choice = a.choice ? a.choice(s) : 'auto';
+      return {
+        id: s.id, idKind: s.idKind, kind: s.kind, model: s.model, bus: s.bus, tty: s.tty, deconz: s.deconz, z2m: s.z2m || null, thread: s.thread === true,
+        use: useOf(s), choice, note: stickNote(s, choice, ctx),
+      };
     };
     return {
       enabled: this.zigbee.want() || this.z2m.wanted || this.cfg.ble || this.cfg.thread,
       stack: this.cfg.stack,
-      sticks: this.found.sticks.map((s) => ({ kind: s.kind, model: s.model, bus: s.bus, tty: s.tty, deconz: s.deconz, z2m: s.z2m || null, thread: s.thread === true, use: useOf(s) }))
+      sticks: this.found.sticks.map(stick)
         .concat(this.found.bluetooth.map((b) => ({ kind: 'bluetooth', model: b.model, bus: b.bus, tty: b.name, deconz: false, z2m: null, thread: false, use: null })))
         .slice(0, 8),
+      // von Hand festgelegte Sticks, die gerade nicht eingesteckt sind
+      missing: this.cfg.sticks.filter((e) => e.use !== 'none' && !this.found.sticks.some((s) => s.id === e.id)).slice(0, 8).map((e) => ({ id: e.id, use: e.use })),
       zigbee: { ...this.zigbee.telemetry(), stack: this.cfg.stack },
       zigbee2mqtt: this._z2m() ? this.z2m.telemetry() : null,
       ble: { ...this.ble.telemetry(), keys: this.keys.size },
@@ -258,4 +346,4 @@ class RadioService {
   }
 }
 
-module.exports = { RadioService, readHostProfile, assignSticks, lanInterface, START_FLAG };
+module.exports = { RadioService, readHostProfile, assignSticks, planSticks, stickNote, lanInterface, START_FLAG };

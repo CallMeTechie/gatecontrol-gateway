@@ -362,13 +362,13 @@ describe('radio: BLE scanner', () => {
 
 describe('radio: service, config, routes', () => {
   it('normalizeRadio / features.radio', () => {
-    const off = { stack: 'deconz', thread: false, bleKeys: null };
+    const off = { stack: 'deconz', thread: false, bleKeys: null, sticks: [] };
     assert.deepEqual(normalizeRadio(undefined), { zigbee: null, ble: false, ...off });
     assert.deepEqual(normalizeRadio({ zigbee: 'yes', ble: 1, stack: 'zha', thread: 'yes', bleKeys: 'XYZ' }), { zigbee: null, ble: false, ...off });
     assert.deepEqual(normalizeRadio({ zigbee: false, ble: true }), { zigbee: false, ble: true, ...off });
     const rev = 'ab'.repeat(8); // Stand der Schlüssel (Hex) – zur Laufzeit gebaut
     assert.deepEqual(normalizeRadio({ zigbee: true, stack: 'zigbee2mqtt', thread: true, bleKeys: rev }),
-      { zigbee: true, ble: false, stack: 'zigbee2mqtt', thread: true, bleKeys: rev });
+      { zigbee: true, ble: false, stack: 'zigbee2mqtt', thread: true, bleKeys: rev, sticks: [] });
     assert.deepEqual(normalizeFeatures(undefined).radio, { zigbee: null, ble: false, ...off });
     assert.deepEqual(normalizeFeatures({ radio: { zigbee: true } }).radio, { zigbee: true, ble: false, ...off });
   });

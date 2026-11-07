@@ -257,11 +257,14 @@ class Zigbee2Mqtt {
   }
 
   // ─── Wunsch und Gerät ─────────────────────────────────────────────────
-  /** { want, stick } aus radio.js (der Stick ist schon zugeteilt). */
-  apply({ want, stick }) {
+  /** { want, stick } aus radio.js (der Stick ist schon zugeteilt); missing = der von Hand gewählte Stick fehlt. */
+  apply({ want, stick, missing = false }) {
     const before = this.wanted;
     this.wanted = want === true;
     this.stick = stick && stick.tty && stick.dev && ADAPTERS.includes(stick.z2m) ? stick : null;
+    // von Hand gewählt, aber zigbee2mqtt kennt keinen Adapter dafür
+    this.unsupported = !this.stick && !!(stick && stick.tty && stick.dev);
+    this.missing = !this.stick && missing === true;
     if (this.wanted && !this.wantSince) this.wantSince = this.now();
     if (!this.wanted) { this.wantSince = 0; this.bridge = null; this.info = null; }
     this._syncMqtt();
@@ -447,7 +450,7 @@ class Zigbee2Mqtt {
   // ─── Zustand ──────────────────────────────────────────────────────────
   state() {
     if (!this.wanted) return 'off';
-    if (!this.stick) return 'no_stick';
+    if (!this.stick) return this.missing ? 'stick_missing' : (this.unsupported ? 'unsupported' : 'no_stick');
     const b = this.brokerState();
     if (b !== 'ok') return b;
     if (this.running()) return 'running';

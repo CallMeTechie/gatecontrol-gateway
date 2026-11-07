@@ -30,7 +30,8 @@ const logger = require('../logger');
 // print-convert: PDF für Drucker ohne PDF im Gateway umwandeln (docs/print.md „Umwandeln“)
 // print-ocr / print-office / print-media: Texterkennung, Office-Dateien, Papier und Fach (docs/print.md)
 // radio-stacks: Funk mit zigbee2mqtt, Thread Border Router und Schlüsseln verschlüsselter Sensoren (docs/radio.md)
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'ai', 'cameras']);
+// radio-stick-assign: Funksticks von Hand Zigbee/Thread/„nicht verwenden“ zuordnen (features.radio.sticks, docs/radio.md)
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';
@@ -97,7 +98,7 @@ class FeatureManager {
       netwatch: f.netwatch.enabled, portscan: f.netwatch.portscan, inetq: f.inetq.enabled,
       speedtest: f.inetq.speedtest, presence: f.presence.enabled, presenceMacs: f.presence.macs.length, ups: f.ups.enabled,
       dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, cache: f.cache.enabled, print: f.print.enabled,
-      zigbee: f.radio.zigbee, zigbeeStack: f.radio.stack, ble: f.radio.ble, thread: f.radio.thread, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
+      zigbee: f.radio.zigbee, zigbeeStack: f.radio.stack, radioSticks: f.radio.sticks.length, ble: f.radio.ble, thread: f.radio.thread, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
     }, 'features applied');
     return this._serial(async () => {
       await this.dns.apply(f.dns);
