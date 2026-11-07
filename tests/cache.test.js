@@ -241,7 +241,8 @@ describe('cache: LAN endpoint (real HTTPS)', () => {
     assert.equal((await get(`/blob/${h}`)).status, 403);
     assert.equal((await get(signed(h, -10))).status, 403);
     assert.deepEqual(JSON.parse((await get(signed(h, 3600))).body), { error: 'too_far' });
-    assert.equal((await get(signed(h).replace(/sig=./, 'sig=0'))).status, 403);
+    // erstes Zeichen sicher ändern (beginnt die Signatur schon mit 0, bliebe sie sonst gültig)
+    assert.equal((await get(signed(h).replace(/sig=(.)/, (_m, c) => `sig=${c === '0' ? '1' : '0'}`))).status, 403);
     assert.equal(counters.denied, denied + 4);
     const missing = 'c'.repeat(64);
     assert.equal((await get(signed(missing))).status, 404);
