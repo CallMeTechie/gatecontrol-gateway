@@ -5,7 +5,8 @@ GateControl unter Gateway › Funk:
 
 ```json
 { "zigbee": true | false | null, "stack": "deconz" | "zigbee2mqtt", "ble": true | false,
-  "thread": true | false, "bleKeys": "<Stand der Sensor-Schlüssel>" | null }
+  "thread": true | false, "bleKeys": "<Stand der Sensor-Schlüssel>" | null,
+  "sticks": [{ "id": "<feste Kennung>", "use": "zigbee" | "thread" | "none" }] }
 ```
 
 `zigbee: null` (Standard) heißt automatisch: an, sobald ein deCONZ-Funkmodul
@@ -13,12 +14,13 @@ erkannt ist (wie bisher im Raspberry-Pi-Image) – „automatisch“ gilt nur f�
 deCONZ; mit `stack: "zigbee2mqtt"` läuft zigbee2mqtt, außer `zigbee` ist
 `false`. Fehlt `features.radio` (älterer Server) oder ein Feld, gilt deCONZ
 automatisch, Bluetooth und Thread aus. Capability `radio` (zigbee2mqtt, Thread
-und Sensor-Schlüssel zusätzlich `radio-stacks`), Zustand in
-`telemetry.features.radio` (`stack`, `sticks[].use`, `zigbee`, `zigbee2mqtt`,
-`ble`, `thread`).
+und Sensor-Schlüssel zusätzlich `radio-stacks`, Sticks von Hand festlegen
+`radio-stick-assign`), Zustand in `telemetry.features.radio` (`stack`,
+`sticks[].use`, `sticks[].choice`, `missing`, `zigbee`, `zigbee2mqtt`, `ble`, `thread`).
 
-**Ein Stick bedient genau einen Funk.** Zuerst bekommt Zigbee (der gewählte
-Dienst) einen Stick, dann Thread einen anderen. zigbee2mqtt nimmt zuerst Sticks,
+**Ein Stick bedient genau einen Funk.** Ohne Wahl von Hand (Standard
+„Automatisch“) bekommt zuerst Zigbee (der gewählte Dienst) einen Stick, dann
+Thread einen anderen. zigbee2mqtt nimmt zuerst Sticks,
 die deCONZ nicht spricht (reine Zigbee-Sticks vor Multi-Sticks), ConBee/RaspBee
 erst zuletzt. Passt nur ein Stick, meldet Thread `stick_busy`. Welcher Stick
 welchem Dienst dient, steht in `sticks[].use` (`deconz` | `zigbee2mqtt` |
@@ -27,6 +29,48 @@ welchem Dienst dient, steht in `sticks[].use` (`deconz` | `zigbee2mqtt` |
 `sticks[].thread` = kann mit RCP-Firmware Thread). Ob die Firmware des Sticks
 zum Dienst passt (Zigbee-NCP oder OpenThread-RCP), sieht das Gateway nicht am
 USB – GateControl zeigt dazu einen Hinweis.
+
+### Sticks von Hand festlegen
+
+In GateControl (Gateway › Funk › Funksticks) lässt sich je Stick wählen:
+„Automatisch (Standard)“, „Zigbee“, „Thread“ oder „nicht verwenden“. Der Server
+schickt nur die Sticks mit einer Wahl als `features.radio.sticks` (≤ 16, je
+Kennung der erste Eintrag; `auto` steht nie darin). Ohne SSH: Das Gateway
+schreibt Gerät und `major:minor` des gewählten Sticks in die Steuerdatei des
+Dienstes (`zigbee.env`, `z2m.env`, `thread.env`), der Wächter legt genau diesen
+Knoten an – an der Compose-Datei ändert sich nichts.
+
+* **Feste Kennung** (`sticks[].id`, `sticks[].idKind`), nie die ttyACM-Nummer:
+  Stick mit Seriennummer → sein Name in `/dev/serial/by-id`
+  (`usb-<Hersteller>_<Produkt>_<Seriennummer>-if00`, bei usb-serial-Treibern
+  `…-if00-port0`; sieht der Container `/dev/serial/by-id` nicht, baut das Gateway
+  denselben Namen aus sysfs wie udev: Leerraum und unzulässige Zeichen → `_`),
+  `idKind: serial`. Ohne brauchbare Seriennummer (keine, `0001`, nur ein Zeichen
+  wiederholt, zwei Sticks mit derselben) → die USB-Buchse `port:1-1.2:1.0`
+  (`idKind: port` – die Wahl gilt dann für die Buchse). RaspBee → `uart:ttyAMA0`.
+  Kommt ein Stick nach dem Umstecken als `ttyACM3` wieder, folgt die
+  Steuerdatei ihm.
+* **Die Wahl von Hand geht vor.** „Automatisch“ verteilt nur Sticks ohne Wahl und
+  nur an einen Funk, für den kein Stick von Hand festgelegt ist. Fehlt der von
+  Hand gewählte Stick, wartet der Funk auf ihn (Zustand `stick_missing`, Liste
+  `missing: [{ id, use }]`) und nimmt keinen anderen – zigbee2mqtt würde sonst
+  ein neues Netz auf einem fremden Stick aufmachen. Mehrere Sticks für denselben
+  Funk: der zuerst festgelegte, der eingesteckt ist (Reihenfolge der Einstellung).
+* **„nicht verwenden“:** kein Dienst nimmt den Stick, auch deCONZ „automatisch“ nicht.
+* **Hinweise statt Sperren** (`sticks[].note`): `second` (ein anderer Stick ist
+  schon für diesen Funk festgelegt – dieser bleibt frei), `radio_off` (der
+  gewählte Funk ist aus), `fit` (laut Erkennung passt der Stick nicht zum Dienst,
+  z. B. deCONZ an einem Nicht-ConBee oder Thread an einem Stick, den die Erkennung
+  nicht als RCP-fähig kennt – das Gateway nimmt ihn trotzdem, z. B. nach dem
+  Umflashen), `no_adapter` (zigbee2mqtt kennt keinen Adapter für den Stick –
+  Zustand `unsupported`, der Stick bleibt frei). Ob die Firmware passt, sieht das
+  Gateway nicht; beendet sich der Dienst immer wieder, meldet er `error` wie bisher.
+* `sticks[].choice` (`auto` | `zigbee` | `thread` | `none`) und `sticks[].use`
+  (`deconz` | `zigbee2mqtt` | `thread` | `null`) sagen GateControl, was gewählt ist
+  und was der Stick wirklich bedient.
+* Ältere Gateways (ohne `radio-stick-assign`) übergehen `sticks` und teilen
+  weiter automatisch zu; GateControl zeigt dann die Auswahl gesperrt mit einem
+  Hinweis auf die Version.
 
 | Teil | Wie | Zustand in `/state` |
 |---|---|---|
@@ -176,9 +220,10 @@ Scan-Anfragen. Läuft am Host `bluetoothd` mit eigenem Scan, hört `gc-blescan` 
 ## Regeln
 
 * Nur Funkmodule von dresden elektronik spricht deCONZ. Andere Zigbee-Sticks
-  werden erkannt und mit deCONZ als „nicht unterstützt“ gemeldet, nie von deCONZ
-  angesteuert – für sie gibt es zigbee2mqtt.
-* Ein Stick, ein Dienst (siehe oben). Hinweise statt Sperren: Auf einem Pi 3 /
+  werden erkannt und mit deCONZ als „nicht unterstützt“ gemeldet, „automatisch“ nie
+  von deCONZ angesteuert – für sie gibt es zigbee2mqtt. Legt der Admin einen
+  solchen Stick von Hand für deCONZ fest, nimmt das Gateway ihn mit dem Hinweis `fit`.
+* Ein Stick, ein Dienst (siehe oben); von Hand festgelegt geht vor. Hinweise statt Sperren: Auf einem Pi 3 /
   Zero 2 W (≤ 1 GB) laufen zigbee2mqtt (≈ 120 MB) und der Border Router
   (≈ 60 MB) neben dem Gateway, GateControl weist auf den knappen Speicher hin.
 * Der deCONZ-Schlüssel des Gateways bleibt in `/state` (0600); der Server sieht

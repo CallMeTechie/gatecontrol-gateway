@@ -130,11 +130,14 @@ class ThreadBorderRouter {
     this.lastError = null;
   }
 
-  /** { want, stick, infra } aus radio.js; busy = der passende Stick dient schon Zigbee. */
-  apply({ want, stick, infra, busy = false }) {
+  /** { want, stick, infra } aus radio.js; busy = der passende Stick dient schon Zigbee;
+   *  manual = von Hand für Thread festgelegt (dann auch ein Stick, den die Erkennung nicht als Thread-fähig kennt);
+   *  missing = der von Hand gewählte Stick fehlt. */
+  apply({ want, stick, infra, busy = false, manual = false, missing = false }) {
     this.wanted = want === true;
     this.busy = busy === true;
-    this.stick = stick && stick.tty && stick.dev && stick.thread ? stick : null;
+    this.missing = missing === true;
+    this.stick = stick && stick.tty && stick.dev && (stick.thread || manual === true) ? stick : null;
     this.infra = typeof infra === 'string' && IF_RE.test(infra) ? infra : null;
     if (this.wanted && !this.wantSince) this.wantSince = this.now();
     if (!this.wanted) { this.wantSince = 0; this.reachable = false; this.role = null; this.network = null; }
@@ -234,7 +237,7 @@ class ThreadBorderRouter {
 
   state() {
     if (!this.wanted) return 'off';
-    if (!this.stick) return this.busy ? 'stick_busy' : 'no_stick';
+    if (!this.stick) return this.missing ? 'stick_missing' : (this.busy ? 'stick_busy' : 'no_stick');
     if (!this.infra) return 'no_lan';
     if (this.reachable) {
       if (this.role === 'leader' || this.role === 'router' || this.role === 'child') return 'running';
