@@ -113,14 +113,18 @@ describe('ai: features.ai', () => {
     assert.deepEqual(normalizeAi({ enabled: true }), { enabled: true, source: 'service', lan: null });
   });
 
-  it('LAN server: only http/https to a private IPv4 address with a port, no path, no credentials', () => {
+  it('LAN server: only http/https to a private address (or a name) with a port, no path, no credentials', () => {
     const ok = normalizeAi({ enabled: true, source: 'lan', lan: { url: 'http://192.168.1.20:11434', api: 'ollama' } });
-    assert.deepEqual(ok.lan, { url: 'http://192.168.1.20:11434', api: 'ollama' });
+    assert.deepEqual(ok.lan, { url: 'http://192.168.1.20:11434', api: 'ollama', keyRev: null });
     assert.equal(normalizeAi({ enabled: true, source: 'lan', lan: { url: 'http://10.0.0.5:1234/v1', api: 'openai' } }).lan.url, 'http://10.0.0.5:1234');
     assert.equal(parseLanUrl('https://172.16.4.2').port, 443);
-    for (const bad of ['http://8.8.8.8:11434', 'http://example.com:11434', 'http://127.0.0.1:11434', 'http://169.254.169.254/',
+    // Namen und private IPv6-Adressen gehen (aufgelöst und geprüft wird beim Verbinden, ai_lan.test.js)
+    assert.deepEqual(parseLanUrl('http://NAS.local:11434'), { protocol: 'http:', host: 'nas.local', port: 11434, origin: 'http://nas.local:11434', name: true });
+    assert.deepEqual(parseLanUrl('http://[fd00::1]:11434'), { protocol: 'http:', host: 'fd00::1', port: 11434, origin: 'http://[fd00::1]:11434', name: false });
+    for (const bad of ['http://8.8.8.8:11434', 'http://127.0.0.1:11434', 'http://169.254.169.254/', 'http://localhost:11434', 'http://ki.localhost',
       'ftp://192.168.1.2', 'http://user:pw@192.168.1.2:11434', 'http://192.168.1.2:11434/api', 'http://192.168.1.2:11434/?x=1',
-      'http://[::1]:11434', 'http://[fd00::1]:11434', 'http://192.168.1.2:99999', '', 42, null]) {
+      'http://[::1]:11434', 'http://[fe80::1]:11434', 'http://[2001:db8::1]:11434', 'http://[::ffff:192.168.1.2]/', 'http://nas_1:80', 'http://-nas:80',
+      'http://192.168.1.2:99999', 'http://10.0.0.300/', '', 42, null]) {
       assert.equal(parseLanUrl(bad), null, String(bad));
     }
     // Oktal/Hex schreibt die WHATWG-URL zur normalen Form um – geprüft wird, was danach dasteht
@@ -378,7 +382,7 @@ describe('ai: existing server in the LAN', () => {
   it('only the configured address: the service talks to lan.url, never follows a redirect', async () => {
     stub = await startStub({ redirect: true });
     const svc = new AiService({ stateDir: null, ctlDir: '/nonexistent-gc-ai', lanBackend: (lan) => {
-      assert.deepEqual(lan, { url: 'http://192.168.77.5:1234', api: 'openai' });
+      assert.deepEqual(lan, { url: 'http://192.168.77.5:1234', api: 'openai', keyRev: null });
       return createOpenAi(stub.base);
     } });
     await svc.apply({ enabled: true, source: 'lan', lan: { url: 'http://192.168.77.5:1234/v1', api: 'openai' } });
