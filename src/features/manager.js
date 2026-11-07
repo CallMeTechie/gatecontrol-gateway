@@ -27,7 +27,8 @@ const { lanSubnets, isPrivateIpv4 } = require('../discovery/lanInterfaces');
 const { localIpForSubnet } = require('../discovery/scanEngine');
 const logger = require('../logger');
 
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'radio', 'ai', 'cameras']);
+// print-convert: PDF für Drucker ohne PDF im Gateway umwandeln (docs/print.md „Umwandeln“)
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'radio', 'ai', 'cameras']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';

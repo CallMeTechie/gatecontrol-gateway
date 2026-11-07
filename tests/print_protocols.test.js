@@ -169,8 +169,11 @@ test('mDNS: fremde Pfade und Geräte ohne Adresse werden nicht übernommen; ohne
 });
 
 test('features.print: nur echtes true schaltet ein; manual nur RFC 1918, höchstens 16', () => {
-  assert.deepEqual(normalizePrint(undefined), { enabled: false, manual: [] });
-  assert.deepEqual(normalizePrint({ enabled: 'yes' }), { enabled: false, manual: [] });
+  assert.deepEqual(normalizePrint(undefined), { enabled: false, manual: [], convert: true });
+  assert.deepEqual(normalizePrint({ enabled: 'yes' }), { enabled: false, manual: [], convert: true });
+  // PDF umwandeln: Standard an, nur `false` schaltet es aus
+  assert.equal(normalizePrint({ enabled: true, convert: false }).convert, false);
+  assert.equal(normalizePrint({ enabled: true, convert: 'no' }).convert, true);
   const many = Array.from({ length: 20 }, (_, i) => `10.0.0.${i + 1}`);
   const p = normalizePrint({ enabled: true, manual: ['192.168.1.70', '8.8.8.8', '127.0.0.1', '172.16.0.3', '172.32.0.1', 'printer.local', 7, '192.168.1.70', ...many] });
   assert.equal(p.enabled, true);

@@ -54,8 +54,11 @@ RUN gcc -O2 -Wall -Wextra -static -o /gc-blescan /src/gc-blescan.c && strip /gc-
 
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
+# poppler-utils + font-liberation (≈ 23 MB): „Drucken & Scannen“ wandelt PDF für
+# Drucker ohne PDF in PWG-Raster/URF/JPEG um (src/print/convert.js, docs/print.md);
+# Liberation ersetzt die nicht eingebetteten Standardschriften (Helvetica, Times, Courier).
 # hadolint ignore=DL3018
-RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils nftables && \
+RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils nftables poppler-utils font-liberation && \
     addgroup -S gateway && adduser -S -G gateway -H -s /sbin/nologin gateway && \
     mkdir -p /config /var/log/gateway && \
     chown -R gateway:gateway /var/log/gateway
