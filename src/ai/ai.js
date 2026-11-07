@@ -12,12 +12,19 @@
 //
 // Inferenz läuft im Ollama-Prozess; hier wird nur gestreamt (keine Rechenlast
 // in der Ereignisschleife). Höchstens eine Antwort zugleich, zwei warten.
+//
+// KI-Server im LAN: Adresse als private IPv4/IPv6 oder als Name (resolve.js,
+// nur private Adressen), optional mit API-Schlüssel (creds.js – vom Server
+// geholt, nie im Config-Pull, nie im Log). Grafikkarte: gpu.js.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { normalizeAi, parseLanUrl, validModel } = require('./config');
+const { normalizeAi, parseLanUrl, validModel, validKey, APIS } = require('./config');
 const { createOllama, createOpenAi } = require('./backends');
+const { createResolver } = require('./resolve');
+const { AiKeyStore } = require('./creds');
+const gpu = require('./gpu');
 const { readHostProfile } = require('../radio/radio');
 const { cleanText } = require('../print/config');
 const { loop } = require('../features/status');
@@ -37,7 +44,8 @@ const GPU_EVERY_MS = 10 * 60_000;
 const MAX_ACTIVE = 1;
 const MAX_WAITING = 2;
 const STATE_RE = /^(idle|running|exit) ([0-9]{1,12})\s*$/;
-const GPU_VENDORS = { '0x10de': 'nvidia', '0x1002': 'amd', '0x8086': 'intel' };
+// was dieses Gateway kann (der Server schaltet danach frei): GPU-Bericht, API-Schlüssel, Namen/IPv6, Verbindungstest
+const SUPPORTS = Object.freeze(['gpu', 'lanKey', 'lanHost', 'probe']);
 
 function readText(file, max = 4096) {
   try {
@@ -53,20 +61,9 @@ function writeAtomic(file, text, mode = 0o644) {
   fs.renameSync(tmp, file);
 }
 
-/** Grafikkarten aus sysfs (PCI-Klasse 0x03…) – nur ein Hinweis, der Dienst nutzt sie nicht. */
+/** Grafikkarten aus sysfs (PCI-Klasse 0x03…): nur die Hersteller (gpu.detectHost hat mehr). */
 function detectGpus(sysRoot = '/sys') {
-  const out = [];
-  let names = [];
-  try { names = fs.readdirSync(path.join(sysRoot, 'bus/pci/devices')).slice(0, 256); } catch { return out; }
-  for (const n of names) {
-    const dir = path.join(sysRoot, 'bus/pci/devices', n);
-    const cls = (readText(path.join(dir, 'class'), 64) || '').trim();
-    if (!/^0x03[0-9a-f]{4}$/i.test(cls)) continue;
-    const vendor = (readText(path.join(dir, 'vendor'), 64) || '').trim().toLowerCase();
-    out.push({ vendor: GPU_VENDORS[vendor] || 'other' });
-    if (out.length >= 4) break;
-  }
-  return out;
+  return gpu.detectHost(sysRoot).cards.map((c) => ({ vendor: c.vendor }));
 }
 
 /** Body von POST /api/ai/chat → Anfrage oder null (ungültig). */
@@ -100,14 +97,17 @@ function parseChat(b) {
 }
 
 class AiService {
-  constructor({ stateDir = null, ctlDir = '/gc-ai', sysRoot = '/sys', now = Date.now, serviceBackend = null, lanBackend = null } = {}) {
-    Object.assign(this, { stateDir, ctlDir, sysRoot, now });
+  constructor({
+    stateDir = null, ctlDir = '/gc-ai', sysRoot = '/sys', procRoot = '/proc', now = Date.now, serviceBackend = null, lanBackend = null,
+    serverUrl = null, apiToken = '', keyStore = null, resolver = null,
+  } = {}) {
+    Object.assign(this, { stateDir, ctlDir, sysRoot, procRoot, now });
     this.cfg = normalizeAi(undefined);
     this.serviceBackend = serviceBackend || createOllama(SERVICE_BASE);
-    this.makeLan = lanBackend || ((lan) => {
-      const base = parseLanUrl(lan.url);
-      return lan.api === 'openai' ? createOpenAi(base) : createOllama(base);
-    });
+    this.resolver = resolver || createResolver();
+    this.keys = keyStore || new AiKeyStore({ serverUrl, apiToken, stateDir });
+    this.keysBusy = null;
+    this.makeLan = lanBackend || ((lan) => this._lanBackend(lan.url, lan.api, () => this.keys.get()));
     this.lan = null;
     this.reachable = false;
     this.version = null;
@@ -123,12 +123,33 @@ class AiService {
     this.hostProfile = null;
     this.gpus = null;
     this.gpuAt = 0;
+    this.probing = false;
     this.started = false;
     this.tickLoop = loop(() => this.tick(), () => (this.pullState && this.pullState.state === 'pulling' ? TICK_BUSY_MS : TICK_MS));
   }
 
   // ─── Einstellung und Dienst ────────────────────────────────────────────
   wantService() { return this.cfg.enabled && this.cfg.source === 'service'; }
+
+  /** Ein Backend für einen KI-Server im LAN: Namen nur an private Adressen, Schlüssel als Bearer. */
+  _lanBackend(url, api, auth) {
+    const p = parseLanUrl(url);
+    const base = { protocol: p.protocol, host: p.host, port: p.port, auth };
+    if (p.name) base.lookup = this.resolver.lookupFor(p.host);
+    return api === 'openai' ? createOpenAi(base) : createOllama(base);
+  }
+
+  /** API-Schlüssel mit keyRev abgleichen (im Hintergrund; danach gleich neu fragen). */
+  _syncKey() {
+    const rev = this.cfg.enabled && this.cfg.source === 'lan' && this.cfg.lan ? this.cfg.lan.keyRev : null;
+    if (!rev) { this.keys.clear(); return; }
+    if (this.keysBusy) return;
+    this.keysBusy = this.keys.sync(rev).then((fresh) => {
+      if (fresh) { logger.info({ key: !!this.keys.get() }, 'ai: API key of the AI server fetched'); this.tick().catch(() => {}); }
+    }, (e) => {
+      logger.warn({ err: (e && e.code) || 'error' }, 'ai: API key of the AI server not fetched (next config pull tries again)');
+    }).finally(() => { this.keysBusy = null; });
+  }
 
   backend() {
     if (!this.cfg.enabled) return null;
@@ -142,6 +163,7 @@ class AiService {
     this.cfg = normalizeAi(raw);
     const changed = before !== JSON.stringify(this.cfg);
     this.lan = this.cfg.enabled && this.cfg.source === 'lan' && this.cfg.lan ? this.makeLan(this.cfg.lan) : null;
+    this._syncKey();
     this.hostProfile = readHostProfile(this.stateDir);
     if (this.wantService() && !this.runSince) this.runSince = this.now();
     if (!this.wantService()) this.runSince = 0;
@@ -152,7 +174,7 @@ class AiService {
       this.version = null;
       this.models = [];
       this.loadedModels = [];
-      logger.info({ enabled: this.cfg.enabled, source: this.cfg.source, lanApi: this.cfg.lan && this.cfg.lan.api }, 'ai: settings applied');
+      logger.info({ enabled: this.cfg.enabled, source: this.cfg.source, lanApi: this.cfg.lan && this.cfg.lan.api, lanKey: !!(this.cfg.lan && this.cfg.lan.keyRev) }, 'ai: settings applied');
     }
     this._writeControl();
     this._writeWish();
@@ -218,7 +240,7 @@ class AiService {
 
   _gpus() {
     if (!this.gpus || this.now() - this.gpuAt > GPU_EVERY_MS) {
-      this.gpus = detectGpus(this.sysRoot);
+      this.gpus = gpu.detectHost(this.sysRoot, this.procRoot);
       this.gpuAt = this.now();
     }
     return this.gpus;
@@ -227,7 +249,20 @@ class AiService {
   hostFacts() {
     const hp = this.hostProfile;
     const memTotal = hp && Number.isSafeInteger(hp.mem_total) && hp.mem_total > 0 ? hp.mem_total : os.totalmem();
-    return { memTotal, memFree: os.freemem(), cores: os.cpus().length, arch: process.arch, gpu: this._gpus() };
+    const g = this._gpus();
+    return { memTotal, memFree: os.freemem(), cores: os.cpus().length, arch: process.arch, gpu: g.cards, nvidiaDriver: g.nvidiaDriver, kfd: g.kfd, render: g.render };
+  }
+
+  /**
+   * Die Grafikkarte im Dienst ki (nur source service): GPU-Art der Compose-Datei, ob der
+   * Container die Geräte sieht, nvidia-smi, und ob das geladene Modell im Grafikspeicher liegt.
+   * null: der Wächter meldet nichts (alte Compose-Datei, Dienst fehlt).
+   */
+  serviceGpu() {
+    if (this.cfg.source !== 'service') return null;
+    const s = gpu.readServiceGpu(this.ctlDir, this.now());
+    if (!s) return null;
+    return { mode: s.mode, devices: s.devices, access: gpu.serviceAccess(s), cards: s.cards, used: this.loadedModels.some((m) => m.vram > 0) };
   }
 
   // ─── Abfrage ──────────────────────────────────────────────────────────
@@ -245,6 +280,8 @@ class AiService {
     } catch (e) {
       this.reachable = false;
       this.loadedModels = [];
+      // ein Name wird beim nächsten Mal neu aufgelöst (neue Adresse per DHCP)
+      if (this.cfg.source === 'lan' && this.cfg.lan) { const p = parseLanUrl(this.cfg.lan.url); if (p && p.name) this.resolver.forget(p.host); }
       if (!(this.wantService() && this.now() - this.runSince < START_GRACE_MS)) this._fail(e);
       return;
     }
@@ -331,6 +368,35 @@ class AiService {
     }
   }
 
+  // ─── Verbindungstest (Einrichtung, noch nicht gespeichert) ──────────────
+  /**
+   * POST /api/ai/probe { url, api, key? } – einen KI-Server im LAN fragen, ohne etwas zu
+   * speichern: → { reachable, version, models, auth, error }. Nur private Ziele (wie lan.url);
+   * ein Test zugleich ('busy'). 'invalid_url' | 'invalid' bei falscher Eingabe.
+   */
+  async probe(b) {
+    const body = b && typeof b === 'object' && !Array.isArray(b) ? b : {};
+    const p = parseLanUrl(body.url);
+    if (!p) return { error: 'invalid_url' };
+    const api = body.api == null ? 'ollama' : body.api;
+    if (!APIS.has(api)) return { error: 'invalid' };
+    if (body.key != null && body.key !== '' && !validKey(body.key)) return { error: 'invalid' };
+    if (this.probing) return { error: 'busy' };
+    const key = body.key ? body.key : null;
+    const b2 = this._lanBackend(p.origin, api, () => key);
+    this.probing = true;
+    try {
+      const version = await b2.version();
+      const models = await b2.models();
+      return { probe: { reachable: true, url: p.origin, api, version, models, auth: !!key, error: null } };
+    } catch (e) {
+      const code = cleanText(String((e && e.code) || 'error'), 32);
+      return { probe: { reachable: false, url: p.origin, api, version: null, models: [], auth: !!key, error: { code, message: cleanText(String((e && e.message) || e), 160) } } };
+    } finally {
+      this.probing = false;
+    }
+  }
+
   // ─── Antworten ────────────────────────────────────────────────────────
   /** Platz in der Warteschlange: true (bekommen), false (voll). */
   async _slot(signal) {
@@ -403,8 +469,10 @@ class AiService {
       models: this.models.slice(0, 12).map((m) => ({ name: m.name, size: m.size })),
       loaded: this.loadedModels.slice(0, 2).map((m) => ({ name: m.name, size: m.size, vram: m.vram, until: m.until })),
       pull: this._pullView(),
-      host: { memTotal: h.memTotal, cores: h.cores, arch: h.arch, gpu: h.gpu },
-      lan: this.cfg.source === 'lan' && this.cfg.lan ? { url: this.cfg.lan.url, api: this.cfg.lan.api, reachable: this.reachable } : null,
+      host: { memTotal: h.memTotal, cores: h.cores, arch: h.arch, gpu: h.gpu, nvidiaDriver: h.nvidiaDriver, kfd: h.kfd, render: h.render },
+      gpu: this.serviceGpu(),
+      lan: this.cfg.source === 'lan' && this.cfg.lan ? { url: this.cfg.lan.url, api: this.cfg.lan.api, reachable: this.reachable, auth: !!this.keys.get() } : null,
+      supports: SUPPORTS.slice(),
       busy: { active: this.active, waiting: this.waiting.length },
       error: this.lastError ? { code: this.lastError.code, at: this.lastError.at } : null,
     };
@@ -418,4 +486,4 @@ class AiService {
   }
 }
 
-module.exports = { AiService, parseChat, detectGpus, SERVICE_BASE, MAX_ACTIVE, MAX_WAITING };
+module.exports = { AiService, parseChat, detectGpus, SERVICE_BASE, MAX_ACTIVE, MAX_WAITING, SUPPORTS };

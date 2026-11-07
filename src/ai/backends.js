@@ -11,7 +11,11 @@ const { cleanText } = require('../print/config');
 
 const MAX_MODELS = 48;
 
+// 401/403: der Server will einen (anderen) API-Schlüssel
+const DENIED = new Set([401, 403]);
+
 function check(r, what) {
+  if (DENIED.has(r.status)) throw err('unauthorized', `${what}: access denied (API key missing or wrong)`);
   if (r.json === undefined) throw err('bad_response', `${what}: no JSON`);
   if (r.status === 404) throw err('not_found', `${what}: not found`);
   if (r.status < 200 || r.status >= 300) throw err('http_' + r.status, `${what}: http ${r.status}`);
@@ -93,6 +97,7 @@ function createOllama(base) {
         });
       } catch (e) {
         if (e.code === 'http_404') throw err('model_missing', 'model not on this server');
+        if (e.code === 'http_401' || e.code === 'http_403') throw err('unauthorized', 'access denied (API key missing or wrong)');
         throw e;
       }
       return out;
@@ -133,6 +138,7 @@ function createOpenAi(base) {
         });
       } catch (e) {
         if (e.code === 'http_404') throw err('model_missing', 'model not on this server');
+        if (e.code === 'http_401' || e.code === 'http_403') throw err('unauthorized', 'access denied (API key missing or wrong)');
         throw e;
       }
       return out;

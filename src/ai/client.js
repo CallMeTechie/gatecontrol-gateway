@@ -4,7 +4,11 @@
 // im LAN (docs/local-ai.md §3). Nur die eine Basis (Host + Port fest), eigene
 // Pfade, keine Weiterleitungen (3xx = Fehler), Größen- und Zeitgrenzen. Alles
 // asynchron und gestreamt – nichts blockiert die Ereignisschleife.
-// Fehler tragen `code`: unreachable | timeout | redirect | too_large | bad_response | http_<n> | aborted.
+// Fehler tragen `code`: unreachable | not_private | timeout | redirect | too_large | bad_response | http_<n> | aborted.
+//
+// base: { protocol, host, port } – dazu optional `lookup` (Namen nur an private
+// Adressen, resolve.js) und `auth()` (API-Schlüssel des LAN-Servers → Bearer;
+// nie geloggt, nie in einer Fehlermeldung).
 
 const http = require('node:http');
 const https = require('node:https');
@@ -28,17 +32,23 @@ function connectGuard(req, onFail) {
 function transport(base) { return base.protocol === 'https:' ? https : http; }
 
 function opts(base, method, path, data, extraHeaders) {
+  const key = typeof base.auth === 'function' ? base.auth() : null;
   return {
     host: base.host, port: base.port, method, path,
+    ...(typeof base.lookup === 'function' ? { lookup: base.lookup } : {}),
     // kein Agent mit Keep-Alive: jede Anfrage eine eigene Verbindung, nichts bleibt hängen
     agent: false,
     headers: {
       Accept: 'application/json', 'User-Agent': 'GateControl-Gateway',
       ...(data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {}),
+      ...(key ? { Authorization: `Bearer ${key}` } : {}),
       ...(extraHeaders || {}),
     },
   };
 }
+
+// Fehler der Verbindung: `not_private` (resolve.js) bleibt, alles andere heißt unreachable
+const netErr = (e) => (e && e.code === 'not_private' ? e : err('unreachable', e && e.message));
 
 /**
  * Eine JSON-Anfrage → { status, json }. 3xx wirft `redirect`, mehr als
@@ -69,7 +79,7 @@ function requestJson({ base, method = 'GET', path, body, timeoutMs = 10_000, max
     const onAbort = () => { req.destroy(); finish(reject, err('aborted', 'aborted')); };
     if (signal) { if (signal.aborted) { onAbort(); return; } signal.addEventListener('abort', onAbort, { once: true }); }
     connectGuard(req, (e) => finish(reject, e));
-    req.on('error', (e) => finish(reject, err('unreachable', e.message)));
+    req.on('error', (e) => finish(reject, netErr(e)));
     req.end(data || undefined);
   });
 }
@@ -151,7 +161,7 @@ function streamLines({ base, method = 'POST', path, body, timeoutMs, idleMs = 12
     const onAbort = () => { req.destroy(); finish(reject, err('aborted', 'aborted')); };
     if (signal) { if (signal.aborted) { onAbort(); return; } signal.addEventListener('abort', onAbort, { once: true }); }
     connectGuard(req, (e) => finish(reject, e));
-    req.on('error', (e) => finish(reject, err('unreachable', e.message)));
+    req.on('error', (e) => finish(reject, netErr(e)));
     req.end(data || undefined);
   });
 }
