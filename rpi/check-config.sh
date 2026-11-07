@@ -45,6 +45,8 @@ mapfile -t sh_files < <(
   echo "$R/usr/local/sbin/gatecontrol-ai"
   echo "$R/usr/local/sbin/gatecontrol-cameras"
   echo "src/cameras/kameras.sh"
+  echo "$R/usr/local/sbin/gatecontrol-office"
+  echo "src/print/office.sh"
   echo "$R/usr/local/lib/gatecontrol/common.sh"
   echo "$R/etc/update-motd.d/60-gatecontrol"
 )
@@ -168,9 +170,20 @@ echo "$b" | jq -e '.cap_drop == ["ALL"] and .cap_add == null and .devices == nul
   || die "Dienst kameras: keine Capabilities, keine Geräte, kein Port, read_only"
 prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx kameras || true)"
 [ "$prof" = 0 ] || die "docker-compose.example.yml: kameras muss im Profil kameras stehen"
+# Office-Dateien drucken (docs/print.md): wie im Beispiel (dort mit Profil office), ohne Netz, ohne Rechte
+pick='.services.office | {image, entrypoint, network_mode, user, cap_drop, cap_add, security_opt, read_only, tmpfs, cpu_shares, oom_score_adj, mem_limit, pids_limit, devices, privileged, ports, healthcheck, volumes: [.volumes[] | {type, source, target, read_only}]}'
+a="$(cd "$CDIR" && docker compose -f example.yml --profile office config --format json | jq -S "$pick")"
+b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
+if [ "$a" = "$b" ]; then echo "ok: Dienst office wie in docker-compose.example.yml"; else
+  diff <(echo "$a") <(echo "$b") || true; die "Dienst office weicht von docker-compose.example.yml ab"
+fi
+echo "$b" | jq -e '.network_mode == "none" and .cap_drop == ["ALL"] and .cap_add == null and .devices == null and .privileged == null and .ports == null and .read_only == true' >/dev/null \
+  || die "Dienst office: kein Netz, keine Capabilities, keine Geräte, kein Port, read_only"
+prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx office || true)"
+[ "$prof" = 0 ] || die "docker-compose.example.yml: office muss im Profil office stehen (sonst lädt jeder das ≈ 700-MB-Image)"
 vpick='.volumes | with_entries(.value |= {driver_opts})'
 # ki-models gehört nur dem Dienst ki (Profil ki im Beispiel), z2m-data/otbr-data den Funk-Diensten
-a="$(cd "$CDIR" && docker compose -f example.yml --profile ki --profile kameras --profile zigbee2mqtt --profile thread config --format json | jq -S "$vpick")"
+a="$(cd "$CDIR" && docker compose -f example.yml --profile ki --profile kameras --profile zigbee2mqtt --profile thread --profile office config --format json | jq -S "$vpick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"
 if [ "$a" = "$b" ]; then echo "ok: Volumes wie in docker-compose.example.yml"; else
   diff <(echo "$a") <(echo "$b") || true; die "Volumes weichen von docker-compose.example.yml ab"

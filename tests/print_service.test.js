@@ -216,7 +216,7 @@ test('settingsFor: Glas statt Einzug, wenn es keinen gibt; kleinste Auflösung a
 
 test('Feature-Manager: print aus dem Config-Pull, Capability, Mgmt-Routen', async () => {
   const f = normalizeFeatures({ print: { enabled: true, manual: ['192.168.1.70'] } });
-  assert.deepEqual(f.print, { enabled: true, manual: ['192.168.1.70'], convert: true });
+  assert.deepEqual(f.print, { enabled: true, manual: ['192.168.1.70'], convert: true, ocr: false, office: false });
   assert.equal(normalizeFeatures({ print: { enabled: true, convert: false } }).print.convert, false);
   assert.equal(normalizeFeatures(undefined).print.enabled, false);
   assert.equal(normalizeFeatures({}).print.enabled, false);
@@ -225,7 +225,7 @@ test('Feature-Manager: print aus dem Config-Pull, Capability, Mgmt-Routen', asyn
   const print = { apply: async (c) => calls.push(c), stop() {}, featureTelemetry: () => ({ enabled: true, devices: 1 }), requestSearch: () => 'accepted', requestJobs: () => 'accepted', requestScan: (b) => (b.deviceId === 'x' ? 'unknown_device' : 'accepted'), cancelScan: () => 'accepted' };
   const mgr = new FeatureManager({ netwatch: stub, inetq: stub, presence: stub, ups: { ...stub, featureTelemetry: () => ({}) }, print });
   await mgr.apply({ print: { enabled: true } });
-  assert.deepEqual(calls[0], { enabled: true, manual: [], convert: true });
+  assert.deepEqual(calls[0], { enabled: true, manual: [], convert: true, ocr: false, office: false });
   const tel = mgr.telemetry();
   assert.ok(tel.capabilities.includes('print'));
   assert.ok(tel.capabilities.includes('print-convert'), 'PDF-Umwandlung für Drucker ohne PDF');

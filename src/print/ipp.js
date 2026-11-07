@@ -64,11 +64,28 @@ function bool(name, value) {
   return b;
 }
 
+/**
+ * Eine Sammlung (RFC 8010 §3.1.6): begCollection mit dem Namen, je Mitglied
+ * memberAttrName + Wert (Name leer), endCollection. members: [[tag, name, value]]
+ * – value einer Untersammlung: { members: [...] } mit tag TAG.begCollection.
+ */
+function collection(name, members) {
+  const parts = [str(TAG.begCollection, name, '')];
+  for (const [tag, member, value] of members) {
+    parts.push(str(TAG.memberAttrName, '', member));
+    if (tag === TAG.begCollection) parts.push(collection('', value.members));
+    else parts.push(encodeAttr([tag, '', value]));
+  }
+  parts.push(str(TAG.endCollection, '', ''));
+  return Buffer.concat(parts);
+}
+
 /** Ein Attribut ([tag, name, value | values[]]) → Buffer; mehrere Werte mit leerem Namen (RFC 8010 §3.1.5). */
 function encodeAttr([tag, name, value]) {
   const values = Array.isArray(value) ? value : [value];
   return Buffer.concat(values.map((v, i) => {
     const nm = i === 0 ? name : '';
+    if (tag === TAG.begCollection) return collection(nm, v.members);
     if (tag === TAG.integer || tag === TAG.enum) return int(tag, nm, v);
     if (tag === TAG.boolean) return bool(nm, v);
     return str(tag, nm, v);
@@ -251,6 +268,9 @@ const PRINTER_ATTRS = [
   // fürs Umwandeln von PDF (convert.js): Raster-Auflösungen und -Farbarten, Rückseiten-Lage, Papier
   'pwg-raster-document-resolution-supported', 'pwg-raster-document-type-supported', 'pwg-raster-document-sheet-back',
   'urf-supported', 'media-default', 'media-ready',
+  // PCLm (convert.js), Papier und Fächer (docs/print.md „Papier und Fach“)
+  'pclm-source-resolution-supported', 'pclm-strip-height-preferred', 'pclm-compression-method-preferred', 'pclm-raster-back-side',
+  'media-supported', 'media-source-supported', 'media-col-default', 'media-col-ready',
 ];
 
 async function getPrinterAttributes(ep, opts = {}) {
@@ -267,6 +287,58 @@ const { rasterInfo } = require('./convert');
 
 const clip = (s, n) => (typeof s === 'string' ? cleanText(s, n) : null);
 const COLOR_RE = /^#[0-9A-Fa-f]{6}/;
+
+// Die Papierformate, die GateControl anbietet (PWG-Namen, PWG 5101.1) – andere nennt
+// der Drucker auch, sie gehen aber nicht in den Bericht. Größe in 1/100 mm (media-col).
+const MEDIA = Object.freeze({
+  'iso_a4_210x297mm': [21000, 29700],
+  'iso_a5_148x210mm': [14800, 21000],
+  'iso_a6_105x148mm': [10500, 14800],
+  'na_letter_8.5x11in': [21590, 27940],
+  'na_legal_8.5x14in': [21590, 35560],
+  'na_index-4x6_4x6in': [10160, 15240],
+  'na_5x7_5x7in': [12700, 17780],
+  'oe_photo-l_3.5x5in': [8890, 12700],
+});
+const SOURCE_RE = /^[a-z][a-z0-9-]{0,39}$/;
+const near = (a, b) => Math.abs(a - b) <= 100; // 1 mm
+
+/** Größe (1/100 mm) → bekannter Medienname (hoch- oder querkant), sonst null. */
+function mediaByDims(x, y) {
+  if (!Number.isInteger(x) || !Number.isInteger(y)) return null;
+  for (const [name, [w, h]] of Object.entries(MEDIA)) if ((near(x, w) && near(y, h)) || (near(x, h) && near(y, w))) return name;
+  return null;
+}
+
+/** Ein media-col-Eintrag → { size, source } (size: bekannter Name oder null). */
+function mediaColOf(c) {
+  if (!c || typeof c !== 'object') return null;
+  const sz = Array.isArray(c['media-size']) ? c['media-size'][0] : null;
+  const dims = sz && typeof sz === 'object' ? mediaByDims((sz['x-dimension'] || [])[0], (sz['y-dimension'] || [])[0]) : null;
+  const src = (c['media-source'] || [])[0];
+  return { size: dims, source: typeof src === 'string' && SOURCE_RE.test(src) ? src : null };
+}
+
+/**
+ * Papier und Fächer des Druckers → { sizes, default, sources, sourceDefault, ready }
+ * (sizes: nur bekannte Formate, ready: eingelegt laut media-col-ready).
+ */
+function mediaInfo(a) {
+  const list = (k) => (Array.isArray(a[k]) ? a[k].filter((x) => x != null) : []);
+  const known = (n) => (typeof n === 'string' && MEDIA[n.replace(/_borderless$/, '')] ? n.replace(/_borderless$/, '') : null);
+  const ready = list('media-col-ready').map(mediaColOf).filter((m) => m && (m.size || m.source)).slice(0, 8);
+  const sizes = [...new Set([...list('media-supported').map(known), ...list('media-ready').map(known), ...ready.map((m) => m.size)].filter(Boolean))];
+  const def = known(list('media-default')[0]) || (mediaColOf(list('media-col-default')[0]) || {}).size || null;
+  const sources = [...new Set(list('media-source-supported').filter((x) => typeof x === 'string' && SOURCE_RE.test(x)))].slice(0, 8);
+  const sourceDefault = (mediaColOf(list('media-col-default')[0]) || {}).source || null;
+  return {
+    sizes: sizes.slice(0, 12),
+    default: def && sizes.includes(def) ? def : (sizes[0] || null),
+    sources,
+    sourceDefault: sourceDefault && sources.includes(sourceDefault) ? sourceDefault : null,
+    ready,
+  };
+}
 
 /** Printer-Attribute → der Drucker-Teil des Geräteberichts (Vertrag §2). */
 function printerInfo(a) {
@@ -299,6 +371,7 @@ function printerInfo(a) {
     markers,
     // nur im Gateway (nicht im Bericht): woraus convert.js das Rasterformat wählt
     raster: rasterInfo(a),
+    media: mediaInfo(a),
     model: clip(first('printer-make-and-model'), 120),
     name: clip(first('printer-info'), 120) || clip(first('printer-name'), 120),
     location: clip(first('printer-location'), 120),
@@ -308,13 +381,21 @@ function printerInfo(a) {
 
 /**
  * Print-Job: die Datei hinter dem Kopf. → { status, jobId, jobState }
- * job: { name, user, format, copies, duplex, color }
+ * job: { name, user, format, copies, duplex, color, media?, source? }
  */
 async function printJob(ep, file, size, job, opts = {}) {
   const jobAttrs = [];
   if (Number.isInteger(job.copies) && job.copies > 1) jobAttrs.push([TAG.integer, 'copies', job.copies]);
   if (typeof job.duplex === 'boolean') jobAttrs.push([TAG.keyword, 'sides', job.duplex ? 'two-sided-long-edge' : 'one-sided']);
   if (typeof job.color === 'boolean') jobAttrs.push([TAG.keyword, 'print-color-mode', job.color ? 'color' : 'monochrome']);
+  // Papier (und Fach): mit Fach als media-col (Größe in 1/100 mm + media-source), sonst das Schlüsselwort media
+  const dims = typeof job.media === 'string' ? MEDIA[job.media] : null;
+  const source = typeof job.source === 'string' && SOURCE_RE.test(job.source) ? job.source : null;
+  if (source) {
+    const members = [[TAG.keyword, 'media-source', source]];
+    if (dims) members.unshift([TAG.begCollection, 'media-size', { members: [[TAG.integer, 'x-dimension', dims[0]], [TAG.integer, 'y-dimension', dims[1]]] }]);
+    jobAttrs.push([TAG.begCollection, 'media-col', { members }]);
+  } else if (dims) jobAttrs.push([TAG.keyword, 'media', job.media]);
   const head = encodeRequest(OP.PRINT_JOB, reqId(), {
     operation: [
       ...baseOps(ep),
@@ -333,12 +414,17 @@ async function printJob(ep, file, size, job, opts = {}) {
 async function getJobAttributes(ep, jobId, opts = {}) {
   const head = encodeRequest(OP.GET_JOB_ATTRIBUTES, reqId(), {
     operation: [...baseOps(ep), [TAG.integer, 'job-id', jobId], [TAG.name, 'requesting-user-name', 'GateControl'],
-      [TAG.keyword, 'requested-attributes', ['job-state', 'job-state-reasons']]],
+      [TAG.keyword, 'requested-attributes', ['job-state', 'job-state-reasons', 'job-impressions-completed']]],
   });
   const res = await post(ep, head, opts);
   if (res.status >= 0x0400) throw new IppError('ipp_status', `IPP status 0x${res.status.toString(16)}`, { ippStatus: res.status });
   const j = attrsOf(res, GROUP.job);
-  return { state: JOB_STATE[(j['job-state'] || [])[0]] || null, reasons: (j['job-state-reasons'] || []).filter((x) => typeof x === 'string').slice(0, 8) };
+  const done = (j['job-impressions-completed'] || [])[0];
+  return {
+    state: JOB_STATE[(j['job-state'] || [])[0]] || null,
+    reasons: (j['job-state-reasons'] || []).filter((x) => typeof x === 'string').slice(0, 8),
+    impressions: Number.isInteger(done) && done >= 0 ? done : null,
+  };
 }
 
 async function cancelJob(ep, jobId, opts = {}) {
@@ -352,5 +438,5 @@ async function cancelJob(ep, jobId, opts = {}) {
 module.exports = {
   OP, GROUP, TAG, STATUS, RETRY_STATUS, JOB_STATE, PRINTER_STATE, IppError,
   encodeRequest, encodeMessage, decodeResponse, tlsFor, netError, attrsOf, endpointUri, post,
-  getPrinterAttributes, printerInfo, printJob, getJobAttributes, cancelJob, PRINTER_ATTRS,
+  getPrinterAttributes, printerInfo, printJob, getJobAttributes, cancelJob, PRINTER_ATTRS, MEDIA, mediaInfo, mediaByDims, collection,
 };

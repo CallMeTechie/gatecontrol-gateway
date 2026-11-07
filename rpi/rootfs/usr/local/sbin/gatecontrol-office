@@ -1,0 +1,30 @@
+#!/bin/bash
+# GateControl Gateway (Raspberry-Pi-Image) — Dienst office (Office-Dateien
+# drucken) auf Wunsch des Gateways anlegen (docs/print.md).
+#
+# Wird „Office-Dateien drucken“ in GateControl eingeschaltet, während der
+# Container office nicht läuft, legt der Gateway-Container
+# gateway-state/office-start an. gatecontrol-office.path startet dann dieses
+# Skript: Flag entfernen, `docker compose up -d office` (beim ersten Mal mit
+# Image-Download, ≈ 200 MB). Was umgewandelt wird, steuert danach allein das
+# Gateway (office-ctl/in/*).
+set -euo pipefail
+
+# shellcheck source-path=SCRIPTDIR source=../lib/gatecontrol/common.sh
+. "${GC_LIB:-/usr/local/lib/gatecontrol}/common.sh"
+
+FLAG="$GC_DIR/gateway-state/office-start"
+
+main() {
+  [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen" >&2; exit 1; }
+  [ -e "$FLAG" ] || exit 0
+  # zuerst verbrauchen: ein neuer Wunsch des Gateways legt das Flag neu an
+  rm -f -- "$FLAG"
+  [ -s "$GC_DIR/config/gateway.env" ] || exit 0
+  local args=(-f docker-compose.yml)
+  [ -f "$GC_DIR/docker-compose.rollback.yml" ] && args+=(-f docker-compose.rollback.yml)
+  gc_log "Office-Dateien drucken in GateControl eingeschaltet — Dienst office wird angelegt"
+  (cd "$GC_DIR" && docker compose "${args[@]}" up -d --no-deps office)
+}
+
+main "$@"

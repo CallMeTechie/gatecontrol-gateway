@@ -18,6 +18,8 @@ const discovery = require('./discovery');
 const ippLib = require('./ipp');
 const esclLib = require('./escl');
 const convertLib = require('./convert');
+const ocrLib = require('./ocr');
+const { OfficeService, TYPES: OFFICE_TYPES } = require('./office');
 const { makePrintClient, ID_RE } = require('./serverClient');
 const { isRfc1918, cleanText } = require('./config');
 const { inspectLeafCertificate } = require('../proxy/tlsPin');
@@ -25,6 +27,7 @@ const { inspectLeafCertificate } = require('../proxy/tlsPin');
 const DEVICES_PATH = '/api/v1/gateway/print/devices';
 const JOB_PATH = (id) => `/api/v1/gateway/print/jobs/${id}`;
 const SCAN_PATH = (id) => `/api/v1/gateway/print/scans/${id}`;
+const OCR_PATH = (id) => `/api/v1/gateway/print/ocr/${id}`;
 const STATE_FILE = 'print-devices.json';
 const JOURNAL_FILE = 'print-journal.json';
 
@@ -47,6 +50,12 @@ const NET_CODES = new Set(['network', 'timeout']);
 const TLS_SCHEMES = new Set(['ipps', 'https']);
 const PIN_RE = /^[0-9a-f]{64}$/;
 
+const OCR_QUEUE_MAX = 3;               // so viele Texterkennungen warten höchstens (eine läuft)
+const OCR_BEAT_MS = 60_000;           // „läuft noch“ an den Server (er gibt nach 3 Min. Stille auf)
+
+// Was der Drucker während des Drucks meldet und die Apps zeigen (printer-state-reasons ohne -error/-warning/-report)
+const STOP_REASONS = ['media-empty', 'media-needed', 'media-jam', 'door-open', 'cover-open', 'toner-empty', 'marker-supply-empty', 'input-tray-missing', 'output-area-full', 'paused'];
+
 const SCAN_MODES = ['bw', 'gray', 'color'];
 const SCAN_FORMATS = ['image/jpeg', 'application/pdf'];
 
@@ -60,14 +69,18 @@ function printerPart(info) {
 class PrintService {
   constructor({
     reporter, client = null, serverUrl, apiToken, stateDir, getSubnets = () => [],
-    browse = discovery.browse, ipp = ippLib, escl = esclLib, converter = convertLib, now = Date.now, inspect = inspectLeafCertificate,
-    cycleMs = CYCLE_MS, jobsMs = JOBS_MS, retryMs = RETRY_MS, jobPollMs = JOB_POLL_MS, jobWatchMs = JOB_WATCH_MS, browseMs = 4000,
+    browse = discovery.browse, ipp = ippLib, escl = esclLib, converter = convertLib, ocr = ocrLib, office = null, now = Date.now, inspect = inspectLeafCertificate,
+    cycleMs = CYCLE_MS, jobsMs = JOBS_MS, retryMs = RETRY_MS, jobPollMs = JOB_POLL_MS, jobWatchMs = JOB_WATCH_MS, browseMs = 4000, ocrBeatMs = OCR_BEAT_MS,
   }) {
-    Object.assign(this, { reporter, stateDir, getSubnets, browse, ipp, escl, converter, now, inspect, retryMs, jobPollMs, jobWatchMs, browseMs });
+    Object.assign(this, { reporter, stateDir, getSubnets, browse, ipp, escl, converter, ocr, now, inspect, retryMs, jobPollMs, jobWatchMs, browseMs, ocrBeatMs });
+    // Office-Dateien → PDF im Dienst office (office.js)
+    this.office = office || new OfficeService({ stateDir });
+    this.ocrQueue = [];            // wartende Texterkennungen { id, pages, dpi, abort }
+    this.ocrRunning = null;        // die laufende
     this.converting = Promise.resolve(); // Umwandlungen nacheinander (_convert)
     this.client = client || makePrintClient({ serverUrl, apiToken });
     this.status = new FeatureStatus(now);
-    this.cfg = { enabled: false, manual: [], convert: true };
+    this.cfg = { enabled: false, manual: [], convert: true, ocr: false, office: false };
     this.devices = new Map();
     this.jobs = new Map();          // id → { job, nextTryAt, running, final }
     this.journal = new Map();       // id → { at, ippJobId }  an den Drucker gegeben (gegen Doppeldruck nach Neustart)
@@ -115,8 +128,9 @@ class PrintService {
 
   async apply(cfg) {
     const prev = this.cfg;
-    this.cfg = { ...cfg, convert: cfg.convert !== false };
+    this.cfg = { ...cfg, convert: cfg.convert !== false, ocr: cfg.ocr === true, office: cfg.office === true };
     this.status.setEnabled(cfg.enabled);
+    this.office.apply(this.cfg.enabled && this.cfg.office);
     if (!cfg.enabled) { if (prev.enabled) this._shutdown(); return; }
     if (!prev.enabled) {
       this._restore();
@@ -127,10 +141,11 @@ class PrintService {
     } else if (JSON.stringify(prev.manual) !== JSON.stringify(cfg.manual)) {
       this.cycles = 0;
       this.cycleLoop.start(1_000);
-    } else if (prev.convert !== this.cfg.convert) {
-      // „PDF umwandeln“ umgeschaltet: der Server erfährt gleich, welche Drucker jetzt PDF nehmen
+    } else if (prev.convert !== this.cfg.convert || prev.office !== this.cfg.office) {
+      // „PDF umwandeln“ / „Office-Dateien drucken“ umgeschaltet: der Server erfährt gleich, was die Drucker jetzt nehmen
       this.report(true).catch((e) => logger.debug({ err: e.message }, 'print: report failed'));
     }
+    if (!this.cfg.ocr) this._dropOcr('ocr_off');
   }
 
   _shutdown() {
@@ -138,6 +153,7 @@ class PrintService {
     this.jobsLoop.stop();
     for (const s of this.scans.values()) s.abort.abort();
     this.scans.clear();
+    this._dropOcr('disabled');
     this._persist();
     this.jobs.clear();
     this.etag = null;
@@ -398,6 +414,10 @@ class PrintService {
         state: p.state, reasons: p.reasons || [], color: !!p.color, duplex: !!p.duplex, formats: p.formats || [], copiesMax: p.copiesMax || 1, markers: p.markers || [],
         // nimmt er kein PDF: das Format, in das das Gateway PDF umwandelt (null: geht nicht – aus, kein Werkzeug, kein passendes Format)
         convert: this._convertTarget(p),
+        // Office-Dateien druckbar: „Office-Dateien drucken“ an, Dienst office arbeitet, und PDF geht (direkt oder umgewandelt)
+        office: this.office.ready() && (!(p.formats || []).length || (p.formats || []).includes(convertLib.PDF) || !!this._convertTarget(p)),
+        // Papier und Fächer (docs/print.md „Papier und Fach“)
+        media: p.media || { sizes: [], default: null, sources: [], sourceDefault: null, ready: [] },
       } : null,
       scanner: d.escl && s && s.caps ? {
         state: s.state || 'idle', platen: !!s.caps.platen, feeder: !!s.caps.feeder, duplex: !!s.caps.duplex,
@@ -503,19 +523,19 @@ class PrintService {
    * das Format, nennt gar keins oder nimmt application/octet-stream), { plan }
    * (PDF, das das Gateway umwandelt – convert.js) oder { fail: Grund }.
    */
-  _way(d, format, color) {
+  _way(d, format, color, media = null) {
     const fmts = d.printer && Array.isArray(d.printer.formats) ? d.printer.formats : [];
     if (!fmts.length || fmts.includes(format)) return { asIs: true };
-    const plan = format === convertLib.PDF ? this._plan(d, color) : null;
+    const plan = format === convertLib.PDF ? this._plan(d, color, media) : null;
     if (plan) return { plan };
     if (fmts.includes('application/octet-stream')) return { asIs: true };
     return { fail: format === convertLib.PDF ? this._whyNot(d) : 'printer_formats' };
   }
 
   /** Der Umwandel-Plan für PDF auf diesem Drucker – null: aus, kein Werkzeug oder kein passendes Format. */
-  _plan(d, color) {
+  _plan(d, color, media = null) {
     if (!this.cfg.convert || !d.printer || !this.converter.available()) return null;
-    return this.converter.plan(d.printer, { color: !!color && !!d.printer.color });
+    return this.converter.plan(d.printer, { color: !!color && !!d.printer.color, media });
   }
 
   _whyNot(d) {
@@ -548,7 +568,9 @@ class PrintService {
       return this._wait(t, 'device_not_found');
     }
     if (!this.isAllowed(d.ip)) return this._finish(t, { state: 'failed', error: 'device_not_allowed' });
-    const early = this._way(d, job.format, job.color);
+    const officeJob = !!OFFICE_TYPES[job.format];
+    if (officeJob && !this.cfg.office) return this._finish(t, { state: 'failed', error: 'format_unsupported', message: 'office_off' });
+    const early = officeJob ? { asIs: true } : this._way(d, job.format, job.color, job.media);
     // „application/octet-stream“ (unbekannt): erst der Inhalt entscheidet (sniff nach dem Laden)
     if (early.fail && job.format !== 'application/octet-stream') return this._finish(t, { state: 'failed', error: 'format_unsupported', message: early.fail });
     t.running = true;
@@ -569,7 +591,7 @@ class PrintService {
       }
       // das Format am Inhalt, nicht am Etikett (ein PDF als octet-stream, ein JPEG als PDF …)
       const seen = this.converter.sniffFile(file);
-      const format = seen && seen !== job.format ? seen : job.format;
+      let format = seen && seen !== job.format ? seen : job.format;
       if (format !== job.format) logger.info({ job: job.id, said: job.format, seen }, 'print: format taken from the content');
       // erreichbar und nimmt Aufträge an? (weckt viele Drucker aus dem Standby)
       try {
@@ -583,16 +605,35 @@ class PrintService {
         if (d.printer) d.printer.state = 'offline';
         return this._wait(t, 'printer_offline', err.code || err.message);
       }
-      const way = this._way(d, format, job.color);
+      // eine Office-Datei: erst zu PDF (Dienst office), dann wie jedes PDF
+      let src = file;
+      let pages = null;
+      if (OFFICE_TYPES[format]) {
+        if (!this.office.ready()) return this._wait(t, 'office_starting');
+        await this._state(job.id, { state: 'sending', message: 'converting_office' });
+        const pdfFile = path.join(this._tmpDir(), job.id + '.conv-office.pdf');
+        try {
+          await this.office.toPdf(job.id, file, format, pdfFile);
+        } catch (err) {
+          this._dropConverted(job.id);
+          if (err.code === 'office_missing') return this._wait(t, 'office_starting');
+          if (err.code === 'office_off') return this._finish(t, { state: 'failed', error: 'format_unsupported', message: 'office_off' });
+          return this._finish(t, { state: 'failed', error: err.code === 'office_timeout' ? 'office_timeout' : 'office_failed', message: String(err.message || '').slice(0, 200) || null });
+        }
+        src = pdfFile;
+        format = convertLib.PDF;
+        try { pages = (await this.converter.pageSizes(src, { timeoutMs: 30_000 })).length; } catch (_e) { pages = null; }
+      }
+      const way = this._way(d, format, job.color, job.media);
       if (way.fail) return this._finish(t, { state: 'failed', error: 'format_unsupported', message: way.fail });
-      let parts = [{ file, size: fs.statSync(file).size }];
+      let parts = [{ file: src, size: fs.statSync(src).size }];
       let sendAs = format;
       let plan = way.plan || null;
       for (let round = 0; round < 2; round++) {
         if (plan) {
           await this._state(job.id, { state: 'sending', message: 'converting' });
           try {
-            const out = await this._convert(file, path.join(this._tmpDir(), job.id + '.conv'), plan, { duplex: job.duplex === true && !!d.printer.duplex });
+            const out = await this._convert(src, path.join(this._tmpDir(), job.id + '.conv'), plan, { duplex: job.duplex === true && !!d.printer.duplex });
             parts = out.files;
             sendAs = out.format;
           } catch (err) {
@@ -604,10 +645,14 @@ class PrintService {
         if (round === 0) await this._state(job.id, { state: 'sending' });
         const color = plan ? job.color === true && plan.type === 'srgb_8' && !plan.mono : job.color;
         const r = await this._sendParts(t, d, parts, sendAs, color);
+        if (r.formatRefused && !plan && format === convertLib.PDF) {
+          // der Drucker nennt PDF, nimmt es aber nicht: einmal umgewandelt versuchen (das PDF der Office-Datei bleibt dafür liegen)
+          plan = this._plan(d, job.color, job.media);
+          if (plan && round === 0 && !r.converted) { logger.info({ job: job.id }, 'print: printer refused the PDF, converting'); continue; }
+        }
         this._dropConverted(job.id);
         if (r.formatRefused) {
-          // der Drucker nennt PDF, nimmt es aber nicht: einmal umgewandelt versuchen
-          if (!plan && format === convertLib.PDF) plan = this._plan(d, job.color);
+          if (!plan && format === convertLib.PDF) plan = this._plan(d, job.color, job.media);
           if (plan && round === 0 && !r.converted) { logger.info({ job: job.id }, 'print: printer refused the PDF, converting'); continue; }
           return this._finish(t, { state: 'failed', error: 'format_unsupported', message: 'printer_refused' });
         }
@@ -615,8 +660,8 @@ class PrintService {
         this.journal.set(job.id, { at: this.now(), ippJobId: r.jobId });
         this._persist();
         this._dropFile(job.id);
-        await this._state(job.id, { state: 'printing', ippJobId: r.jobId });
-        return this._finish(t, await this._watch(d, r.jobId));
+        await this._state(job.id, { state: 'printing', ippJobId: r.jobId, ...(pages ? { pages } : {}) });
+        return this._finish(t, await this._watch(d, r.jobId, job.id));
       }
       return this._finish(t, { state: 'failed', error: 'format_unsupported', message: 'printer_refused' });
     } finally {
@@ -637,7 +682,10 @@ class PrintService {
       const name = parts.length > 1 ? `${job.name} (${i + 1}/${parts.length})` : job.name;
       let res;
       try {
-        res = await this.ipp.printJob(d.ipp, parts[i].file, parts[i].size, { name, user: job.user, format, copies: job.copies, duplex: d.printer.duplex && parts.length === 1 ? job.duplex : undefined, color });
+        res = await this.ipp.printJob(d.ipp, parts[i].file, parts[i].size, {
+          name, user: job.user, format: this.converter.ippFormat ? this.converter.ippFormat(format) : format, copies: job.copies,
+          duplex: d.printer.duplex && parts.length === 1 ? job.duplex : undefined, color, ...this._mediaOf(d, job),
+        });
       } catch (err) {
         if (i > 0) { await this._finish(t, { state: 'failed', error: 'printer_rejected', message: `page ${i + 1}: ${err.code || err.message}`.slice(0, 200) }); return { done: true }; }
         if (this._certProblem(d, err)) await this._wait(t, 'cert_changed');
@@ -656,17 +704,50 @@ class PrintService {
     return { jobId };
   }
 
-  /** Auf das Ende beim Drucker warten → Endzustand. Ohne Antwort: fertig, aber unbestätigt. */
-  async _watch(d, jobId) {
+  /** Papier und Fach des Auftrags, soweit der Drucker sie nennt (sonst nichts: er nimmt sein Standardpapier). */
+  _mediaOf(d, job) {
+    const m = (d.printer && d.printer.media) || {};
+    const out = {};
+    if (job.media && (m.sizes || []).includes(job.media)) out.media = job.media;
+    if (job.source && (m.sources || []).includes(job.source)) out.source = job.source;
+    return out;
+  }
+
+  /** Was der Drucker gerade hindert (Papier leer, Klappe offen …) → Schlüsselwort oder null. */
+  async _stopReason(d) {
+    try {
+      const a = this.ipp.printerInfo(await this.ipp.getPrinterAttributes(d.ipp, { timeoutMs: 8_000 }));
+      for (const r of a.reasons || []) {
+        const k = String(r).replace(/-(error|warning|report)$/, '');
+        if (STOP_REASONS.includes(k)) return k;
+      }
+      return a.state === 'stopped' ? 'stopped' : null;
+    } catch (_e) { return null; }
+  }
+
+  /**
+   * Auf das Ende beim Drucker warten → Endzustand. Ohne Antwort: fertig, aber unbestätigt.
+   * Hält der Drucker an (Papier leer, Klappe offen, angehalten), geht der Grund als
+   * `printing` + message an den Server – die Apps zeigen ihn (docs/print.md „Zustände“).
+   */
+  async _watch(d, jobId, id = null) {
     if (!Number.isInteger(jobId)) return { state: 'done', message: 'unconfirmed' };
     const until = this.now() + this.jobWatchMs;
     let errors = 0;
+    let said = null;
     while (this.now() < until && this.cfg.enabled) {
       await new Promise((r) => { const x = setTimeout(r, this.jobPollMs); if (x.unref) x.unref(); });
       let s;
       try { s = await this.ipp.getJobAttributes(d.ipp, jobId, { timeoutMs: 10_000 }); errors = 0; } catch (_e) {
         if (++errors >= 3) return { state: 'done', ippJobId: jobId, message: 'unconfirmed' };
         continue;
+      }
+      if (id && (s.state === 'stopped' || s.state === 'held' || s.state === 'processing')) {
+        const why = s.state === 'held' ? 'held' : (s.state === 'stopped' || (s.reasons || []).some((r) => /stopped/.test(r)) ? await this._stopReason(d) : null);
+        if (why !== said) {
+          said = why;
+          await this._state(id, { state: 'printing', ippJobId: jobId, ...(why ? { message: why } : {}) });
+        }
       }
       if (s.state === 'completed') return { state: 'done', ippJobId: jobId };
       if (s.state === 'canceled') return { state: 'failed', ippJobId: jobId, error: 'canceled_at_printer' };
@@ -748,6 +829,91 @@ class PrintService {
     }
   }
 
+  // ─── Texterkennung (durchsuchbares PDF) ───────────────────────────────
+
+  /**
+   * Mgmt „Texterkennung“ { ocrId, pages, dpi? } → 'accepted' | 'invalid' | 'busy' | 'unavailable' | 'disabled'.
+   * Die Seiten holt das Gateway beim Server (GET …/ocr/<id>/pages/<n>), das Ergebnis geht als PDF und Text zurück.
+   */
+  requestOcr(b) {
+    if (!this.cfg.enabled || !this.cfg.ocr) return 'disabled';
+    const o = b && typeof b === 'object' ? b : {};
+    if (typeof o.ocrId !== 'string' || !ID_RE.test(o.ocrId) || !Number.isInteger(o.pages) || o.pages < 1 || o.pages > 100) return 'invalid';
+    if (!this.ocr.available()) return 'unavailable';
+    if ((this.ocrRunning && this.ocrRunning.id === o.ocrId) || this.ocrQueue.some((x) => x.id === o.ocrId)) return 'accepted';
+    if (this.ocrQueue.length >= OCR_QUEUE_MAX) return 'busy';
+    const dpi = Number.isInteger(o.dpi) && o.dpi >= 70 && o.dpi <= 1200 ? o.dpi : 300;
+    this.ocrQueue.push({ id: o.ocrId, pages: o.pages, dpi, abort: new AbortController() });
+    void this._ocrPump();
+    return 'accepted';
+  }
+
+  cancelOcr(id) {
+    const q = this.ocrQueue.findIndex((x) => x.id === id);
+    if (q >= 0) this.ocrQueue.splice(q, 1);
+    if (this.ocrRunning && this.ocrRunning.id === id) this.ocrRunning.abort.abort();
+    return 'accepted';
+  }
+
+  _dropOcr(code) {
+    for (const x of this.ocrQueue.splice(0)) void this.reporter.post(OCR_PATH(x.id), { state: 'failed', error: code });
+    if (this.ocrRunning) this.ocrRunning.abort.abort();
+  }
+
+  /** Eine nach der anderen (schont schwache Geräte wie den Raspberry Pi). */
+  async _ocrPump() {
+    if (this.ocrRunning) return;
+    while (this.ocrQueue.length && this.cfg.enabled) {
+      this.ocrRunning = this.ocrQueue.shift();
+      try { await this._ocrRun(this.ocrRunning); } finally { this.ocrRunning = null; }
+    }
+  }
+
+  async _ocrRun(job) {
+    const report = (body) => this.reporter.post(OCR_PATH(job.id), body);
+    const dir = path.join(this._tmpDir(), `ocr-${job.id}`);
+    let page = 0;
+    const beat = setInterval(() => { void report({ state: 'running', page, pages: job.pages }); }, this.ocrBeatMs);
+    if (beat.unref) beat.unref();
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      await report({ state: 'running', page: 0, pages: job.pages });
+      const files = [];
+      for (let n = 1; n <= job.pages; n++) {
+        if (job.abort.signal.aborted) throw Object.assign(new Error('canceled'), { code: 'canceled' });
+        const f = path.join(dir, `page-${n}.img`);
+        try { await this.client.ocrPage(job.id, n, f); } catch (err) {
+          throw Object.assign(new Error(err.message), { code: err.code === 'not_found' ? 'canceled' : 'download_failed' });
+        }
+        files.push(f);
+      }
+      const r = await this.ocr.recognize(files, {
+        dir, dpi: job.dpi, signal: job.abort.signal,
+        onPage: async (n) => { page = n; await report({ state: 'running', page: n, pages: job.pages }); },
+      });
+      try {
+        await this.client.ocrResult(job.id, 'document', r.pdf, 'application/pdf');
+        if (r.text) {
+          const tf = path.join(dir, 'ocr.txt');
+          fs.writeFileSync(tf, r.text, { mode: 0o600 });
+          await this.client.ocrResult(job.id, 'text', tf, 'text/plain; charset=utf-8');
+        }
+      } catch (err) {
+        throw Object.assign(new Error(err.message), { code: err.code === 'not_found' ? 'canceled' : 'upload_failed' });
+      }
+      await report({ state: 'done', page: r.pages, pages: r.pages });
+      logger.info({ ocr: job.id, pages: r.pages, chars: r.text.length }, 'print: text recognised');
+    } catch (err) {
+      const code = ['canceled', 'ocr_timeout', 'ocr_unavailable', 'download_failed', 'upload_failed'].includes(err.code) ? err.code : 'ocr_failed';
+      if (code !== 'canceled') logger.warn({ ocr: job.id, err: err.code || err.message }, 'print: text recognition failed');
+      await report({ state: 'failed', error: code, page, pages: job.pages });
+    } finally {
+      clearInterval(beat);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   // ─── Telemetrie ───────────────────────────────────────────────────────
 
   featureTelemetry() {
@@ -762,6 +928,10 @@ class PrintService {
       search: this.lastSearch,
       // PDF für Drucker ohne PDF umwandeln: eingeschaltet (features.print.convert) und Werkzeug im Image
       convert: { enabled: this.cfg.convert !== false, available: this.converter.available() },
+      // Texterkennung (features.print.ocr): tesseract und Sprachen im Image, läuft / wartet
+      ocr: { enabled: this.cfg.ocr === true, available: this.ocr.available(), langs: this.ocr.probe().langs, running: !!this.ocrRunning, queued: this.ocrQueue.length },
+      // Office-Dateien drucken (features.print.office): Dienst office managed | absent | missing
+      office: this.office.snapshot(),
     });
   }
 }

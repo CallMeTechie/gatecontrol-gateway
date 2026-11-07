@@ -52,13 +52,31 @@ RUN apk add --no-cache build-base linux-headers
 COPY native/gc-blescan.c /src/gc-blescan.c
 RUN gcc -O2 -Wall -Wextra -static -o /gc-blescan /src/gc-blescan.c && strip /gc-blescan
 
+# --- Stage: Dienst office („Office-Dateien drucken“, docs/print.md) ---
+# Eigenes Image-Tag :office (Release-Workflow, target office): nur LibreOffice
+# ohne Oberfläche (-nogui) und Schriften (Liberation, Carlito/Caladea für
+# Calibri/Cambria, DejaVu), ≈ 500 MB. Geladen wird es nur, wenn „Office-Dateien
+# drucken“ für ein Gateway an ist (Compose-Profil office). Die Logik (office.sh)
+# legt das Gateway ins Volume office-ctl; der Dienst hat kein Netz und keine Rechte.
+FROM debian:12-slim AS office
+# hadolint ignore=DL3008
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
+      fonts-liberation2 fonts-crosextra-carlito fonts-crosextra-caladea fonts-dejavu-core && \
+    rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* && \
+    soffice --version
+ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-office/office.sh ]; do sleep 2; done; exec /bin/sh /gc-office/office.sh"]
+
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # poppler-utils + font-liberation (≈ 23 MB): „Drucken & Scannen“ wandelt PDF für
-# Drucker ohne PDF in PWG-Raster/URF/JPEG um (src/print/convert.js, docs/print.md);
+# Drucker ohne PDF in PWG-Raster/URF/PCLm/JPEG um (src/print/convert.js, docs/print.md);
 # Liberation ersetzt die nicht eingebetteten Standardschriften (Helvetica, Times, Courier).
+# tesseract-ocr + deu/eng (≈ 45 MB): Texterkennung für Scans (src/print/ocr.js), nur
+# genutzt, wenn „Texterkennung“ für das Gateway an ist.
 # hadolint ignore=DL3018
-RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils nftables poppler-utils font-liberation && \
+RUN apk add --no-cache wireguard-tools iproute2 libcap tini keepalived iputils nftables poppler-utils font-liberation \
+      tesseract-ocr tesseract-ocr-data-deu tesseract-ocr-data-eng && \
     addgroup -S gateway && adduser -S -G gateway -H -s /sbin/nologin gateway && \
     mkdir -p /config /var/log/gateway && \
     chown -R gateway:gateway /var/log/gateway

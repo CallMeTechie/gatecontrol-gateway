@@ -8,15 +8,25 @@
 // Apple-Raster (URF, AirPrint) oder je Seite ein JPEG – in der Auflösung,
 // den Farbarten, dem Papier und der Rückseiten-Lage, die der Drucker nennt.
 // Dazu das Erkennen des Formats am Inhalt (sniff) statt am Namen.
+//
+// PCLm (Wi-Fi Alliance, viele HP-Drucker nennen nur das): ein PDF, dessen Seiten
+// aus waagerechten Bildstreifen bestehen – je Streifen ein Bild (Flate oder
+// Run-Length), Höhe, Auflösung und Rückseiten-Lage, wie der Drucker sie nennt
+// (pclm-strip-height-preferred, pclm-source-resolution-supported,
+// pclm-compression-method-preferred, pclm-raster-back-side). Das Gateway
+// schreibt es selbst (zlib), ohne weiteres Werkzeug.
 
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
+const zlib = require('node:zlib');
 
 const PWG = 'image/pwg-raster';
 const URF = 'image/urf';
 const JPEG = 'image/jpeg';
 const PDF = 'application/pdf';
+const PCLM = 'application/pclm'; // so (klein) in `formats`; an den Drucker geht „application/PCLm“
+const PCLM_IPP = 'application/PCLm';
 
 const PREFERRED_DPI = 300;
 const PAGE_TIMEOUT_MS = 180_000;
@@ -37,7 +47,7 @@ class ConvertError extends Error {
 function sniff(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 4) return null;
   const at = (s, o = 0) => buf.length >= o + s.length && buf.subarray(o, o + s.length).equals(Buffer.from(s, 'latin1'));
-  if (buf.subarray(0, 1024).indexOf('%PDF-') >= 0) return PDF;
+  if (buf.subarray(0, 1024).indexOf('%PDF-') >= 0) return buf.subarray(0, 64).indexOf('%PCLm') >= 0 ? PCLM : PDF;
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return JPEG;
   if (at('\x89PNG\r\n\x1a\n')) return 'image/png';
   if (at('RaS2')) return PWG;
@@ -109,9 +119,15 @@ function rasterInfo(a) {
   const back = list('pwg-raster-document-sheet-back').find((x) => SHEET_BACK.includes(x)) || 'normal';
   const urf = urfOf(list('urf-supported'));
   const media = mediaOf(list('media-ready').find((x) => typeof x === 'string' && mediaOf(x)) || list('media-default')[0]);
+  const pclmRes = list('pclm-source-resolution-supported').map(dpiOf).filter(Boolean);
+  const strip = list('pclm-strip-height-preferred').find((n) => Number.isInteger(n) && n >= 1 && n <= 1024);
+  const comp = list('pclm-compression-method-preferred').filter((k) => typeof k === 'string').map((k) => k.toLowerCase());
+  const pclmBack = list('pclm-raster-back-side').find((x) => SHEET_BACK.includes(x)) || 'normal';
   return {
     pwg: pwgRes.length ? { res: [...new Set(pwgRes)].slice(0, 8), types: pwgTypes.filter((t) => ['srgb_8', 'sgray_8', 'black_1'].includes(t)), back } : null,
     urf: urf.res.length && urf.types.length ? { res: [...new Set(urf.res)].slice(0, 8), types: [...new Set(urf.types)], back: urf.back } : null,
+    // PCLm: ohne genannte Auflösung 300 dpi (Pflicht für PCLm-Drucker), Streifen 16 Zeilen
+    pclm: { res: pclmRes.length ? [...new Set(pclmRes)].slice(0, 8) : [PREFERRED_DPI], strip: strip || 16, compression: comp.slice(0, 4), back: pclmBack },
     media: media ? media.name : null,
   };
 }
@@ -130,15 +146,22 @@ function chooseType(types, color) {
   return types.includes('black_1') ? 'black_1' : null;
 }
 
+/** Flate, wenn der Drucker es nennt (oder gar nichts nennt), sonst Run-Length; JPEG kann das Gateway nicht schreiben. */
+function pclmCompression(list) {
+  if (!list.length || list.includes('flate')) return 'flate';
+  return list.includes('rle') ? 'rle' : 'flate';
+}
+
 /**
  * Wie eine PDF-Datei auf diesen Drucker kommt: { format, dpi, type, mono, back, media } oder
  * null (der Drucker nennt kein Format, das das Gateway erzeugen kann).
- * printer: der Drucker-Teil (formats, raster), opts: { color }.
+ * printer: der Drucker-Teil (formats, raster), opts: { color, media } (media: das gewählte Papier, PWG-Name).
+ * Reihenfolge: PWG-Raster, Apple-Raster, PCLm, JPEG (je Seite ein Auftrag).
  */
-function plan(printer, { color = false } = {}) {
+function plan(printer, { color = false, media: wanted = null } = {}) {
   const f = printer && Array.isArray(printer.formats) ? printer.formats : [];
   const r = (printer && printer.raster) || {};
-  const media = mediaOf(r.media) || A4;
+  const media = mediaOf(wanted) || mediaOf(r.media) || A4;
   if (f.includes(PWG) && r.pwg && r.pwg.res.length) {
     const type = chooseType(r.pwg.types.length ? r.pwg.types : ['sgray_8', 'srgb_8'], color);
     if (type) return { format: PWG, dpi: chooseDpi(r.pwg.res), type, mono: !color, back: r.pwg.back || 'normal', media };
@@ -146,6 +169,13 @@ function plan(printer, { color = false } = {}) {
   if (f.includes(URF) && r.urf && r.urf.res.length) {
     const type = chooseType(r.urf.types, color);
     if (type) return { format: URF, dpi: chooseDpi(r.urf.res), type, mono: !color, back: r.urf.back || 'normal', media };
+  }
+  if (f.includes(PCLM)) {
+    const pc = r.pclm || { res: [PREFERRED_DPI], strip: 16, compression: [], back: 'normal' };
+    return {
+      format: PCLM, dpi: chooseDpi(pc.res && pc.res.length ? pc.res : [PREFERRED_DPI]), type: color ? 'srgb_8' : 'sgray_8', mono: !color,
+      back: pc.back || 'normal', media, strip: pc.strip || 16, compression: pclmCompression(pc.compression || []),
+    };
   }
   if (f.includes(JPEG)) return { format: JPEG, dpi: PREFERRED_DPI, type: color ? 'srgb_8' : 'sgray_8', mono: !color, back: 'normal', media };
   return null;
@@ -439,6 +469,91 @@ function urfHeader({ width, height, dpi, type, duplex }) {
   return h;
 }
 
+// ─── PCLm ───────────────────────────────────────────────────────────────
+
+/** PDF-RunLengthDecode: 0…127 = die nächsten n+1 Bytes wörtlich, 129…255 = das nächste Byte (257−n)-mal, 128 = Ende. */
+function rle(buf) {
+  const out = Buffer.allocUnsafe(buf.length * 2 + 2); // schlimmster Fall: je Einzelbyte ein Steuerbyte
+  let o = 0;
+  let i = 0;
+  while (i < buf.length) {
+    let run = 1;
+    while (i + run < buf.length && run < 128 && buf[i + run] === buf[i]) run++;
+    if (run > 1) { out[o++] = 257 - run; out[o++] = buf[i]; i += run; continue; }
+    const start = i;
+    i++;
+    while (i < buf.length && i - start < 128 && !(i + 1 < buf.length && buf[i] === buf[i + 1])) i++;
+    out[o++] = i - start - 1;
+    o += buf.copy(out, o, start, i);
+  }
+  out[o++] = 128;
+  return out.subarray(0, o);
+}
+
+/**
+ * PCLm-Datei schreiben (PCLm 1.0, Wi-Fi Alliance): Kopf „%PDF-1.7 / %PCLm 1.0“,
+ * je Seite ein Inhalt mit Streifen von oben nach unten, je Streifen ein Bild.
+ * Gibt { page(img), end() } zurück; die Objektnummern stehen fest, weil alle
+ * Seiten dasselbe Blatt haben (W × H Pixel bei dpi).
+ */
+function pclmWriter(out, { width, height, dpi, type, strip, compression, pages }) {
+  const bpp = type === 'srgb_8' ? 3 : 1;
+  const strips = Math.ceil(height / strip);
+  const perPage = 2 + strips;
+  const offsets = [];
+  let pos = 0;
+  const put = (b) => { out.write(b); pos += b.length; };
+  const obj = (n, head, stream = null) => {
+    offsets[n] = pos;
+    if (stream) {
+      put(Buffer.from(`${n} 0 obj\n${head.replace('%LEN%', String(stream.length))}\nstream\n`, 'latin1'));
+      put(stream);
+      put(Buffer.from('\nendstream\nendobj\n', 'latin1'));
+    } else put(Buffer.from(`${n} 0 obj\n${head}\nendobj\n`, 'latin1'));
+  };
+  const pageNo = (i) => 3 + i * perPage;
+  const wPt = ((width * 72) / dpi).toFixed(2);
+  const hPt = ((height * 72) / dpi).toFixed(2);
+  const filter = compression === 'rle' ? '/RunLengthDecode' : '/FlateDecode';
+  const cs = bpp === 3 ? '/DeviceRGB' : '/DeviceGray';
+  put(Buffer.from('%PDF-1.7\n%PCLm 1.0\n', 'latin1'));
+  obj(1, '<< /Type /Catalog /Pages 2 0 R >>');
+  let i = 0;
+  return {
+    page(img) {
+      const base = pageNo(i);
+      const rowBytes = width * bpp;
+      const xo = [];
+      const ops = [`${(72 / dpi).toFixed(6)} 0 0 ${(72 / dpi).toFixed(6)} 0 0 cm`];
+      for (let k = 0; k < strips; k++) {
+        const y0 = k * strip;
+        const h = Math.min(strip, height - y0);
+        const raw = img.data.subarray(y0 * rowBytes, (y0 + h) * rowBytes);
+        const data = compression === 'rle' ? rle(raw) : zlib.deflateSync(raw, { level: 6 });
+        obj(base + 2 + k, `<< /Type /XObject /Subtype /Image /Width ${width} /Height ${h} /ColorSpace ${cs} /BitsPerComponent 8 /Filter ${filter} /Length %LEN% >>`, data);
+        xo.push(`/Image${k} ${base + 2 + k} 0 R`);
+        // PDF zählt von unten: der oberste Streifen liegt bei y = H − h
+        ops.push(`/P <</MCID 0>> BDC q\n${width} 0 0 ${h} 0 ${height - y0 - h} cm\n/Image${k} Do Q\nEMC`);
+      }
+      const content = Buffer.from(ops.join('\n') + '\n', 'latin1');
+      obj(base + 1, '<< /Length %LEN% >>', content);
+      obj(base, `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${wPt} ${hPt}] /Resources << /XObject << ${xo.join(' ')} >> >> /Contents ${base + 1} 0 R >>`);
+      i += 1;
+    },
+    end() {
+      const kids = Array.from({ length: i }, (_x, k) => `${pageNo(k)} 0 R`).join(' ');
+      obj(2, `<< /Type /Pages /Kids [${kids}] /Count ${i} >>`);
+      const size = 3 + i * perPage;
+      const xref = pos;
+      let x = `xref\n0 ${size}\n0000000000 65535 f \n`;
+      for (let n = 1; n < size; n++) x += `${String(offsets[n] || 0).padStart(10, '0')} 00000 n \n`;
+      x += `trailer\n<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+      put(Buffer.from(x, 'latin1'));
+      if (i !== pages) throw new ConvertError('convert_failed', 'page count');
+    },
+  };
+}
+
 // ─── Umwandeln ──────────────────────────────────────────────────────────
 
 /** Schreibt Teile in eine Datei und zählt mit (höchstens max Bytes). */
@@ -501,6 +616,7 @@ async function convert(src, dst, p, opts = {}) {
     }
     return { format: JPEG, pages: pages.length, files };
   }
+  if (p.format === PCLM) return convertPclm(src, dst, p, pages, opts, ro, max);
   const out = sink(dst, max);
   try {
     if (p.format === PWG) out.write(Buffer.from('RaS2', 'latin1'));
@@ -528,9 +644,34 @@ async function convert(src, dst, p, opts = {}) {
   return { format: p.format, pages: pages.length, files: [{ file: dst, size: out.close() }] };
 }
 
+/** PDF → PCLm: Seiten rendern wie für PWG, dann als Streifen-Bilder (Flate/Run-Length). */
+async function convertPclm(src, dst, p, pages, opts, ro, max) {
+  const out = sink(dst, max);
+  try {
+    const sheet = layout({ w: p.media.w, h: p.media.h }, p.media, p.dpi);
+    if (sheet.W * sheet.H > MAX_PAGE_PIXELS) throw new ConvertError('convert_too_large', 'sheet too large');
+    const w = pclmWriter(out, { width: sheet.W, height: sheet.H, dpi: p.dpi, type: p.type, strip: p.strip || 16, compression: p.compression || 'flate', pages: pages.length });
+    for (let i = 0; i < pages.length; i++) {
+      let img = await renderPage(src, i + 1, pages[i], p, ro);
+      const back = opts.duplex && i % 2 === 1 ? p.back : 'normal';
+      img = toType(backSide(img, back), p.type);
+      w.page(img);
+    }
+    w.end();
+  } catch (e) {
+    out.close();
+    fs.rmSync(dst, { force: true });
+    throw e;
+  }
+  return { format: PCLM, pages: pages.length, files: [{ file: dst, size: out.close() }] };
+}
+
+/** Wie das Format an den Drucker geht (document-format): PCLm in der Schreibweise der Norm. */
+const ippFormat = (f) => (f === PCLM ? PCLM_IPP : f);
+
 module.exports = {
-  ConvertError, PWG, URF, JPEG, PDF, A4,
-  sniff, sniffFile, rasterInfo, mediaOf, urfOf, plan, targetOf, available, convert,
+  ConvertError, PWG, URF, JPEG, PDF, PCLM, A4,
+  sniff, sniffFile, rasterInfo, mediaOf, urfOf, plan, targetOf, available, convert, ippFormat, pageSizes, pclmWriter, rle,
   layout, rotate90, onSheet, backSide, toType, packLine, packPage, pwgHeader, urfHeader, parsePnm, chooseDpi,
   _tools: TOOLS, _reset() { toolsOk = null; },
 };

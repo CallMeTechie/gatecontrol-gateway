@@ -5,6 +5,8 @@
 //   GET /api/v1/gateway/print/jobs               Warteschlange (ETag)
 //   GET /api/v1/gateway/print/jobs/<id>/file     Datei eines Auftrags
 //   PUT /api/v1/gateway/print/scans/<id>/pages/<n>  eine gescannte Seite
+//   GET /api/v1/gateway/print/ocr/<id>/pages/<n>    eine Seite für die Texterkennung
+//   PUT /api/v1/gateway/print/ocr/<id>/document|text  ihr Ergebnis (PDF, Text)
 // Berichte (Geräte, Zustände) gehen über den Reporter (JSON).
 
 const crypto = require('node:crypto');
@@ -19,7 +21,12 @@ const IDLE_MS = 60_000;
 const ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const SHA_RE = /^[0-9a-f]{64}$/;
 const DEVICE_RE = /^[uh]:[0-9a-f]{16,32}$/;
-const FORMATS = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/urf', 'image/pwg-raster']);
+const { TYPES: OFFICE_TYPES } = require('./office');
+
+const FORMATS = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/urf', 'image/pwg-raster', ...Object.keys(OFFICE_TYPES)]);
+const MEDIA_RE = /^[a-z0-9]+_[a-z0-9.-]+_[0-9.]+x[0-9.]+(mm|in)$/;
+const SOURCE_RE = /^[a-z][a-z0-9-]{0,39}$/;
+const MAX_OCR_RESULT = 100 * 1024 * 1024;
 
 class PrintClientError extends Error {
   constructor(code, message) { super(message || code); this.code = code; }
@@ -68,6 +75,9 @@ function parseJobs(data) {
       name: cleanText(j.name, 120) || 'GateControl',
       user: cleanText(j.user, 60) || 'GateControl',
       expiresAt: Number.isSafeInteger(j.expiresAt) ? j.expiresAt : null,
+      // Papier (PWG-Name) und Fach, wie die Person sie gewählt hat (null: Standard des Druckers)
+      media: typeof j.media === 'string' && j.media.length <= 64 && MEDIA_RE.test(j.media) ? j.media : null,
+      source: typeof j.source === 'string' && SOURCE_RE.test(j.source) ? j.source : null,
     });
   }
   return out;
@@ -124,7 +134,43 @@ function makePrintClient({ serverUrl, apiToken }) {
     if (res.statusCode !== 200) throw new PrintClientError(res.statusCode === 413 ? 'too_large' : 'http_status', `HTTP ${res.statusCode}`);
   }
 
-  return { jobs, file, page };
+  /** Eine Seite für die Texterkennung nach `dest` laden (≤ 50 MB, JPEG/PNG). */
+  async function ocrPage(id, n, dest) {
+    if (!ID_RE.test(id) || !Number.isInteger(n) || n < 1 || n > 100) throw new PrintClientError('bad_id');
+    const res = await call(`${serverUrl}/api/v1/gateway/print/ocr/${id}/pages/${n}`, { headers: { ...auth, accept: 'image/jpeg, image/png' } });
+    if (res.statusCode !== 200) { res.resume(); throw new PrintClientError(res.statusCode === 404 ? 'not_found' : 'http_status', `HTTP ${res.statusCode}`); }
+    const type = String(res.headers['content-type'] || '').split(';')[0].trim();
+    if (type !== 'image/jpeg' && type !== 'image/png') { res.resume(); throw new PrintClientError('bad_type'); }
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(dest, { mode: 0o600 });
+      let n2 = 0;
+      let failed = false;
+      const fail = (e) => { if (failed) return; failed = true; res.destroy(); out.destroy(); reject(e); };
+      res.on('data', (c) => { n2 += c.length; if (n2 > MAX_FILE) fail(new PrintClientError('too_large')); });
+      res.on('aborted', () => fail(new PrintClientError('network', 'aborted')));
+      res.on('error', (e) => fail(new PrintClientError('network', e.message)));
+      out.on('error', (e) => fail(new PrintClientError('write', e.message)));
+      out.on('finish', () => { if (!failed) resolve(); });
+      res.pipe(out);
+    });
+  }
+
+  /** Das Ergebnis der Texterkennung hochladen: kind 'document' (PDF) oder 'text'. */
+  async function ocrResult(id, kind, filePath, mime) {
+    if (!ID_RE.test(id) || (kind !== 'document' && kind !== 'text')) throw new PrintClientError('bad_id');
+    const bytes = fs.statSync(filePath).size;
+    if (bytes > MAX_OCR_RESULT) throw new PrintClientError('too_large');
+    const res = await call(`${serverUrl}/api/v1/gateway/print/ocr/${id}/${kind}`, {
+      method: 'PUT',
+      headers: { ...auth, 'content-type': mime, 'content-length': String(bytes) },
+      body: fs.createReadStream(filePath),
+      timeoutMs: 120_000,
+    });
+    res.resume();
+    if (res.statusCode !== 200) throw new PrintClientError(res.statusCode === 404 ? 'not_found' : (res.statusCode === 413 ? 'too_large' : 'http_status'), `HTTP ${res.statusCode}`);
+  }
+
+  return { jobs, file, page, ocrPage, ocrResult };
 }
 
 module.exports = { makePrintClient, parseJobs, PrintClientError, ID_RE, DEVICE_RE, MAX_FILE };

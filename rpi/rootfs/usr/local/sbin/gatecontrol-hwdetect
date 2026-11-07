@@ -355,6 +355,8 @@ def hardware_profile(zigbee):
         "ai_start": True,
         # ebenso den Dienst kameras (gateway-state/cameras-start → gatecontrol-cameras.path, docs/cameras.md)
         "cameras_start": True,
+        # ebenso den Dienst office (gateway-state/office-start → gatecontrol-office.path, docs/print.md)
+        "office_start": True,
         "detected_at": int(time.time() * 1000),
     }
 

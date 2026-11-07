@@ -199,6 +199,17 @@ expect "Exit 0" run_start
 expect "kameras entfernt" grep -q 'compose -f docker-compose.yml rm -s -f kameras' "$T/docker.log"
 rm -f "$T/opt/gateway-state/cameras.json"
 
+echo "== Office-Dateien drucken in GateControl an (office.json)"
+printf '{"want":true}\n' >"$T/opt/gateway-state/office.json"
+: >"$T/docker.log"
+expect "Exit 0" run_start
+expect "office gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway edge mqtt deconz office$' "$T/docker.log"
+printf '{"want":false}\n' >"$T/opt/gateway-state/office.json"
+: >"$T/docker.log"
+expect "Exit 0" run_start
+expect "office entfernt" grep -q 'compose -f docker-compose.yml rm -s -f office' "$T/docker.log"
+rm -f "$T/opt/gateway-state/office.json"
+
 echo "== settings.txt mit BOM in Zeile 1 + Ergebnis von gatecontrol-settings in STATUS.txt"
 printf '\xEF\xBB\xBFHOSTNAME=bom-gw\r\nZIGBEE=auto\r\n' >"$T/boot/gatecontrol/settings.txt"
 printf 'WLAN: "Netz" (Land DE, offenes Netz; LAN-Kabel hat Vorrang)\n' >"$T/run/settings.status"
@@ -300,6 +311,26 @@ echo '{"cameras":true}' >"$T/opt/gateway-state/cameras-start"
 expect "Exit 0" run_cams
 expect "Flag verbraucht" test ! -e "$T/opt/gateway-state/cameras-start"
 expect "kameras angelegt" grep -q 'compose -f docker-compose.yml up -d --no-deps kameras$' "$T/docker.log"
+rm -rf "$T"
+
+echo "== gatecontrol-office: Dienst office auf Wunsch des Gateways"
+OFFICE="$ROOTFS/usr/local/sbin/gatecontrol-office"
+run_office() {
+  PATH="$T/bin:$PATH" GC_LIB="$ROOTFS/usr/local/lib/gatecontrol" GC_DIR="$T/opt" GC_BOOT="$T/boot" GC_RUN="$T/run" \
+    bash "$OFFICE" >"$T/out.log" 2>&1
+}
+setup
+expect "ohne Flag: nichts" run_office
+expect "ohne Flag: kein docker-Aufruf" test ! -s "$T/docker.log"
+mkdir -p "$T/opt/gateway-state" "$T/opt/config"
+echo '{"office":true}' >"$T/opt/gateway-state/office-start"
+expect "ohne gateway.env: Exit 0" run_office
+expect "ohne gateway.env: Flag verbraucht, kein docker-Aufruf" test ! -e "$T/opt/gateway-state/office-start" -a ! -s "$T/docker.log"
+valid_env >"$T/opt/config/gateway.env"
+echo '{"office":true}' >"$T/opt/gateway-state/office-start"
+expect "Exit 0" run_office
+expect "Flag verbraucht" test ! -e "$T/opt/gateway-state/office-start"
+expect "office angelegt" grep -q 'compose -f docker-compose.yml up -d --no-deps office$' "$T/docker.log"
 rm -rf "$T"
 
 echo
