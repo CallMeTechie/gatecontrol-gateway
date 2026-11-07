@@ -179,6 +179,17 @@ jobs:
           fi
           awk -v v="$LINES" 'BEGIN{exit (v+0 < 70)}' || { echo "Coverage below 70%"; exit 1; }
 
+  office-image:
+    # Dienst office (Dockerfile, target office): nativ für amd64 bauen und LibreOffice
+    # wirklich starten. Im Release (QEMU, arm64/armv7) läuft soffice beim Bauen nicht.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build office image (amd64)
+        run: docker build --target office -t gc-office-test .
+      - name: soffice --version
+        run: docker run --rm --entrypoint soffice gc-office-test --version
+
   mutation:
     runs-on: ubuntu-latest
     needs: unit
