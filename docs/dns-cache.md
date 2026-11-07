@@ -208,11 +208,18 @@ Nur Arten mit `kinds.<kind> = true` (Standard: `drive`, `photos`, `updates`
 an, `vault` aus). Höhere `priority` zuerst. Fehlt ein Blob: Platz schaffen –
 zuerst Blobs, die nicht (mehr) im Vorrat stehen, dann solche mit niedrigerer
 Priorität, jeweils die am längsten nicht abgegebenen; geht das nicht, wird der
-Blob übersprungen. Dann `GET /api/v1/gateway/cache/blob/<sha256>` in
+Blob übersprungen. Die Reihenfolge wird einmal je Abgleich festgelegt (der
+Stand am Anfang des Laufs); der Abgleich gibt alle 10 ms die Ereignisschleife
+frei, damit Heartbeat, Proxy und Probe auch bei 20 000 Einträgen antworten.
+Dann `GET /api/v1/gateway/cache/blob/<sha256>` in
 `<sha256>.part`, eine Datei zur Zeit; abgebrochene Downloads werden mit
 `Range: bytes=<n>-` fortgesetzt (206 mit passendem `Content-Range`, sonst von
 vorn), mehr als `size` Bytes → Abbruch, danach sha256 über die ganze Datei.
-Nach drei Fehlern bricht ein Lauf ab.
+Nach drei Fehlern bricht ein Lauf ab. Antwortet der Server mit **429**
+(eigenes Budget `GC_RATE_LIMIT_GATEWAY_CACHE`), endet der Lauf sofort,
+Abgleich und Bericht ruhen bis `Retry-After` (ohne Angabe 60 s, höchstens
+1 h; Log `cache: server rate limit (429), pausing cache sync`). Blob-Anfragen
+folgen frühestens 100 ms aufeinander (≈ 10/s).
 
 ### Abgabe im LAN
 

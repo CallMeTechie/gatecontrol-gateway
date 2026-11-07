@@ -13,13 +13,14 @@ async function startCacheServer({ token = 'gc_gw_' + 'b'.repeat(64) } = {}) {
     if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401); return res.end(); }
     const url = new URL(req.url, 'http://x');
     if (req.method === 'GET' && url.pathname === '/api/v1/gateway/cache/want') {
-      res.writeHead(state.wantStatus, { 'content-type': 'application/json' });
+      res.writeHead(state.wantStatus, { 'content-type': 'application/json', ...(state.retryAfter ? { 'retry-after': state.retryAfter } : {}) });
       return res.end(JSON.stringify({ items: state.want }));
     }
     const m = /^\/api\/v1\/gateway\/cache\/blob\/([0-9a-f]{64})$/.exec(url.pathname);
     if (req.method === 'GET' && m) {
       let data = blobs.get(m[1]);
       state.blobGets.push({ sha: m[1], range: req.headers.range || null });
+      if (state.blobStatus) { res.writeHead(state.blobStatus, state.retryAfter ? { 'retry-after': state.retryAfter } : {}); return res.end(); }
       if (!data) { res.writeHead(404); return res.end(); }
       if (state.corrupt.has(m[1])) { data = Buffer.from(data); data[0] ^= 0xff; }
       const r = /^bytes=(\d+)-$/.exec(req.headers.range || '');

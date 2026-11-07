@@ -5,10 +5,11 @@
 // signierte Abgabe per HTTPS im LAN, Bestand/Statistik an den Server.
 
 const path = require('node:path');
+const { setImmediate: tick, setTimeout: sleep } = require('node:timers/promises');
 const logger = require('../logger');
 const { FeatureStatus, loop } = require('../features/status');
-const { BlobStore } = require('./store');
-const { makeCacheClient } = require('./fetcher');
+const { BlobStore, SLICE_MS } = require('./store');
+const { makeCacheClient, retryAfterMs } = require('./fetcher');
 const { makeHandler, LanBlobServer } = require('./lanServer');
 const { loadOrCreate } = require('./selfsigned');
 const { lanListenAddresses } = require('../dns/server');
@@ -20,6 +21,10 @@ const FULL_EVERY_MS = 6 * 3600_000;
 const LISTEN_MS = 60_000;
 const RESERVE_BYTES = 512 * 1024 * 1024;   // auf dem Datenträger frei lassen
 const MAX_HAVE = 5_000;          // je Bericht und Liste (Server-Grenze)
+// Höchstens ~10 Blob-Anfragen je Sekunde (≈ 9 000 je 15 Min., unter dem
+// Server-Budget GC_RATE_LIMIT_GATEWAY_CACHE von 10 000): tausende kleine
+// Vorschaubilder sollen den Server nicht fluten.
+const BLOB_GAP_MS = 100;
 
 const zeroCounters = () => ({ hits: 0, misses: 0, bytesServed: 0, bytesFetched: 0, denied: 0 });
 
@@ -27,8 +32,11 @@ class HomeCache {
   constructor({
     reporter, client = null, serverUrl, apiToken, stateDir, tunnelIp = null,
     addresses = null, now = Date.now, tls = null, syncMs = SYNC_MS, reportMs = REPORT_MS, listenMs = LISTEN_MS, freeBytes = null,
+    blobGapMs = BLOB_GAP_MS,
   }) {
-    Object.assign(this, { reporter, stateDir, now });
+    Object.assign(this, { reporter, stateDir, now, blobGapMs });
+    this.pausedUntil = 0;          // nach 429: bis dahin kein Abgleich/Bericht
+    this.lastBlobAt = 0;
     this.client = client || makeCacheClient({ serverUrl, apiToken });
     this.status = new FeatureStatus(now);
     this.cfg = { enabled: false, requested: false, problem: null };
@@ -164,8 +172,17 @@ class HomeCache {
     return this.syncing;
   }
 
+  /** 429 vom Server: Zwischenspeicher-Verkehr bis Retry-After ruhen lassen. */
+  _backoff(ms) {
+    this.pausedUntil = this.now() + ms;
+    this.status.fail('rate_limited');
+    logger.warn({ retryAfterS: Math.round(ms / 1000) }, 'cache: server rate limit (429), pausing cache sync');
+  }
+
+  _paused() { return this.now() < this.pausedUntil; }
+
   async _sync() {
-    if (!this.cfg.enabled || !this.store) return;
+    if (!this.cfg.enabled || !this.store || this._paused()) return;
     const store = this.store;
     this.status.start();
     try {
@@ -174,23 +191,33 @@ class HomeCache {
       this.want = all.filter((w) => kinds[w.kind] === true).sort((a, b) => b.priority - a.priority);
       this.lastSyncAt = this.now();
       const prio = new Map(this.want.map((w) => [w.sha256, w.priority]));
+      // Zuerst raus: nicht (mehr) im Vorrat (LRU), dann niedrigere Priorität (LRU); gleich/höher bleibt.
+      // Reihenfolge einmal je Abgleich – nicht je gewolltem Blob (bei 20 000 Einträgen
+      // und vollem Speicher sonst O(n² log n) am Stück, das Gateway antwortet minutenlang nicht).
+      await tick();
+      const plan = store.evictionPlan((sha) => (prio.has(sha) ? prio.get(sha) : -Infinity));
+      await tick();
       let fetchedAny = false;
       const failures = [];
+      let limit = this.effectiveMax();
+      let sliceAt = performance.now();
       for (const w of this.want) {
+        // Ereignisschleife regelmäßig freigeben (Heartbeat, Proxy, Probe, LAN-Abgabe).
+        if (performance.now() - sliceAt >= SLICE_MS) {
+          await tick();
+          sliceAt = performance.now();
+          if (this.store === store && this.cfg.enabled) limit = this.effectiveMax();
+        }
         if (this.store !== store || !this.cfg.enabled) break;
         if (store.has(w.sha256)) continue;
-        const limit = this.effectiveMax();
         if (w.size > limit) continue;
-        // Zuerst raus: nicht (mehr) im Vorrat (LRU), dann niedrigere Priorität (LRU); gleich/höher bleibt.
-        const ok = await store.makeRoom(w.size, limit, (sha) => {
-          if (!prio.has(sha)) return -1e15;
-          const p = prio.get(sha);
-          return p < w.priority ? p : null;
-        });
-        if (!ok) continue;
+        if (!(await plan.makeRoom(w.size, limit, w.priority))) continue;
         this.downloading = { sha256: w.sha256, size: w.size, bytes: 0, kind: w.kind };
         this.abort = new AbortController();
         try {
+          const wait = this.lastBlobAt + this.blobGapMs - Date.now();
+          if (wait > 0) await sleep(wait);
+          this.lastBlobAt = Date.now();
           const r = await this.client.blob(w.sha256, w.size, store.partPath(w.sha256), {
             signal: this.abort.signal,
             onProgress: (b) => { if (this.downloading) this.downloading.bytes = b; },
@@ -200,6 +227,7 @@ class HomeCache {
           fetchedAny = true;
         } catch (err) {
           if (err.code === 'aborted') break;
+          if (err.code === 'rate_limited') { this._backoff(err.retryAfterMs); break; }
           failures.push(err.code || 'error');
           logger.warn({ sha256: w.sha256.slice(0, 12), err: err.code || err.message }, 'cache: download failed');
           if (failures.length >= 3) break;
@@ -207,11 +235,14 @@ class HomeCache {
           this.downloading = null;
           this.abort = null;
         }
+        limit = this.effectiveMax();
+        sliceAt = performance.now();
       }
-      store.persist();
-      if (failures.length) this.status.fail(`download: ${failures[0]}`); else this.status.ok();
+      await store.save();
+      if (failures.length) this.status.fail(`download: ${failures[0]}`); else if (!this._paused()) this.status.ok();
       if (fetchedAny) await this.report();
     } catch (err) {
+      if (err.code === 'rate_limited') { this._backoff(err.retryAfterMs); return; }
       this.status.fail(err.code || err.message);
       logger.debug({ err: err.code || err.message }, 'cache: sync failed');
     }
@@ -222,7 +253,7 @@ class HomeCache {
    * Mehr als MAX_HAVE Einträge gehen in Folgeberichten (Delta) hinterher.
    */
   async report() {
-    if (!this.cfg.enabled || !this.store) return;
+    if (!this.cfg.enabled || !this.store || this._paused()) return;
     const store = this.store;
     const full = this.needFull || this.now() - this.lastFullAt >= FULL_EVERY_MS;
     const added = full ? [...store.items.keys()] : [...store.added];
@@ -253,6 +284,7 @@ class HomeCache {
       };
       const r = await this.reporter.post(REPORT_PATH, body);
       ok = r.ok;
+      if (r.status === 429) this._backoff(retryAfterMs(r.retryAfter));
       if (!ok && first) {
         for (const k of Object.keys(counters)) this.counters[k] += counters[k];
         this.periodFrom = from;
@@ -267,7 +299,7 @@ class HomeCache {
     } else {
       this.needFull = true;
     }
-    store.persist();
+    await store.save();
   }
 
   /** Mgmt „Zwischenspeicher leeren“. */
