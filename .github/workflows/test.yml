@@ -167,7 +167,13 @@ jobs:
         run: |
           pk="poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui"
           sudo apt-get install -y --no-install-recommends $pk || (sudo apt-get update && sudo apt-get install -y --no-install-recommends $pk)
-      - run: node --test --experimental-test-coverage --test-force-exit tests/ | tee test-output.txt
+      - name: Tests
+        # Explizite Dateiliste: Node 22 nimmt `tests/` als Modul statt als Ordner und
+        # führt dann gar nichts aus. pipefail: sonst verschluckt `tee` den Fehlercode.
+        shell: bash
+        run: |
+          set -o pipefail
+          node --test --experimental-test-coverage --test-force-exit $(find tests -name '*.test.js' | sort) | tee test-output.txt
       - name: Check coverage
         run: |
           # Extract "all files" line coverage pct from node --test coverage block
