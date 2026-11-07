@@ -398,7 +398,10 @@ describe('ai: docker-compose.ki-*.yml', () => {
     assert.match(nv, /GC_KI_GPU=nvidia/);
     const amd = read('docker-compose.ki-amd.yml');
     const base = /image: (ollama\/ollama:[0-9.]+)@sha256:[0-9a-f]{64}/.exec(read('docker-compose.example.yml'))[1];
-    assert.match(amd, new RegExp(`image: ${base.replace(/[.]/g, '\\.')}-rocm@sha256:[0-9a-f]{64}`), 'the rocm image of the same Ollama version');
+    // the rocm image of the same Ollama version (compared as text, no pattern built from file contents)
+    const img = /image: (\S+)/.exec(amd)[1];
+    assert.ok(img.startsWith(`${base}-rocm@sha256:`), img);
+    assert.match(img.slice(img.indexOf('@sha256:') + 8), /^[0-9a-f]{64}$/);
     assert.match(amd, /- \/dev\/kfd\n\s+- \/dev\/dri/);
     assert.match(amd, /GC_KI_GPU=amd/);
     const intel = read('docker-compose.ki-intel.yml');

@@ -18,7 +18,7 @@ entscheidet nach dem Modus, ob die lokale KI oder die Cloud antwortet.
 ```json
 { "enabled": true, "source": "service", "lan": null }
 { "enabled": true, "source": "lan", "lan": { "url": "http://192.168.1.20:11434", "api": "ollama" } }
-{ "enabled": true, "source": "lan", "lan": { "url": "http://ki-pc.local:8000", "api": "openai", "keyRev": "3f9c0a1b2c3d4e5f" } }
+{ "enabled": true, "source": "lan", "lan": { "url": "http://ki-pc.local:8000", "api": "openai", "keyRev": "<16 Hex-Zeichen>" } }
 ```
 
 * `enabled` – aus: der Dienst `ki` wird beendet (Steuerdatei weg), der Proxy antwortet `503 feature_disabled`.
