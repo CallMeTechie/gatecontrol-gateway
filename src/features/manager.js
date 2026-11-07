@@ -28,13 +28,15 @@ const { localIpForSubnet } = require('../discovery/scanEngine');
 const logger = require('../logger');
 
 // print-convert: PDF für Drucker ohne PDF im Gateway umwandeln (docs/print.md „Umwandeln“)
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'radio', 'ai', 'cameras']);
+// radio-stacks: Funk mit zigbee2mqtt, Thread Border Router und Schlüsseln verschlüsselter Sensoren (docs/radio.md)
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'radio', 'radio-stacks', 'ai', 'cameras']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';
 const noop = { apply: async () => {}, stop() {}, telemetry: () => null, featureTelemetry: () => ({ enabled: false }) };
 const noopPrint = { ...noop, requestSearch: () => 'disabled', requestJobs: () => 'disabled', requestScan: () => 'disabled', cancelScan: () => 'disabled' };
-const noopRadio = { ...noop, requestPair: async () => 'disabled', requestUnlock: async () => 'disabled', requestRetry: async () => 'disabled', status: async () => null };
+const noopRadio = { ...noop, requestPair: async () => 'disabled', requestUnlock: async () => 'disabled', requestRetry: async () => 'disabled', requestRemove: async () => 'disabled', requestSet: async () => 'disabled',
+  requestThreadForm: async () => 'disabled', requestThreadJoin: async () => 'disabled', requestThreadDataset: async () => ({ outcome: 'disabled' }), attachMqtt() {}, status: async () => null };
 const noopCameras = { ...noop, cfg: { enabled: false } };
 const noopAi = { ...noop, cfg: { enabled: false }, requestPull: () => 'disabled', cancelPull: () => 'disabled', removeModel: async () => 'disabled', canChat: () => 'disabled', status: async () => null };
 
@@ -94,7 +96,7 @@ class FeatureManager {
       netwatch: f.netwatch.enabled, portscan: f.netwatch.portscan, inetq: f.inetq.enabled,
       speedtest: f.inetq.speedtest, presence: f.presence.enabled, presenceMacs: f.presence.macs.length, ups: f.ups.enabled,
       dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, cache: f.cache.enabled, print: f.print.enabled,
-      zigbee: f.radio.zigbee, ble: f.radio.ble, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
+      zigbee: f.radio.zigbee, zigbeeStack: f.radio.stack, ble: f.radio.ble, thread: f.radio.thread, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
     }, 'features applied');
     return this._serial(async () => {
       await this.dns.apply(f.dns);
@@ -165,7 +167,7 @@ function createFeatureManager({ config, defaultGatewayIp }) {
   const print = new PrintService({
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,
   });
-  const radio = new RadioService({ reporter, stateDir: config.stateDir });
+  const radio = new RadioService({ reporter, stateDir: config.stateDir, serverUrl: config.serverUrl, apiToken: config.apiToken });
   const ai = new AiService({ stateDir: config.stateDir, serverUrl: config.serverUrl, apiToken: config.apiToken });
   const cameras = new CameraService({
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,

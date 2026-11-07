@@ -163,6 +163,19 @@ expect "deCONZ-Dienst trotzdem gestartet (wartet auf das Modul)" grep -q 'compos
 printf 'GC_ZIGBEE_DEVICE=/dev/ttyAMA0\nGC_ZIGBEE_TYPE=raspbee2-conbee2\n' >"$T/run/zigbee.env"
 rm -f "$T/opt/gateway-state/radio.json"
 
+echo "== zigbee2mqtt und Thread in GateControl an (radio.json), deCONZ aus"
+printf '{"zigbee":null,"want":false,"stack":"zigbee2mqtt","z2m":true,"thread":true}\n' >"$T/opt/gateway-state/radio.json"
+: >"$T/docker.log"
+expect "Exit 0" run_start
+expect "zigbee2mqtt und otbr gestartet, kein deconz" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway edge mqtt zigbee2mqtt otbr$' "$T/docker.log"
+expect "deCONZ entfernt" grep -q 'compose -f docker-compose.yml rm -s -f deconz' "$T/docker.log"
+printf '{"zigbee":null,"want":true,"stack":"deconz","z2m":false,"thread":false}\n' >"$T/opt/gateway-state/radio.json"
+: >"$T/docker.log"
+expect "Exit 0" run_start
+expect "zigbee2mqtt entfernt" grep -q 'compose -f docker-compose.yml rm -s -f zigbee2mqtt' "$T/docker.log"
+expect "otbr entfernt" grep -q 'compose -f docker-compose.yml rm -s -f otbr' "$T/docker.log"
+rm -f "$T/opt/gateway-state/radio.json"
+
 echo "== Lokale KI in GateControl an (ai.json)"
 printf '{"want":true}\n' >"$T/opt/gateway-state/ai.json"
 : >"$T/docker.log"
@@ -243,6 +256,10 @@ expect "Exit 0" run_radio
 expect "Flag verbraucht" test ! -e "$T/opt/gateway-state/radio-start"
 expect "deCONZ angelegt" grep -q 'compose -f docker-compose.yml up -d --no-deps deconz$' "$T/docker.log"
 expect "deconz/ angelegt" test -d "$T/opt/deconz"
+: >"$T/docker.log"
+echo '{"zigbee":true,"services":["otbr","zigbee2mqtt","evil;reboot"]}' >"$T/opt/gateway-state/radio-start"
+expect "Exit 0 (Dienste aus dem Flag)" run_radio
+expect "zigbee2mqtt und otbr angelegt, nichts anderes" grep -q 'compose -f docker-compose.yml up -d --no-deps zigbee2mqtt otbr$' "$T/docker.log"
 rm -rf "$T"
 
 echo "== gatecontrol-ai: Dienst ki auf Wunsch des Gateways"

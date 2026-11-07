@@ -26,6 +26,11 @@ const AI_ANSWER_MAX = 256 * 1024;
 //   POST /api/radio/zigbee/pair { seconds? }      – Zigbee-Geräte anlernen (60…254 s, Standard 180)
 //   POST /api/radio/zigbee/unlock {}              – deCONZ 60 s für neue Schlüssel öffnen (Smart Home)
 //   POST /api/radio/zigbee/retry {}               – deCONZ-Schlüssel neu holen
+//   POST /api/radio/zigbee/remove { ieee }        – zigbee2mqtt: Gerät aus dem Netz entfernen
+//   POST /api/radio/zigbee/set  { ieee, set }     – zigbee2mqtt: Gerät schalten (Smart Home)
+//   POST /api/radio/thread/form { name? }         – Thread: neues Netz anlegen
+//   POST /api/radio/thread/join { dataset }       – Thread: Datensatz (TLV-Hex) übernehmen – nie ins Log
+//   POST /api/radio/thread/dataset {}             – Thread: aktiver Datensatz (TLV-Hex) für Matter-Controller
 //   POST /api/ai/status         {}                – Lokale KI: frischer Zustand (Phase 3c, Schritt 3, docs/local-ai.md)
 //   POST /api/ai/pull           { model }         – Modell herunterladen (Fortschritt über /api/ai/status)
 //   POST /api/ai/pull/cancel    {}                – Download abbrechen
@@ -103,7 +108,9 @@ function createFeaturesRouter({ featureMgr }) {
   });
   const zigbeeReply = (res, r) => {
     if (r === 'accepted') return res.status(202).json({ accepted: true });
-    if (r === 'not_running' || r === 'key_needed') return res.status(409).json({ error: r });
+    if (r === 'not_running' || r === 'key_needed' || r === 'has_network') return res.status(409).json({ error: r });
+    if (r === 'not_found') return res.status(404).json({ error: r });
+    if (r === 'invalid') return res.status(400).json({ error: 'invalid_request' });
     if (r === 'failed') return res.status(502).json({ error: 'deconz_failed' });
     return res.status(503).json({ error: 'feature_disabled' });
   };
@@ -117,6 +124,36 @@ function createFeaturesRouter({ featureMgr }) {
   });
   router.post('/radio/zigbee/retry', async (req, res) => {
     zigbeeReply(res, radio().requestRetry ? await radio().requestRetry() : 'disabled');
+  });
+  const IEEE_RE = /^(0x[0-9a-f]{16}|([0-9a-f]{2}:){7}[0-9a-f]{2})$/;
+  router.post('/radio/zigbee/remove', async (req, res) => {
+    const ieee = req.body && typeof req.body.ieee === 'string' ? req.body.ieee.toLowerCase() : '';
+    if (!IEEE_RE.test(ieee)) return res.status(400).json({ error: 'invalid_request' });
+    zigbeeReply(res, radio().requestRemove ? await radio().requestRemove({ ieee }) : 'disabled');
+  });
+  router.post('/radio/zigbee/set', async (req, res) => {
+    const b = req.body || {};
+    const ieee = typeof b.ieee === 'string' ? b.ieee.toLowerCase() : '';
+    if (!IEEE_RE.test(ieee) || !b.set || typeof b.set !== 'object' || Array.isArray(b.set)) return res.status(400).json({ error: 'invalid_request' });
+    zigbeeReply(res, radio().requestSet ? await radio().requestSet({ ieee, set: b.set }) : 'disabled');
+  });
+  router.post('/radio/thread/form', async (req, res) => {
+    const name = req.body && req.body.name;
+    if (name !== undefined && name !== null && !(typeof name === 'string' && /^[A-Za-z0-9 ._-]{1,16}$/.test(name.trim()))) return res.status(400).json({ error: 'invalid_request' });
+    zigbeeReply(res, radio().requestThreadForm ? await radio().requestThreadForm({ name: name || null }) : 'disabled');
+  });
+  router.post('/radio/thread/join', async (req, res) => {
+    const ds = req.body && typeof req.body.dataset === 'string' ? req.body.dataset.trim() : '';
+    if (!/^[0-9a-fA-F]{20,508}$/.test(ds)) return res.status(400).json({ error: 'invalid_request' });
+    zigbeeReply(res, radio().requestThreadJoin ? await radio().requestThreadJoin({ dataset: ds }) : 'disabled');
+  });
+  router.post('/radio/thread/dataset', async (req, res) => {
+    const r = radio().requestThreadDataset ? await radio().requestThreadDataset() : { outcome: 'disabled' };
+    res.set('Cache-Control', 'no-store');
+    if (r.outcome === 'ok') return res.json({ dataset: r.tlv });
+    if (r.outcome === 'not_running' || r.outcome === 'no_network') return res.status(409).json({ error: r.outcome });
+    if (r.outcome === 'failed') return res.status(502).json({ error: 'otbr_failed' });
+    return res.status(503).json({ error: 'feature_disabled' });
   });
 
   // Phase 3c, Schritt 3: Lokale KI (src/ai/ai.js)

@@ -105,6 +105,8 @@ async function bootstrap() {
   // Phase 3a: Netzwerk-Wächter, Internetqualität, Anwesenheit, USV — gesteuert
   // über `features` im Config-Pull (fehlt es, bleibt alles aus).
   const featureMgr = createFeatureManager({ config, defaultGatewayIp });
+  // Funk: zigbee2mqtt spricht mit dem MQTT-Broker des Gateways (nur mit dem Edge-Volume)
+  try { featureMgr.radio.attachMqtt(edgeLink.bridge ? edgeLink.bridge.mqtt : null); } catch (err) { logger.warn({ err: err.message }, 'radio: mqtt not attached'); }
   // DNS-Filter/Zeitzone mit der letzten Einstellung starten, bevor der erste
   // Config-Pull läuft (der Gateway-Host kann selbst auf den Filter zeigen).
   try { await featureMgr.restoreBoot(); } catch (err) { logger.warn({ err: err.message }, 'features: boot restore failed'); }

@@ -77,8 +77,10 @@ function devicesOf(lights, sensors) {
 }
 
 class Zigbee {
-  constructor({ client, stateDir = null, ctlDir = '/gc-radio', now = Date.now }) {
+  constructor({ client, stateDir = null, ctlDir = '/gc-radio', now = Date.now, askHost = null, wish = null }) {
     Object.assign(this, { client, stateDir, ctlDir, now });
+    this.askHostFn = askHost;     // radio.js: ein Flag für alle Funk-Dienste des Pi-Hosts
+    this.wish = wish;             // radio.js: zigbee2mqtt/Thread für radio.json
     this.mode = null;            // null = automatisch, true/false aus GateControl
     this.sticks = [];
     this.hostProfile = null;
@@ -141,7 +143,7 @@ class Zigbee {
   _writeWish() {
     if (!this.stateDir) return;
     const file = path.join(this.stateDir, WANT_FILE);
-    const text = JSON.stringify({ zigbee: this.mode, want: this.want() }) + '\n';
+    const text = JSON.stringify({ zigbee: this.mode, want: this.want(), ...(this.wish ? this.wish() : {}) }) + '\n';
     try { if (readText(file) !== text) writeAtomic(file, text); } catch (e) { logger.debug({ err: e.message }, 'radio: radio.json not written'); }
   }
 
@@ -164,6 +166,7 @@ class Zigbee {
 
   /** Pi-Image: Host soll den deCONZ-Container anlegen (höchstens alle 10 Min.). */
   _askHost() {
+    if (this.askHostFn) return this.askHostFn('deconz');
     if (!this.stateDir || !(this.hostProfile && this.hostProfile.radio_start === true)) return false;
     if (this.now() - this.lastStartFlag < START_FLAG_EVERY_MS) return true;
     try {

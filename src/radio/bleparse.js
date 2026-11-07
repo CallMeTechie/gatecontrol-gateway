@@ -1,11 +1,14 @@
 'use strict';
 
 // Bluetooth-Werbepakete der Sensoren lesen (Phase 3c, Schritt 2 §5).
-//   BTHome v2      Service-Daten UUID 0xFCD2 (Shelly BLU, ATC/pvvx mit BTHome) – nur unverschlüsselt
+//   BTHome v2      Service-Daten UUID 0xFCD2 (Shelly BLU, ATC/pvvx mit BTHome) – verschlüsselt mit Schlüssel
 //   ATC1441        UUID 0x181A, 13 Byte (Xiaomi LYWSD03MMC mit eigener Firmware)
 //   pvvx           UUID 0x181A, 15 Byte (dto., Format „custom“)
-//   MiBeacon       UUID 0xFE95 (Xiaomi-Originalfirmware) – nur erkannt, Werte sind verschlüsselt
+//   MiBeacon       UUID 0xFE95 (Xiaomi-Originalfirmware) – v4/v5 verschlüsselt mit Bindkey, sonst Klartext-Objekte
+// Schlüssel je Sensor (blekeys.js) über `keyFor(mac)`; Entschlüsselung in blecrypto.js.
 // Alles ist Funk von irgendwem: Längen geprüft, nichts vertraut.
+
+const { decryptBthome, decryptMibeacon, mibeaconValues } = require('./blecrypto');
 
 const AD_NAME_SHORT = 0x08;
 const AD_NAME_FULL = 0x09;
@@ -194,10 +197,25 @@ function cleanName(buf) {
   return s.trim().slice(0, 32) || null;
 }
 
-/** Ein Werbepaket → { format, encrypted, name, values } eines bekannten Sensors oder null. */
-function parseAdvert(mac, buf) {
+/** MiBeacon ohne Verschlüsselung: die Objekte hinter Kopf, MAC und Fähigkeit (ältere Sensoren, z. B. LYWSDCGQ). */
+function mibeaconPlain(data) {
+  const fc = data.readUInt16LE(0);
+  if (!(fc & 0x0040)) return {};
+  let i = 5;
+  if (fc & 0x0010) i += 6;
+  if (fc & 0x0020) { if (data.length <= i) return {}; i += (data[i] & 0x20) ? 2 : 1; }
+  return i < data.length ? mibeaconValues(data.subarray(i)) : {};
+}
+
+/**
+ * Ein Werbepaket → { format, encrypted, decrypted, keyState, name, values } eines bekannten Sensors oder null.
+ * keyState: null (unverschlüsselt) | 'ok' | 'no_key' | 'wrong_key' | 'unsupported' (MiBeacon vor v4).
+ * @param {{ keyFor?: (mac: string) => string|null }} [o]
+ */
+function parseAdvert(mac, buf, { keyFor = null } = {}) {
   let name = null;
   let found = null;
+  const key = () => (typeof keyFor === 'function' ? keyFor(mac) : null);
   for (const ad of adStructures(buf)) {
     if (ad.type === AD_NAME_FULL || ad.type === AD_NAME_SHORT) name = cleanName(ad.data) || name;
     if (ad.type !== AD_SERVICE_DATA16 || ad.data.length < 2 || found) continue;
@@ -205,18 +223,32 @@ function parseAdvert(mac, buf) {
     const rest = ad.data.subarray(2);
     if (uuid === UUID_BTHOME) {
       const r = parseBthome(rest);
-      if (r) found = { format: 'bthome', encrypted: r.encrypted, values: r.values };
+      if (!r) continue;
+      if (!r.encrypted) { found = { format: 'bthome', encrypted: false, keyState: null, values: r.values }; continue; }
+      const k = key();
+      if (!k) { found = { format: 'bthome', encrypted: true, keyState: 'no_key', values: {} }; continue; }
+      const d = decryptBthome(mac, rest, k);
+      const p = d.ok ? parseBthome(d.plain) : null;
+      found = p ? { format: 'bthome', encrypted: true, keyState: 'ok', values: p.values } : { format: 'bthome', encrypted: true, keyState: 'wrong_key', values: {} };
     } else if (uuid === UUID_ENV) {
       const r = parseEnv(rest, mac);
-      if (r) found = { format: r.format, encrypted: false, values: r.values };
+      if (r) found = { format: r.format, encrypted: false, keyState: null, values: r.values };
     } else if (uuid === UUID_MIBEACON && rest.length >= 5) {
-      found = { format: 'mibeacon', encrypted: (rest.readUInt16LE(0) & 0x0008) !== 0, values: {} };
+      const fc = rest.readUInt16LE(0);
+      if (!(fc & 0x0008)) { found = { format: 'mibeacon', encrypted: false, keyState: null, values: mibeaconPlain(rest) }; continue; }
+      if ((fc >> 12) < 4) { found = { format: 'mibeacon', encrypted: true, keyState: 'unsupported', values: {} }; continue; }
+      // ohne Objekt-Bit (nur Anmeldung/Kopf) gibt es nichts zu entschlüsseln
+      if (!(fc & 0x0040)) { found = { format: 'mibeacon', encrypted: true, keyState: key() ? 'ok' : 'no_key', values: {} }; continue; }
+      const k = key();
+      if (!k) { found = { format: 'mibeacon', encrypted: true, keyState: 'no_key', values: {} }; continue; }
+      const d = decryptMibeacon(mac, rest, k);
+      found = d.ok ? { format: 'mibeacon', encrypted: true, keyState: 'ok', values: mibeaconValues(d.objects) } : { format: 'mibeacon', encrypted: true, keyState: d.reason === 'wrong_key' ? 'wrong_key' : 'unsupported', values: {} };
     }
   }
   if (!found) return null;
   const values = {};
   for (const [k, v] of Object.entries(found.values)) if (KEEP.has(k) && (typeof v === 'boolean' || Number.isFinite(v))) values[k] = v;
-  return { ...found, values, name };
+  return { ...found, decrypted: found.keyState === 'ok', values, name };
 }
 
-module.exports = { parseAdvert, parseBthome, parseEnv, adStructures, UUID_BTHOME, UUID_ENV, UUID_MIBEACON };
+module.exports = { parseAdvert, parseBthome, parseEnv, mibeaconPlain, adStructures, UUID_BTHOME, UUID_ENV, UUID_MIBEACON };

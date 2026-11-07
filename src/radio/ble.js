@@ -5,6 +5,8 @@
 // passiver Scan), liest dessen Zeilen, behält bekannte Sensoren (BTHome v2,
 // ATC1441/pvvx, MiBeacon erkannt) und meldet sie dem Server:
 //   POST /api/v1/gateway/radio/ble { scannedAt, adapter, sensors: [...] }
+// Verschlüsselte Sensoren (BTHome v2, MiBeacon v4/v5) mit dem Schlüssel aus GateControl
+// (blekeys.js) – keyState je Sensor: ok | no_key | wrong_key | unsupported.
 // bei Änderung höchstens alle 30 s, sonst alle 5 Min. Höchstens 64 Sensoren.
 
 const { spawn } = require('node:child_process');
@@ -24,8 +26,8 @@ const LINE_RE = /^A ([0-9A-F:]{17}) ([0-9]{1,3}) (-?[0-9]{1,3}) ([0-9a-f]{0,510}
 const ERRNO = { 97: 'no_bluetooth', 19: 'no_adapter', 1: 'no_permission', 13: 'no_permission', 16: 'busy' };
 
 class BleScanner {
-  constructor({ reporter, now = Date.now, bin = BIN, spawnFn = spawn }) {
-    Object.assign(this, { reporter, now, bin, spawnFn });
+  constructor({ reporter, now = Date.now, bin = BIN, spawnFn = spawn, keys = null }) {
+    Object.assign(this, { reporter, now, bin, spawnFn, keys });
     this.enabled = false;
     this.adapter = null;      // { name, bus, model }
     this.child = null;
@@ -109,15 +111,18 @@ class BleScanner {
   /** Ein Werbepaket (auch für Tests). */
   advert(mac, rssi, data) {
     if (!MAC_RE.test(mac)) return;
-    const p = parseAdvert(mac, data);
+    const p = parseAdvert(mac, data, { keyFor: this.keys ? (m) => this.keys.get(m) : null });
     if (!p) return;
     const now = this.now();
     const cur = this.sensors.get(mac);
     if (!cur && this.sensors.size >= MAX_SENSORS) this._dropOldest();
     const s = cur || { mac, format: p.format, firstSeen: now, packets: 0 };
     const before = cur ? JSON.stringify(cur.values) : null;
+    const beforeKey = cur ? cur.keyState : undefined;
     s.format = p.format;
     s.encrypted = p.encrypted;
+    // ein Paket ohne Werte (z. B. MiBeacon nur mit Kopf) ändert den Schlüssel-Zustand nicht zum Schlechteren
+    if (p.keyState !== 'ok' || Object.keys(p.values).length || !s.keyState) s.keyState = p.keyState;
     if (p.name) s.name = p.name;
     s.values = { ...(cur && cur.values), ...p.values };
     s.rssi = Number.isFinite(rssi) && rssi < 20 ? rssi : null;
@@ -125,7 +130,7 @@ class BleScanner {
     s.packets++;
     this.sensors.set(mac, s);
     this.lastAt = now;
-    if (!cur || before !== JSON.stringify(s.values)) this.dirty = true;
+    if (!cur || before !== JSON.stringify(s.values) || beforeKey !== s.keyState) this.dirty = true;
   }
 
   _dropOldest() {
@@ -141,6 +146,7 @@ class BleScanner {
       mac: s.mac,
       format: s.format,
       encrypted: !!s.encrypted,
+      keyState: s.keyState || null,
       name: s.name || null,
       values: s.values,
       rssi: s.rssi,

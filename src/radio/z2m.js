@@ -1,0 +1,532 @@
+'use strict';
+
+// Zigbee über zigbee2mqtt (docs/radio.md „zigbee2mqtt“) – für Sticks, die deCONZ
+// nicht spricht (Sonoff ZBDongle-E/-P, SkyConnect/ZBT-1, CC2652, EFR32).
+//
+// Wie bei deCONZ entscheidet das Gateway und der Wächter im Dienst zigbee2mqtt
+// führt aus: Soll zigbee2mqtt laufen, ist ein passender Stick da und läuft der
+// MQTT-Broker des Gateways (Edge + MQTT in GateControl an), schreibt das Gateway
+// /gc-radio/z2m.env (DEVICE, DEV = major:minor, ADAPTER, BAUD, MQTT_USER,
+// MQTT_PASS; 0600); fehlt die Datei, beendet der Wächter zigbee2mqtt. Er meldet
+// sich in /gc-radio/z2m.state („running ttyUSB0 <Sekunden>“).
+//
+// MQTT: eigenes Konto gc-zigbee2mqtt (nur zigbee2mqtt/#, Passwort in /state,
+// 0600) am Broker des Gateways; das Gateway liest mit seinem internen Konto
+// zigbee2mqtt/bridge/* (Zustand, Geräteliste, Ereignisse) und die Zustände der
+// Geräte, lernt an (bridge/request/permit_join), entfernt Geräte und schaltet
+// sie (zigbee2mqtt/<Name>/set). Die Geräte gehen an den Server:
+//   POST /api/v1/gateway/radio/zigbee { stack, devices: [...] }
+// bei Änderung höchstens alle 5 s, sonst alle 5 Min. Höchstens 128 Geräte.
+// Alles von zigbee2mqtt ist Eingabe von außen: Längen geprüft, Namen gekürzt.
+
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { clean } = require('./detect');
+const { hashPassword } = require('../edge/mqtt/broker');
+const logger = require('../logger');
+
+const BASE = 'zigbee2mqtt';
+const USER = 'gc-zigbee2mqtt';
+const ACCOUNT_FILE = 'radio-z2m.json';
+const MAX_DEVICES = 128;
+const ALIVE_S = 60;
+const START_GRACE_MS = 3 * 60_000;
+const REPORT_MIN_MS = 5_000;
+const REPORT_MAX_MS = 5 * 60_000;
+const RECENT_MS = 30 * 60_000;
+const MAX_RECENT = 5;
+const PAIR_TAIL_MS = 30_000;
+const IEEE_RE = /^0x[0-9a-f]{16}$/;
+const STATE_RE = /^(idle|wait|running|exit) ([A-Za-z0-9-]{1,16}) ([0-9]{1,12})\s*$/;
+const ADAPTERS = ['ember', 'zstack', 'deconz'];
+const SENSOR_PROPS = ['temperature', 'humidity', 'pressure', 'illuminance', 'illuminance_lux', 'co2', 'contact', 'occupancy', 'presence', 'water_leak', 'smoke', 'pm25', 'soil_moisture'];
+
+function readText(file, max = 4096) {
+  try {
+    const st = fs.statSync(file);
+    if (!st.isFile() || st.size > max) return null;
+    return fs.readFileSync(file, 'utf8');
+  } catch { return null; }
+}
+
+function writeAtomic(file, text, mode = 0o600) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, text, { mode });
+  fs.renameSync(tmp, file);
+}
+
+/** „0x00158d0001a2b3c4“ → „00:15:8d:00:01:a2:b3:c4“ (wie die MACs von deCONZ). */
+function macOfIeee(ieee) {
+  const s = String(ieee || '').toLowerCase();
+  if (!IEEE_RE.test(s)) return null;
+  return s.slice(2).match(/../g).join(':');
+}
+/** Umkehrung: „00:15:…“ oder „0x0015…“ → „0x0015…“ oder null. */
+function ieeeOf(v) {
+  const s = String(v || '').toLowerCase();
+  if (IEEE_RE.test(s)) return s;
+  if (/^([0-9a-f]{2}:){7}[0-9a-f]{2}$/.test(s)) return '0x' + s.replace(/:/g, '');
+  return null;
+}
+
+const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const round = (v, d = 2) => Math.round(v * 10 ** d) / 10 ** d;
+
+/** Was ein Gerät kann, aus definition.exposes: { kind, caps } (nur der erste Kanal, keine Endpunkte _l2 …). */
+function summarize(def) {
+  const types = new Set();
+  const props = new Map();
+  const walk = (list, depth) => {
+    if (!Array.isArray(list) || depth > 4) return;
+    for (const e of list.slice(0, 64)) {
+      if (!e || typeof e !== 'object') continue;
+      if (Array.isArray(e.features)) {
+        // zusammengesetzte Werte (color_xy / color_hs unter „color“) zählen als Eigenschaft
+        if (e.type === 'composite' && typeof e.name === 'string' && e.name.length <= 40 && !props.has(e.name)) props.set(e.name, e);
+        if (typeof e.type === 'string' && e.type !== 'composite' && !e.endpoint) types.add(e.type);
+        if (e.endpoint && !['light', 'switch', 'cover'].some((t) => types.has(t)) && typeof e.type === 'string') types.add(e.type + ':' + String(e.endpoint).slice(0, 8));
+        walk(e.features, depth + 1);
+      } else if (typeof e.property === 'string' && e.property.length <= 40) {
+        if (!props.has(e.property)) props.set(e.property, e);
+        if (typeof e.name === 'string' && e.name !== e.property && !props.has(e.name)) props.set(e.name, e);
+      }
+    }
+  };
+  walk(def && def.exposes, 0);
+  const has = (p) => props.has(p);
+  const stateProp = has('state') ? 'state' : ([...props.keys()].find((p) => /^state_[a-z0-9]{1,8}$/.test(p)) || null);
+  let kind = 'other';
+  if (types.has('light')) kind = 'light';
+  else if (types.has('cover')) kind = 'cover';
+  else if (types.has('switch') || (stateProp && !SENSOR_PROPS.some(has))) kind = 'plug';
+  else if (SENSOR_PROPS.some(has)) kind = 'sensor';
+  else if (has('action')) kind = 'remote';
+  const caps = {};
+  if (kind === 'light' || kind === 'plug') caps.stateProp = stateProp || 'state';
+  if (kind === 'light') {
+    if (has('brightness')) caps.bri = true;
+    if (has('color_temp')) caps.ct = true;
+    if (has('color_xy')) caps.color = 'xy';
+    else if (has('color_hs')) caps.color = 'hs';
+  }
+  if (kind === 'cover' && has('position')) caps.position = true;
+  if (has('power')) caps.power = true;
+  if (has('battery')) caps.battery = true;
+  return { kind, caps };
+}
+
+/** Zustand von zigbee2mqtt/<Name> → die Werte, die an den Server gehen (Namen wie bei den Bluetooth-Sensoren). */
+function valuesOf(p, caps = {}) {
+  const v = {};
+  if (!p || typeof p !== 'object') return v;
+  const sp = caps.stateProp || 'state';
+  if (p[sp] === 'ON' || p[sp] === 'OFF') v.on = p[sp] === 'ON';
+  if (finite(p.brightness) != null) v.bri = Math.max(0, Math.min(100, Math.round(p.brightness / 2.54)));
+  if (finite(p.color_temp) != null) v.ct = Math.round(p.color_temp);
+  if (finite(p.position) != null) v.pos = Math.max(0, Math.min(100, Math.round(p.position)));
+  for (const k of ['temperature', 'humidity', 'pressure', 'co2', 'pm25', 'power', 'energy', 'voltage', 'battery']) if (finite(p[k]) != null) v[k] = round(p[k]);
+  if (finite(p.soil_moisture) != null) v.moisture = round(p.soil_moisture);
+  const lux = finite(p.illuminance_lux) != null ? p.illuminance_lux : finite(p.illuminance);
+  if (lux != null) v.illuminance = round(lux, 0);
+  if (typeof p.contact === 'boolean') v.opening = !p.contact;
+  if (typeof p.occupancy === 'boolean') v.motion = p.occupancy;
+  if (typeof p.presence === 'boolean') v.presence = p.presence;
+  if (typeof p.water_leak === 'boolean') v.moisture_wet = p.water_leak;
+  for (const k of ['smoke', 'tamper', 'vibration', 'battery_low']) if (typeof p[k] === 'boolean') v[k] = p[k];
+  if (finite(p.linkquality) != null) v.linkquality = Math.round(p.linkquality);
+  if (typeof p.action === 'string' && /^[a-z0-9_-]{1,32}$/i.test(p.action)) v.action = p.action;
+  return v;
+}
+
+/** Ein Befehl des Servers ({ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, pos }) → Nutzlast für <Name>/set oder null. */
+function setPayload(dev, set) {
+  const s = set && typeof set === 'object' ? set : {};
+  const c = dev.caps || {};
+  const out = {};
+  const num = (x) => typeof x === 'number' && Number.isFinite(x);
+  if ((dev.kind === 'light' || dev.kind === 'plug') && typeof s.on === 'boolean') out[c.stateProp || 'state'] = s.on ? 'ON' : 'OFF';
+  if (dev.kind === 'light' && c.bri && num(s.bri)) {
+    out.brightness = Math.round(Math.max(0, Math.min(100, s.bri)) * 2.54);
+    if (out.brightness > 0 && !(c.stateProp in out)) out[c.stateProp || 'state'] = 'ON';
+  }
+  if (dev.kind === 'light' && c.ct && num(s.ct)) out.color_temp = Math.round(Math.max(150, Math.min(500, s.ct)));
+  if (dev.kind === 'light' && c.color) {
+    if (Array.isArray(s.xy) && s.xy.length === 2 && s.xy.every(num)) out.color = { x: round(Math.max(0, Math.min(1, s.xy[0])), 4), y: round(Math.max(0, Math.min(1, s.xy[1])), 4) };
+    else if (num(s.hue) || num(s.sat)) out.color = { hue: Math.round((Math.max(0, Math.min(65535, num(s.hue) ? s.hue : 0)) * 360) / 65535), saturation: Math.round((Math.max(0, Math.min(254, num(s.sat) ? s.sat : 254)) * 100) / 254) };
+    if (out.color && 'color_temp' in out) delete out.color_temp;
+  }
+  if (dev.kind === 'cover') {
+    if (s.cover === 'open' || s.cover === 'close' || s.cover === 'stop') out.state = s.cover.toUpperCase();
+    else if (c.position && num(s.pos)) out.position = Math.round(Math.max(0, Math.min(100, s.pos)));
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** Ein Eintrag aus zigbee2mqtt/bridge/devices → Gerät oder null (ohne Koordinator). */
+function deviceOf(d) {
+  if (!d || typeof d !== 'object' || d.type === 'Coordinator') return null;
+  const ieee = String(d.ieee_address || '').toLowerCase();
+  if (!IEEE_RE.test(ieee) || typeof d.friendly_name !== 'string' || !d.friendly_name || d.friendly_name.length > 128) return null;
+  const def = d.definition && typeof d.definition === 'object' ? d.definition : null;
+  const { kind, caps } = summarize(def);
+  return {
+    ieee,
+    mac: macOfIeee(ieee),
+    topic: d.friendly_name,
+    name: clean(d.friendly_name, 64) || null,
+    model: def ? clean(def.model, 48) || null : clean(d.model_id, 48) || null,
+    vendor: def ? clean(def.vendor, 48) || null : clean(d.manufacturer, 48) || null,
+    description: def ? clean(def.description, 80) || null : null,
+    type: d.type === 'Router' ? 'router' : 'end_device',
+    power: clean(d.power_source, 24) || null,
+    supported: d.supported !== false && !!def,
+    interview: d.interviewing ? 'running' : (d.interview_completed === false ? 'failed' : 'done'),
+    disabled: d.disabled === true,
+    kind, caps,
+  };
+}
+
+class Zigbee2Mqtt {
+  constructor({ stateDir = null, ctlDir = '/gc-radio', reporter = null, now = Date.now, askHost = null }) {
+    Object.assign(this, { stateDir, ctlDir, reporter, now, askHost });
+    this.mqtt = null;            // MqttManager des Gateways (Edge-Volume), sonst null
+    this.offSub = null;
+    this.wanted = false;
+    this.stick = null;
+    this.wantSince = 0;
+    this.bridge = null;          // 'online' | 'offline' | null
+    this.info = null;            // { version, coordinator, channel, panId }
+    this.devices = new Map();    // ieee → Gerät
+    this.byTopic = new Map();    // friendly_name → ieee
+    this.values = new Map();     // ieee → Werte
+    this.seen = new Map();       // ieee → ms
+    this.available = new Map();  // ieee → true|false
+    this.recent = [];
+    this.pairUntil = 0;
+    this.lastError = null;
+    this.dirty = false;
+    this.lastReport = 0;
+    this.reportTimer = null;
+    this.account = null;
+  }
+
+  /** Den MQTT-Broker des Gateways anhängen (src/edge/gatewayLink.js, nur mit dem Edge-Volume). */
+  attach(mqtt) {
+    this.mqtt = mqtt || null;
+    this._syncMqtt();
+  }
+
+  // ─── Konto am Broker ──────────────────────────────────────────────────
+  _loadAccount() {
+    if (this.account) return this.account;
+    let a = null;
+    if (this.stateDir) {
+      try {
+        const j = JSON.parse(readText(path.join(this.stateDir, ACCOUNT_FILE)) || 'null');
+        if (j && typeof j.password === 'string' && /^[A-Za-z0-9_-]{24,64}$/.test(j.password) && typeof j.hash === 'string' && j.hash.startsWith('$7$')) a = { password: j.password, hash: j.hash };
+      } catch { a = null; }
+    }
+    if (!a) {
+      const password = crypto.randomBytes(24).toString('base64url');
+      a = { password, hash: hashPassword(password) };
+      if (this.stateDir) {
+        try { writeAtomic(path.join(this.stateDir, ACCOUNT_FILE), JSON.stringify(a) + '\n', 0o600); } catch (e) { logger.warn({ err: e.message }, 'radio: zigbee2mqtt account not stored'); }
+      }
+    }
+    this.account = a;
+    return a;
+  }
+
+  _syncMqtt() {
+    if (!this.mqtt) return;
+    if (!this.wanted) {
+      if (this.offSub) { this.offSub(); this.offSub = null; }
+      this.mqtt.setLocal({ accounts: [], topics: [] });
+      return;
+    }
+    const a = this._loadAccount();
+    this.mqtt.setLocal({ accounts: [{ user: USER, hash: a.hash, acl: [{ access: 'readwrite', topic: BASE + '/#' }] }], topics: [BASE + '/#'] });
+    if (!this.offSub) this.offSub = this.mqtt.localSubscribe(BASE + '/#', (t, p) => this.onMessage(t, p));
+  }
+
+  brokerState() {
+    if (!this.mqtt || !this.mqtt.available()) return 'mqtt_missing';
+    if (!this.mqtt.brokerEnabled()) return 'mqtt_off';
+    return 'ok';
+  }
+
+  // ─── Wunsch und Gerät ─────────────────────────────────────────────────
+  /** { want, stick } aus radio.js (der Stick ist schon zugeteilt). */
+  apply({ want, stick }) {
+    const before = this.wanted;
+    this.wanted = want === true;
+    this.stick = stick && stick.tty && stick.dev && ADAPTERS.includes(stick.z2m) ? stick : null;
+    if (this.wanted && !this.wantSince) this.wantSince = this.now();
+    if (!this.wanted) { this.wantSince = 0; this.bridge = null; this.info = null; }
+    this._syncMqtt();
+    this._writeControl(this.wanted && this.stick && this.brokerState() === 'ok' ? this.stick : null);
+    if (this.wanted && !before) this._startReports();
+    if (!this.wanted && before) this._stopReports();
+  }
+
+  _ctlUsable() {
+    try { fs.accessSync(this.ctlDir, fs.constants.W_OK); return fs.statSync(this.ctlDir).isDirectory(); } catch { return false; }
+  }
+
+  _writeControl(dev) {
+    if (!this._ctlUsable()) return;
+    const file = path.join(this.ctlDir, 'z2m.env');
+    try {
+      if (!dev) { fs.rmSync(file, { force: true }); return; }
+      const a = this._loadAccount();
+      const text = `DEVICE=${dev.tty}\nDEV=${dev.dev}\nADAPTER=${dev.z2m}\nBAUD=${dev.z2mBaud || 0}\nMQTT_USER=${USER}\nMQTT_PASS=${a.password}\n`;
+      if (readText(file) === text) return;
+      writeAtomic(file, text, 0o600);
+      logger.info({ device: dev.tty, model: dev.model, adapter: dev.z2m }, 'radio: zigbee2mqtt switched on');
+    } catch (e) { logger.warn({ err: e.message }, 'radio: z2m.env not written'); }
+  }
+
+  /** Der Wächter im Dienst zigbee2mqtt: { state, tty, alive } oder null (kein Volume). */
+  watcher() {
+    if (!this._ctlUsable()) return null;
+    const m = STATE_RE.exec(readText(path.join(this.ctlDir, 'z2m.state'), 256) || '');
+    if (!m) return { state: null, tty: null, alive: false };
+    const at = Number(m[3]);
+    return { state: m[1], tty: m[2] === '-' ? null : m[2], alive: Number.isFinite(at) && Math.abs(this.now() / 1000 - at) <= ALIVE_S };
+  }
+
+  /** managed (Wächter läuft) | absent (Volume da, Dienst nicht) | missing (alte Compose-Datei ohne /gc-radio) */
+  service() {
+    const w = this.watcher();
+    if (!w) return 'missing';
+    return w.alive ? 'managed' : 'absent';
+  }
+
+  // ─── MQTT ─────────────────────────────────────────────────────────────
+  onMessage(topic, payload) {
+    if (typeof topic !== 'string' || !topic.startsWith(BASE + '/')) return;
+    const rest = topic.slice(BASE.length + 1);
+    let text;
+    try { text = payload.toString('utf8'); } catch { return; }
+    if (rest === 'bridge/state') {
+      let s = text;
+      try { const j = JSON.parse(text); if (j && typeof j.state === 'string') s = j.state; } catch { /* älteres Format: Text */ }
+      this.bridge = s === 'online' ? 'online' : 'offline';
+      if (this.bridge === 'online') this.lastError = null;
+      return;
+    }
+    if (rest === 'bridge/info') return this._info(text);
+    if (rest === 'bridge/devices') return this._devices(text);
+    if (rest === 'bridge/event') return this._event(text);
+    if (rest.startsWith('bridge/')) return;
+    let name = rest;
+    let avail = false;
+    if (name.endsWith('/availability')) { name = name.slice(0, -13); avail = true; }
+    if (/\/(set|get)(\/.*)?$/.test(name)) return;
+    const ieee = this.byTopic.get(name);
+    if (!ieee) return;
+    if (avail) {
+      let s = text;
+      try { const j = JSON.parse(text); if (j && typeof j.state === 'string') s = j.state; } catch { /* Text */ }
+      this.available.set(ieee, s === 'online');
+      this.dirty = true;
+      return;
+    }
+    let j;
+    try { j = JSON.parse(text); } catch { return; }
+    const dev = this.devices.get(ieee);
+    const before = JSON.stringify(this.values.get(ieee) || {});
+    const next = { ...(this.values.get(ieee) || {}), ...valuesOf(j, dev && dev.caps) };
+    this.values.set(ieee, next);
+    this.seen.set(ieee, this.now());
+    if (JSON.stringify(next) !== before) this.dirty = true;
+  }
+
+  _info(text) {
+    let j;
+    try { j = JSON.parse(text); } catch { return; }
+    if (!j || typeof j !== 'object') return;
+    const net = j.network && typeof j.network === 'object' ? j.network : {};
+    const co = j.coordinator && typeof j.coordinator === 'object' ? j.coordinator : {};
+    const meta = co.meta && typeof co.meta === 'object' ? co.meta : {};
+    this.info = {
+      version: typeof j.version === 'string' && /^[0-9][0-9a-z.+-]{0,23}$/i.test(j.version) ? j.version : null,
+      coordinator: clean(String(co.type || ''), 24) || null,
+      firmware: clean(String(meta.revision || meta.version || ''), 32) || null,
+      channel: Number.isInteger(net.channel) && net.channel >= 11 && net.channel <= 26 ? net.channel : null,
+      panId: Number.isInteger(net.pan_id) && net.pan_id >= 0 && net.pan_id <= 0xffff ? net.pan_id : null,
+    };
+    // 2.x: permit_join_end (ms); 1.x: permit_join_timeout (s)
+    if (j.permit_join === true) {
+      const end = Number.isFinite(j.permit_join_end) ? j.permit_join_end : (Number.isFinite(j.permit_join_timeout) ? this.now() + j.permit_join_timeout * 1000 : this.now() + 60_000);
+      this.pairUntil = Math.max(this.pairUntil, Math.min(end, this.now() + 255_000));
+    } else if (j.permit_join === false && this.pairUntil > this.now()) this.pairUntil = this.now();
+  }
+
+  _devices(text) {
+    let list;
+    try { list = JSON.parse(text); } catch { return; }
+    if (!Array.isArray(list)) return;
+    const next = new Map();
+    for (const d of list) {
+      const dev = deviceOf(d);
+      if (!dev || next.has(dev.ieee)) continue;
+      next.set(dev.ieee, dev);
+      if (next.size >= MAX_DEVICES) break;
+    }
+    this.devices = next;
+    this.byTopic = new Map([...next.values()].map((d) => [d.topic, d.ieee]));
+    for (const k of [...this.values.keys()]) if (!next.has(k)) { this.values.delete(k); this.seen.delete(k); this.available.delete(k); }
+    this.dirty = true;
+  }
+
+  _event(text) {
+    let j;
+    try { j = JSON.parse(text); } catch { return; }
+    if (!j || typeof j !== 'object' || !j.data || typeof j.data !== 'object') return;
+    const mac = macOfIeee(j.data.ieee_address);
+    if (!mac) return;
+    if (j.type === 'device_joined' || (j.type === 'device_interview' && j.data.status === 'successful')) {
+      const def = j.data.definition && typeof j.data.definition === 'object' ? j.data.definition : {};
+      const entry = { mac, type: 'device', name: clean(j.data.friendly_name, 48) || null, model: clean(def.model, 48) || null,
+        manufacturer: clean(def.vendor, 48) || null, at: new Date(this.now()).toISOString() };
+      const i = this.recent.findIndex((r) => r.mac === mac);
+      if (i >= 0) this.recent[i] = { ...this.recent[i], ...Object.fromEntries(Object.entries(entry).filter(([, v]) => v)) };
+      else { this.recent.unshift(entry); logger.info({ model: entry.model }, 'radio: new zigbee device (zigbee2mqtt)'); }
+      this.recent = this.recent.slice(0, MAX_RECENT);
+    }
+    if (j.type === 'device_leave') this.recent = this.recent.filter((r) => r.mac !== mac);
+  }
+
+  async _publish(topic, body) {
+    if (!this.mqtt) throw Object.assign(new Error('no broker'), { code: 'not_running' });
+    await this.mqtt.localPublish(topic, Buffer.from(JSON.stringify(body)), { qos: 0, retain: false });
+  }
+
+  running() { return this.wanted && this.bridge === 'online' && !!(this.mqtt && this.mqtt.localReady()); }
+  pairing() { return this.now() <= this.pairUntil + PAIR_TAIL_MS; }
+
+  /** „Anlernen starten“: 'accepted' | 'not_running'. */
+  async pair(seconds) {
+    const s = Number.isInteger(seconds) ? Math.min(254, Math.max(60, seconds)) : 180;
+    if (!this.running()) return 'not_running';
+    await this._publish(BASE + '/bridge/request/permit_join', { time: s });
+    this.pairUntil = this.now() + s * 1000;
+    logger.info({ seconds: s }, 'radio: zigbee pairing window open (zigbee2mqtt)');
+    return 'accepted';
+  }
+
+  /** Gerät entfernen (aus dem Zigbee-Netz abmelden): 'accepted' | 'not_running' | 'not_found'. */
+  async remove(id) {
+    const ieee = ieeeOf(id);
+    if (!ieee || !this.devices.has(ieee)) return 'not_found';
+    if (!this.running()) return 'not_running';
+    await this._publish(BASE + '/bridge/request/device/remove', { id: ieee, force: false });
+    return 'accepted';
+  }
+
+  /** Gerät schalten (Smart Home über den Server): 'accepted' | 'not_running' | 'not_found' | 'invalid'. */
+  async set(id, set) {
+    const ieee = ieeeOf(id);
+    const dev = ieee && this.devices.get(ieee);
+    if (!dev) return 'not_found';
+    const body = setPayload(dev, set);
+    if (!body) return 'invalid';
+    if (!this.running()) return 'not_running';
+    await this._publish(`${BASE}/${dev.topic}/set`, body);
+    // sofort mitführen; zigbee2mqtt meldet den echten Zustand gleich danach
+    const v = { ...(this.values.get(ieee) || {}) };
+    if (body[dev.caps.stateProp || 'state'] === 'ON' || body[dev.caps.stateProp || 'state'] === 'OFF') v.on = body[dev.caps.stateProp || 'state'] === 'ON';
+    if (Number.isFinite(body.brightness)) v.bri = Math.round(body.brightness / 2.54);
+    this.values.set(ieee, v);
+    this.dirty = true;
+    return 'accepted';
+  }
+
+  // ─── Zustand ──────────────────────────────────────────────────────────
+  state() {
+    if (!this.wanted) return 'off';
+    if (!this.stick) return 'no_stick';
+    const b = this.brokerState();
+    if (b !== 'ok') return b;
+    if (this.running()) return 'running';
+    const svc = this.service();
+    if (svc === 'missing') return 'service_missing';
+    const w = this.watcher();
+    if (svc === 'absent') {
+      if (this.askHost && this.askHost('zigbee2mqtt')) return 'starting';
+      return this.now() - this.wantSince < START_GRACE_MS ? 'starting' : 'service_missing';
+    }
+    if (w && w.state === 'exit') return 'error';
+    if (w && w.state === 'wait') return 'error';
+    return this.now() - this.wantSince < START_GRACE_MS ? 'starting' : 'error';
+  }
+
+  /** Geräteliste für den Server und den Reiter „Funk“. */
+  list() {
+    return [...this.devices.values()].map((d) => {
+      const { stateProp, ...caps } = d.caps; // eslint-disable-line no-unused-vars
+      return {
+        ieee: d.mac, name: d.name, model: d.model, vendor: d.vendor, description: d.description, type: d.type, power: d.power,
+        supported: d.supported, interview: d.interview, disabled: d.disabled, kind: d.kind, caps,
+        values: this.values.get(d.ieee) || {},
+        available: this.available.has(d.ieee) ? this.available.get(d.ieee) : null,
+        seenAt: this.seen.has(d.ieee) ? new Date(this.seen.get(d.ieee)).toISOString() : null,
+      };
+    }).sort((a, b) => (a.name || '').localeCompare(b.name || '')).slice(0, MAX_DEVICES);
+  }
+
+  telemetry() {
+    const now = this.now();
+    this.recent = this.recent.filter((r) => now - Date.parse(r.at) < RECENT_MS).slice(0, MAX_RECENT);
+    const state = this.state();
+    let error = this.lastError;
+    if (state === 'error' && !error) {
+      const w = this.watcher();
+      error = { at: now, code: w && w.state === 'wait' ? 'z2m_device' : (w && w.state === 'exit' ? 'z2m_exit' : (this.bridge === 'offline' ? 'z2m_offline' : 'z2m_unreachable')), message: '' };
+    }
+    return {
+      want: this.wanted,
+      service: this.service(),
+      state,
+      broker: this.brokerState(),
+      model: this.stick ? this.stick.model : null,
+      device: this.stick ? this.stick.tty : null,
+      adapter: this.stick ? this.stick.z2m : null,
+      version: this.info ? this.info.version : null,
+      firmware: this.info ? this.info.firmware : null,
+      channel: this.info ? this.info.channel : null,
+      devices: state === 'running' ? this.devices.size : null,
+      permitUntil: this.pairUntil > now ? new Date(this.pairUntil).toISOString() : null,
+      recent: this.recent.map((r) => ({ ...r })),
+      error: state === 'running' ? null : error,
+    };
+  }
+
+  // ─── Bericht an den Server ────────────────────────────────────────────
+  async report(force = false) {
+    if (!this.reporter || !this.wanted || this.bridge !== 'online') return null;
+    const now = this.now();
+    const due = force || (this.dirty && now - this.lastReport >= REPORT_MIN_MS) || now - this.lastReport >= REPORT_MAX_MS;
+    if (!due) return null;
+    this.dirty = false;
+    this.lastReport = now;
+    const r = await this.reporter.post('/api/v1/gateway/radio/zigbee', { stack: 'zigbee2mqtt', reportedAt: new Date(now).toISOString(), devices: this.list() });
+    if (!r.ok && r.status !== 404) logger.debug({ status: r.status, err: r.error }, 'radio: zigbee report failed');
+    return r;
+  }
+  _startReports() {
+    if (this.reportTimer) return;
+    this.reportTimer = setInterval(() => { this.report().catch(() => {}); }, 2_500);
+    if (this.reportTimer.unref) this.reportTimer.unref();
+  }
+  _stopReports() { if (this.reportTimer) clearInterval(this.reportTimer); this.reportTimer = null; }
+
+  stop() {
+    this._stopReports();
+    if (this.offSub) { this.offSub(); this.offSub = null; }
+  }
+}
+
+module.exports = { Zigbee2Mqtt, summarize, valuesOf, setPayload, deviceOf, macOfIeee, ieeeOf, USER, ACCOUNT_FILE, BASE };

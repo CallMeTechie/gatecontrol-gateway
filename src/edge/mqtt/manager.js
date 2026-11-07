@@ -63,12 +63,62 @@ class MqttManager {
     this.clientUsers = new Map(); // clientId → user
     this.tls = 'off';
     this.lastAddrs = [];
+    // Konten und Themen des Gateways selbst (Funk: zigbee2mqtt, src/radio/z2m.js) – kommen
+    // nicht vom Server; ein gleichnamiges Konto aus dem state wird übergangen
+    this.local = { accounts: [], topics: [] };
+    this.localSubs = new Map(); // filter → Set(handler)
   }
 
   available() { return this.files.available(); }
 
   internalTopics(cfg = this.cfg) {
-    return [...new Set(Object.values(cfg.pluginTopics || {}).flat())];
+    return [...new Set(Object.values(cfg.pluginTopics || {}).flat().concat(this.local.topics))];
+  }
+
+  /** Konten für die Broker-Dateien: die des Servers, dazu die eigenen des Gateways (gleicher Name: das eigene gilt). */
+  allAccounts() {
+    const own = new Set(this.local.accounts.map((a) => a.user));
+    return (this.cfg.accounts || []).filter((a) => !own.has(a.user)).concat(this.local.accounts);
+  }
+
+  // ─── Für das Gateway selbst (Funk: zigbee2mqtt) ──────────────
+
+  /** Eigene Konten ({ user, hash, acl }) und Themen des internen Kontos setzen (schreibt die Broker-Dateien neu). */
+  setLocal({ accounts = [], topics: own = [] } = {}) {
+    const next = { accounts: accounts.slice(0, 4), topics: own.filter((t) => topics.validFilter(t)).slice(0, 8) };
+    if (JSON.stringify(next) === JSON.stringify(this.local)) return;
+    this.local = next;
+    this.refresh();
+  }
+
+  /** Läuft der Broker (vom Server eingeschaltet, Volume da)? */
+  brokerEnabled() { return !!(this.cfg.enabled && this.available()); }
+  /** Ist das interne Konto gerade angemeldet? */
+  localReady() { return !!(this.client && this.client.connected); }
+
+  /** Eigenes Abo (nur Themen aus setLocal); → Funktion zum Beenden. */
+  localSubscribe(filter, fn) {
+    if (!topics.validFilter(filter) || !this.local.topics.some((t) => topics.covers(t, filter))) throw new MqttError('denied', 'topic not set up');
+    let set = this.localSubs.get(filter);
+    if (!set) {
+      set = new Set();
+      this.localSubs.set(filter, set);
+      if (this.client && this.client.connected) this.client.subscribe(filter, 0).catch((e) => this.logger.debug({ err: e.message }, 'radio: MQTT subscribe failed'));
+    }
+    set.add(fn);
+    return () => {
+      set.delete(fn);
+      if (set.size || this.localSubs.get(filter) !== set) return;
+      this.localSubs.delete(filter);
+      if (!this.filterRefs.has(filter) && this.client && this.client.connected) this.client.unsubscribe(filter).catch(() => null);
+    };
+  }
+
+  /** Eigene Nachricht (nur Themen aus setLocal). */
+  async localPublish(topic, payload, { qos = 0, retain = false } = {}) {
+    if (!topics.validTopic(topic) || !this.local.topics.some((t) => topics.matches(t, topic))) throw new MqttError('denied', 'topic not set up');
+    if (!this.client || !this.client.connected) throw new MqttError('not_available', 'local MQTT broker not reachable');
+    await this.client.publish(topic, Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload)), { qos, retain });
   }
 
   /** Sollzustand (state.mqtt, bereits geprüft) anwenden. */
@@ -89,7 +139,7 @@ class MqttManager {
   refresh() {
     if (!this.cfg.enabled || !this.available()) return;
     const addrs = this.getLanAddrs();
-    const r = this.files.write({ accounts: this.cfg.accounts, internalHash: this.internalHash, internalTopics: this.internalTopics(),
+    const r = this.files.write({ accounts: this.allAccounts(), internalHash: this.internalHash, internalTopics: this.internalTopics(),
       listenAddrs: addrs, tls: this.cfg.tls });
     this.tls = r.tls;
     if (r.confChanged) this.logger.info({ listen: addrs }, 'edge: MQTT broker configuration written');
@@ -115,6 +165,7 @@ class MqttManager {
         await c.subscribe('$SYS/broker/log/N', 0);
       } catch (e) { this.logger.debug({ err: e.message }, 'edge: $SYS subscribe failed'); }
       for (const f of this.filterRefs.keys()) c.subscribe(f, 1).catch((e) => this.logger.warn({ err: e.message, filter: f }, 'edge: MQTT resubscribe failed'));
+      for (const f of this.localSubs.keys()) if (!this.filterRefs.has(f)) c.subscribe(f, 0).catch((e) => this.logger.debug({ err: e.message, filter: f }, 'radio: MQTT resubscribe failed'));
     }, (e) => {
       if (this.client === c) this.client = null;
       this.logger.debug({ err: e.message }, 'edge: MQTT broker not reachable yet');
@@ -140,6 +191,10 @@ class MqttManager {
   onMessage(topic, payload, meta) {
     if (topic === '$SYS/broker/clients/connected') { this.clients = Number(payload.toString()) || 0; return; }
     if (topic === '$SYS/broker/log/N') { this.onLog(payload.toString('utf8')); return; }
+    for (const [f, set] of this.localSubs) {
+      if (!topics.matches(f, topic)) continue;
+      for (const fn of set) { try { fn(topic, payload, meta); } catch (e) { this.logger.debug({ err: e.message }, 'radio: MQTT handler failed'); } }
+    }
     for (const s of this.subs.values()) {
       if (!topics.matches(s.filter, topic)) continue;
       s.toChild({ t: 'mqtt', id: s.id, topic, b64: payload.toString('base64'), retain: meta.retain, qos: meta.qos });
@@ -214,7 +269,7 @@ class MqttManager {
     const n = (this.filterRefs.get(s.filter) || 1) - 1;
     if (n <= 0) {
       this.filterRefs.delete(s.filter);
-      if (this.client && this.client.connected) this.client.unsubscribe(s.filter).catch(() => null);
+      if (!this.localSubs.has(s.filter) && this.client && this.client.connected) this.client.unsubscribe(s.filter).catch(() => null);
     } else this.filterRefs.set(s.filter, n);
   }
 
