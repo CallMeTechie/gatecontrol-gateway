@@ -1,0 +1,14 @@
+[Unit]
+Description=GateControl Gateway: Dienst office anlegen (Office-Dateien drucken in GateControl eingeschaltet)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/print.md
+Requires=docker.service
+After=docker.service gatecontrol-gateway.service
+ConditionPathExists=/opt/gatecontrol-gateway/config/gateway.env
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gatecontrol-office
+# erster Start lädt das LibreOffice-Image (≈ 200 MB)
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal

@@ -55,6 +55,8 @@ function printerAttrs(o) {
     ...(o.sheetBack ? [[TAG.keyword, 'pwg-raster-document-sheet-back', o.sheetBack]] : []),
     ...(o.urf ? [[TAG.keyword, 'urf-supported', o.urf]] : []),
     ...(o.media ? [[TAG.keyword, 'media-default', o.media]] : []),
+    // weitere Attribute des Tests (PCLm, Papier/Fächer, media-col-ready als Sammlung …)
+    ...(o.extra || []),
   ];
 }
 
@@ -102,7 +104,7 @@ async function startFakePrinter(opts = {}) {
           const status = (state.opts.refuse || []).includes(opAttrs['document-format'][0]) ? 0x040a : (state.opts.printStatus || 0);
           if (status === 0) {
             const id = state.nextJobId++;
-            state.printed.push({ id, format: opAttrs['document-format'][0], name: opAttrs['job-name'][0], user: opAttrs['requesting-user-name'][0], copies: (jobAttrs.copies || [1])[0], sides: (jobAttrs.sides || [null])[0], color: (jobAttrs['print-color-mode'] || [null])[0], data: m.data });
+            state.printed.push({ id, format: opAttrs['document-format'][0], name: opAttrs['job-name'][0], user: opAttrs['requesting-user-name'][0], copies: (jobAttrs.copies || [1])[0], sides: (jobAttrs.sides || [null])[0], color: (jobAttrs['print-color-mode'] || [null])[0], media: (jobAttrs.media || [null])[0], mediaCol: (jobAttrs['media-col'] || [null])[0], data: m.data });
             state.jobStates.set(id, state.opts.finalState || 9);
             msg = ipp.encodeMessage(0, m.requestId, [[GROUP.operation, base], [GROUP.job, [[TAG.integer, 'job-id', id], [TAG.enum, 'job-state', 3]]]]);
           } else msg = ipp.encodeMessage(status, m.requestId, [[GROUP.operation, base]]);

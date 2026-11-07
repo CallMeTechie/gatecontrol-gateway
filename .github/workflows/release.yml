@@ -27,8 +27,10 @@ jobs:
         run: npm ci
         env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN }}' }
 
-      - name: poppler-utils (PDF umwandeln, tests/print_convert.test.js – wie im Image)
-        run: sudo apt-get install -y poppler-utils || (sudo apt-get update && sudo apt-get install -y poppler-utils)
+      - name: poppler-utils, tesseract, LibreOffice (Drucken & Scannen, tests/print_*.test.js – wie im Image)
+        run: |
+          pk="poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui"
+          sudo apt-get install -y --no-install-recommends $pk || (sudo apt-get update && sudo apt-get install -y --no-install-recommends $pk)
       - name: Tests
         run: node --test --test-force-exit tests/
 
@@ -86,6 +88,19 @@ jobs:
             ghcr.io/callmetechie/gatecontrol-gateway:latest
             ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.tag }}
             ghcr.io/callmetechie/gatecontrol-gateway:${{ steps.v.outputs.version }}
+
+      # Dienst office („Office-Dateien drucken“, docs/print.md): nur LibreOffice ohne
+      # Oberfläche, Stage office im Dockerfile – geladen nur von Gateways mit dieser Funktion
+      - name: Build multi-arch office image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: office
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/callmetechie/gatecontrol-gateway:office
+            ghcr.io/callmetechie/gatecontrol-gateway:office-${{ steps.v.outputs.version }}
 
       # Bundle FIRST, before the third-party SBOM/Trivy steps, so a flaky
       # external installer (e.g. Syft mirror serving HTML 404 like it did

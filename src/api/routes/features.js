@@ -22,6 +22,8 @@ const AI_ANSWER_MAX = 256 * 1024;
 //   POST /api/print/jobs        {}                – Druckaufträge jetzt abholen
 //   POST /api/print/scan        { scanId, deviceId, source, color, resolution, format, duplex }
 //   POST /api/print/scan/cancel { scanId }
+//   POST /api/print/ocr         { ocrId, pages, dpi? } – Texterkennung (Seiten beim Server holen, PDF + Text zurück)
+//   POST /api/print/ocr/cancel  { ocrId }
 //   POST /api/radio/status      {}                – Funk: frischer Zustand + Bluetooth-Sensoren (Phase 3c, Schritt 2)
 //   POST /api/radio/zigbee/pair { seconds? }      – Zigbee-Geräte anlernen (60…254 s, Standard 180)
 //   POST /api/radio/zigbee/unlock {}              – deCONZ 60 s für neue Schlüssel öffnen (Smart Home)
@@ -91,6 +93,17 @@ function createFeaturesRouter({ featureMgr }) {
   router.post('/print/scan/cancel', (req, res) => {
     const id = req.body && typeof req.body.scanId === 'string' ? req.body.scanId : '';
     reply(res, print().cancelScan ? print().cancelScan(id) : 'disabled', 'busy');
+  });
+  // Texterkennung (durchsuchbares PDF, src/print/ocr.js)
+  router.post('/print/ocr', (req, res) => {
+    const r = print().requestOcr ? print().requestOcr(req.body || {}) : 'disabled';
+    if (r === 'invalid') return res.status(400).json({ error: 'invalid_request' });
+    if (r === 'unavailable') return res.status(503).json({ error: 'ocr_unavailable' });
+    return reply(res, r, 'ocr_busy');
+  });
+  router.post('/print/ocr/cancel', (req, res) => {
+    const id = req.body && typeof req.body.ocrId === 'string' ? req.body.ocrId : '';
+    reply(res, print().cancelOcr ? print().cancelOcr(id) : 'disabled', 'busy');
   });
 
   // Phase 3c, Schritt 2: Funk (src/radio/radio.js)

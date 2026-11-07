@@ -3,7 +3,9 @@
 // `features.print` (Vertrag Phase 3c §1) prüfen. Fehlt es → aus.
 // `manual`: Adressen von Geräten, die sich nicht per mDNS melden – nur
 // private IPv4-Adressen (RFC 1918), höchstens 16. `convert`: PDF für Drucker
-// ohne PDF umwandeln (convert.js) – fehlt es, ist es an.
+// ohne PDF umwandeln (convert.js) – fehlt es, ist es an. `ocr`: Texterkennung
+// für Scans (durchsuchbares PDF, ocr.js), `office`: Office-Dateien drucken
+// (Dienst office mit LibreOffice, office.js) – beide nur mit `true` an.
 
 const net = require('node:net');
 
@@ -35,7 +37,7 @@ function normalizePrint(raw) {
     ? [...new Set(p.manual.filter((x) => typeof x === 'string').map((x) => x.trim()).filter(isRfc1918))].slice(0, MAX_MANUAL)
     : [];
   // `convert`: PDF für Drucker ohne PDF im Gateway umwandeln (Standard an; nur `false` schaltet es aus)
-  return { enabled: p.enabled === true, manual, convert: p.convert !== false };
+  return { enabled: p.enabled === true, manual, convert: p.convert !== false, ocr: p.ocr === true, office: p.office === true };
 }
 
 module.exports = { normalizePrint, isRfc1918, cleanText, MAX_MANUAL };

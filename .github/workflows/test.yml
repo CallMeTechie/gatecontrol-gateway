@@ -163,8 +163,10 @@ jobs:
         with: { node-version: '${{ matrix.node }}', registry-url: 'https://npm.pkg.github.com/', scope: '@callmetechie' }
       - run: npm ci
         env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN }}' }
-      - name: poppler-utils (PDF umwandeln, tests/print_convert.test.js – wie im Image)
-        run: sudo apt-get install -y poppler-utils || (sudo apt-get update && sudo apt-get install -y poppler-utils)
+      - name: poppler-utils, tesseract, LibreOffice (Drucken & Scannen, tests/print_*.test.js – wie im Image)
+        run: |
+          pk="poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui"
+          sudo apt-get install -y --no-install-recommends $pk || (sudo apt-get update && sudo apt-get install -y --no-install-recommends $pk)
       - run: node --test --experimental-test-coverage --test-force-exit tests/ | tee test-output.txt
       - name: Check coverage
         run: |
@@ -191,8 +193,10 @@ jobs:
         with: { node-version: 20, registry-url: 'https://npm.pkg.github.com/', scope: '@callmetechie' }
       - run: npm ci
         env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN }}' }
-      - name: poppler-utils (PDF umwandeln, tests/print_convert.test.js – wie im Image)
-        run: sudo apt-get install -y poppler-utils || (sudo apt-get update && sudo apt-get install -y poppler-utils)
+      - name: poppler-utils, tesseract, LibreOffice (Drucken & Scannen, tests/print_*.test.js – wie im Image)
+        run: |
+          pk="poppler-utils tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui"
+          sudo apt-get install -y --no-install-recommends $pk || (sudo apt-get update && sudo apt-get install -y --no-install-recommends $pk)
       - run: npx stryker run
       - uses: actions/upload-artifact@v4
         with: { name: mutation-report, path: reports/mutation/ }
