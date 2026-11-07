@@ -60,20 +60,22 @@ function envelope(body, header = '') {
 
 /**
  * Port und Pfad einer Adresse aus einer Antwort (Host fällt weg).
- * kind 'xaddr' (http, ONVIF-Pfad), 'rtsp' (rtsp, Pfad + Query), 'http' (http, Pfad + Query).
+ * kind 'xaddr' (http/https, ONVIF-Pfad), 'rtsp' (rtsp, Pfad + Query), 'http' (http/https, Pfad + Query).
+ * → { port, path } – bei https zusätzlich `tls: true` (Standard-Port 443).
  */
 function uriParts(raw, kind) {
   const s = cleanText(raw, 512).split(/\s+/)[0] || '';
   let u;
   try { u = new URL(s); } catch { return null; }
-  const want = kind === 'rtsp' ? 'rtsp:' : 'http:';
-  if (u.protocol !== want) return null;
-  const dflt = kind === 'rtsp' ? 554 : 80;
+  const tls = kind !== 'rtsp' && u.protocol === 'https:';
+  if (kind === 'rtsp' ? u.protocol !== 'rtsp:' : (u.protocol !== 'http:' && !tls)) return null;
+  const dflt = kind === 'rtsp' ? 554 : (tls ? 443 : 80);
   const port = u.port ? Number(u.port) : dflt;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   const path = kind === 'xaddr' ? u.pathname : u.pathname + u.search;
   const re = kind === 'xaddr' ? ONVIF_PATH_RE : RTSP_PATH_RE;
-  return re.test(path) ? { port, path } : null;
+  if (!re.test(path)) return null;
+  return tls ? { port, path, tls: true } : { port, path };
 }
 
 function faultCode(root) {
@@ -85,7 +87,7 @@ function faultCode(root) {
 }
 
 /**
- * Ein SOAP-Aufruf. ctx: { host, port, user, password, offsetMs, signal }.
+ * Ein SOAP-Aufruf. ctx: { host, port, user, password, offsetMs, signal, tls, insecure }.
  * → Wurzelknoten der Antwort; wirft OnvifError (auth_failed, fault, not_onvif, unreachable, …).
  */
 async function soap(ctx, path, body, { action = '', header = '', auth = true, timeoutMs = 10_000 } = {}) {
@@ -96,7 +98,7 @@ async function soap(ctx, path, body, { action = '', header = '', auth = true, ti
     r = await request({
       host: ctx.host, port: ctx.port, path, method: 'POST', body: data, maxBytes: SOAP_MAX, timeoutMs, signal: ctx.signal,
       headers: { 'Content-Type': `application/soap+xml; charset=utf-8${action ? `; action="${action}"` : ''}` },
-      user: auth ? ctx.user : null, password: ctx.password, allowBasic: false,
+      user: auth ? ctx.user : null, password: ctx.password, allowBasic: false, tls: ctx.tls === true, insecure: ctx.insecure === true,
     });
   } catch (e) {
     if (e instanceof CamHttpError) throw new OnvifError(e.code === 'auth_failed' ? 'auth_failed' : (e.code === 'redirect' ? 'not_onvif' : e.code), e.message);
@@ -260,9 +262,14 @@ async function createPullPoint(ctx, eventsPath) {
   const root = await soap(ctx, eventsPath, body, { action: `${NS.tev}/EventPortType/CreatePullPointSubscriptionRequest` });
   const ref = xml.find(root, 'SubscriptionReference');
   const addr = xml.textOf(ref, 'Address');
-  const parts = uriParts(addr, 'xaddr') || (/^\//.test(addr) && ONVIF_PATH_RE.test(addr) ? { port: ctx.port, path: addr } : null);
+  const parts = uriParts(addr, 'xaddr') || (/^\//.test(addr) && ONVIF_PATH_RE.test(addr) ? { port: ctx.port, path: addr, ...(ctx.tls ? { tls: true } : {}) } : null);
   if (!parts) throw new OnvifError('fault', 'the camera named no usable subscription address');
   return { ...parts, address: cleanText(addr, 400) };
+}
+
+/** Der Aufruf-Kontext für eine Adresse aus einer Antwort: deren Port und Schema (http/https), Host und Zugang bleiben. */
+function at(ctx, part) {
+  return { ...ctx, port: part.port, tls: part.tls === true };
 }
 
 function wsa(action, to) {
@@ -272,21 +279,21 @@ function wsa(action, to) {
 async function pullMessages(ctx, sub, { timeoutS = 10, limit = 32 } = {}) {
   const action = `${NS.tev}/PullPointSubscription/PullMessagesRequest`;
   const body = `<tev:PullMessages><tev:Timeout>PT${timeoutS}S</tev:Timeout><tev:MessageLimit>${limit}</tev:MessageLimit></tev:PullMessages>`;
-  const root = await soap({ ...ctx, port: sub.port }, sub.path, body, { action, header: wsa(action, sub.address), timeoutMs: (timeoutS + 10) * 1000 });
+  const root = await soap(at(ctx, sub), sub.path, body, { action, header: wsa(action, sub.address), timeoutMs: (timeoutS + 10) * 1000 });
   return messagesOf(root);
 }
 
 async function renew(ctx, sub) {
   const action = `${NS.wsnt}/SubscriptionManager/RenewRequest`;
-  await soap({ ...ctx, port: sub.port }, sub.path, '<wsnt:Renew><wsnt:TerminationTime>PT120S</wsnt:TerminationTime></wsnt:Renew>', { action, header: wsa(action, sub.address) });
+  await soap(at(ctx, sub), sub.path, '<wsnt:Renew><wsnt:TerminationTime>PT120S</wsnt:TerminationTime></wsnt:Renew>', { action, header: wsa(action, sub.address) });
 }
 
 async function unsubscribe(ctx, sub) {
   const action = `${NS.wsnt}/SubscriptionManager/UnsubscribeRequest`;
-  try { await soap({ ...ctx, port: sub.port }, sub.path, '<wsnt:Unsubscribe/>', { action, header: wsa(action, sub.address), timeoutMs: 4000 }); } catch { /* best effort */ }
+  try { await soap(at(ctx, sub), sub.path, '<wsnt:Unsubscribe/>', { action, header: wsa(action, sub.address), timeoutMs: 4000 }); } catch { /* best effort */ }
 }
 
 module.exports = {
-  NS, DEVICE_PATH, OnvifError, security, envelope, uriParts, soap, clockOffset, deviceInfo, capabilities, profiles, streamUri, snapshotUri,
+  NS, DEVICE_PATH, OnvifError, security, envelope, uriParts, at, soap, clockOffset, deviceInfo, capabilities, profiles, streamUri, snapshotUri,
   eventKinds, classify, kindOfName, messagesOf, createPullPoint, pullMessages, renew, unsubscribe,
 };

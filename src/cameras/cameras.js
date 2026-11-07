@@ -52,6 +52,8 @@ const START_FLAG_EVERY_MS = 10 * 60_000;
 const MAX_PENDING = 200;
 const RANK = { person: 4, vehicle: 3, animal: 2, motion: 1 };
 const ONVIF_PORTS = [80, 8000, 2020, 8080, 8899];
+// zuletzt ONVIF über HTTPS (Kameras, die nur das anbieten)
+const ONVIF_TLS_PORTS = [443];
 
 const rid = (p) => p + crypto.randomBytes(8).toString('hex').slice(0, 15);
 const iso = (ms) => (Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : null);
@@ -77,7 +79,8 @@ class CamError extends Error {
 /** Fehler eines Kamera-Aufrufs → Code der Verträge (auth_failed, unreachable, not_onvif, no_stream, …) */
 function codeOf(e) {
   const c = e && typeof e.code === 'string' ? e.code : 'error';
-  if (c === 'auth_failed' || c === 'not_allowed' || c === 'not_onvif' || c === 'no_stream') return c;
+  if (c === 'auth_failed' || c === 'not_allowed' || c === 'not_onvif' || c === 'no_stream' || c === 'tls_untrusted') return c;
+  if (c === 'tls_failed') return 'unreachable';
   if (c === 'unreachable' || c === 'timeout' || c === 'aborted') return 'unreachable';
   if (c === 'too_large' || c === 'bad_xml' || c === 'redirect' || c === 'fault') return 'not_onvif';
   return 'error';
@@ -100,6 +103,31 @@ function parseRtspUrl(raw) {
   return { host: u.hostname, port, path: p, user: u.username ? decodeURIComponent(u.username) : null, password: u.password ? decodeURIComponent(u.password) : null };
 }
 
+/**
+ * Wo liegt der Clip-Speicher `dir`? Aus /proc/self/mountinfo (pure, getestet):
+ *   { mount: 'folder', folder } – ein Ordner des Hosts (GC_CAMERA_DIR, z. B. /volume1/kameras); `folder` ist
+ *                                 der Pfad innerhalb seines Dateisystems (Synology: /kameras für /volume1/kameras)
+ *   { mount: 'volume', volume }  – ein benanntes Docker-Volume (Standard cam-recordings)
+ *   { mount: 'none' }            – kein eigener Mount: die Clips lägen im Container und gingen beim Update verloren
+ *   null                         – unbekannt (kein Linux, keine mountinfo)
+ */
+function mountOf(dir, mountinfo) {
+  if (typeof mountinfo !== 'string' || !mountinfo) return null;
+  const unesc = (x) => x.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8)));
+  const want = path.resolve(dir);
+  let hit = null;
+  for (const line of mountinfo.split('\n')) {
+    const f = line.split(' ');
+    if (f.length < 10) continue;
+    if (unesc(f[4]) === want) hit = f; // die letzte Zeile gewinnt (überlagerte Mounts)
+  }
+  if (!hit) return { mount: 'none' };
+  const root = unesc(hit[3]);
+  const vol = /\/volumes\/([^/]{1,128})\/_data\/?$/.exec(root);
+  if (vol) return { mount: 'volume', volume: cleanText(vol[1], 128) };
+  return { mount: 'folder', folder: cleanText(root, 160) || '/' };
+}
+
 function isJpeg(b) { return Buffer.isBuffer(b) && b.length > 4 && b[0] === 0xff && b[1] === 0xd8; }
 
 class CameraService {
@@ -119,7 +147,9 @@ class CameraService {
     this.hostProfile = null;
     this.discovered = [];
     this.discoveredAt = null;
-    this.storage = { path: recDir, free: null, total: null, used: null, clips: null, problem: null };
+    this.storage = { path: recDir, free: null, total: null, used: null, clips: null, problem: null, mount: null, folder: null, volume: null };
+    this.mountinfo = () => readText('/proc/self/mountinfo', 256 * 1024);
+    this.mountAt = 0;
     this.lastError = null;
     this.started = false;
     this.credsBusy = null;
@@ -146,7 +176,7 @@ class CameraService {
       const rt = this.cams.get(c.id);
       if (!rt) this.cams.set(c.id, this._runtime(c));
       else if (JSON.stringify(rt.cam) !== JSON.stringify(c)) {
-        const hostChanged = rt.cam.host !== c.host || JSON.stringify(rt.cam.onvif) !== JSON.stringify(c.onvif) || JSON.stringify(rt.cam.rtsp) !== JSON.stringify(c.rtsp) || rt.cam.profile !== c.profile || rt.cam.stream !== c.stream;
+        const hostChanged = rt.cam.host !== c.host || JSON.stringify(rt.cam.onvif) !== JSON.stringify(c.onvif) || JSON.stringify(rt.cam.rtsp) !== JSON.stringify(c.rtsp) || rt.cam.profile !== c.profile || rt.cam.stream !== c.stream || rt.cam.tlsInsecure !== c.tlsInsecure;
         rt.cam = c;
         if (hostChanged) { rt.info = null; rt.resolvedAt = 0; rt.retryAt = 0; this._stopEvents(rt); }
       }
@@ -173,7 +203,7 @@ class CameraService {
     return {
       cam, info: null, resolvedAt: 0, retryAt: 0, retries: 0, state: 'starting', problem: null,
       events: 'off', kinds: [], sub: null, active: new Map(), lastTrueAt: 0, event: null,
-      liveUntil: 0, snapUntil: 0, runWritten: null, snapshotAt: null, lastEventAt: null, codec: cam.codec, width: null, height: null, audio: false,
+      liveUntil: 0, snapUntil: 0, runWritten: null, snapshotAt: null, lastEventAt: null, codec: cam.codec, width: null, height: null, audio: null,
     };
   }
 
@@ -282,7 +312,10 @@ class CameraService {
 
   // ─── Kamera auflösen (ONVIF / RTSP) ───────────────────────────────────
   _ctx(rt, cr, extra = {}) {
-    return { host: rt.cam.host, port: rt.cam.onvif ? rt.cam.onvif.port : 80, user: cr ? cr.user : null, password: cr ? cr.password : null, offsetMs: rt.offsetMs || 0, ...extra };
+    return {
+      host: rt.cam.host, port: rt.cam.onvif ? rt.cam.onvif.port : 80, tls: !!(rt.cam.onvif && rt.cam.onvif.tls), insecure: rt.cam.tlsInsecure === true,
+      user: cr ? cr.user : null, password: cr ? cr.password : null, offsetMs: rt.offsetMs || 0, ...extra,
+    };
   }
 
   /** Stream, Snapshot, Ereignis-Adresse, Codec. Wirft nie (setzt state/problem). */
@@ -292,7 +325,10 @@ class CameraService {
     const cr = this.creds.get(cam.id);
     try {
       if (cam.onvif) {
-        const info = await this.onvifInfo({ host: cam.host, port: cam.onvif.port, path: cam.onvif.path, user: cr && cr.user, password: cr && cr.password, profile: cam.profile, stream: cam.stream, kinds: true });
+        const info = await this.onvifInfo({
+          host: cam.host, port: cam.onvif.port, path: cam.onvif.path, tls: cam.onvif.tls === true, insecure: cam.tlsInsecure === true,
+          user: cr && cr.user, password: cr && cr.password, profile: cam.profile, stream: cam.stream, kinds: true,
+        });
         rt.offsetMs = info.offsetMs;
         if (cam.rtsp) info.rtsp = cam.rtsp;
         rt.info = info;
@@ -300,6 +336,8 @@ class CameraService {
         rt.width = info.width; rt.height = info.height;
         rt.kinds = info.kinds;
         rt.events = info.events ? 'pullpoint' : 'unsupported';
+        // Ton: ONVIF nennt es nicht verlässlich – das SDP des Streams sagt es (ein kurzes DESCRIBE, Fehler = unbekannt)
+        rt.audio = await this._audioOf(cam, info.rtsp, cr);
       } else {
         const d = await rtsp.describe({ host: cam.host, port: cam.rtsp.port, path: cam.rtsp.path, user: cr && cr.user, password: cr && cr.password });
         rt.info = { rtsp: cam.rtsp, snapshot: null, events: null, device: null, codec: d.codec, audio: d.audio };
@@ -309,7 +347,7 @@ class CameraService {
       rt.state = 'ok'; rt.problem = null; rt.resolvedAt = this.now(); rt.retries = 0;
     } catch (e) {
       const code = codeOf(e);
-      rt.state = code === 'auth_failed' ? 'auth_failed' : (code === 'unreachable' ? 'unreachable' : (code === 'no_stream' ? 'no_stream' : 'error'));
+      rt.state = code === 'auth_failed' ? 'auth_failed' : (code === 'unreachable' ? 'unreachable' : (code === 'no_stream' ? 'no_stream' : (code === 'tls_untrusted' ? 'tls_untrusted' : 'error')));
       rt.problem = code;
       rt.retryAt = this.now() + RESOLVE_RETRY_MS[Math.min(rt.retries, RESOLVE_RETRY_MS.length - 1)];
       rt.retries++;
@@ -318,17 +356,26 @@ class CameraService {
     this.reportDirty = true;
   }
 
+  /** Hat der Stream eine Tonspur? true/false aus dem SDP, null wenn das DESCRIBE nicht klappt. */
+  async _audioOf(cam, parts, cr) {
+    if (!parts || !Number.isInteger(parts.port)) return null;
+    try {
+      const d = await rtsp.describe({ host: cam.host, port: parts.port, path: parts.path, user: cr && cr.user, password: cr && cr.password });
+      return d.audio === true;
+    } catch { return null; }
+  }
+
   /**
    * ONVIF einer Kamera abfragen: Uhr, Geräteinfo, Fähigkeiten, Profile, Stream/Snapshot des
    * gewählten Profils, Ereignis-Arten. → { device, profiles, profile, rtsp, snapshot, events, kinds, codec, width, height, offsetMs }
    */
-  async onvifInfo({ host, port, path: devPath = onvif.DEVICE_PATH, user, password, profile = null, stream = 'main', kinds = false, allProfiles = false }) {
-    const ctx = { host, port, user, password, offsetMs: 0 };
+  async onvifInfo({ host, port, path: devPath = onvif.DEVICE_PATH, tls = false, insecure = false, user, password, profile = null, stream = 'main', kinds = false, allProfiles = false }) {
+    const ctx = { host, port, tls, insecure, user, password, offsetMs: 0 };
     try { ctx.offsetMs = await onvif.clockOffset(ctx, devPath); } catch (e) { if (codeOf(e) === 'unreachable') throw e; }
     const device = await onvif.deviceInfo(ctx, devPath);
     const caps = await onvif.capabilities(ctx, devPath);
     const mediaPath = (caps.media && caps.media.path) || devPath;
-    const mctx = { ...ctx, port: (caps.media && caps.media.port) || port };
+    const mctx = caps.media ? onvif.at(ctx, caps.media) : ctx;
     const list = await onvif.profiles(mctx, mediaPath);
     const usable = list.filter((p) => p.codec === 'h264' || p.codec === 'h265');
     if (!usable.length) throw new onvif.OnvifError('no_stream', 'the camera has no H.264/H.265 profile');
@@ -347,12 +394,13 @@ class CameraService {
     let found = [];
     if (caps.events) {
       events = caps.events;
-      if (kinds) found = await onvif.eventKinds({ ...ctx, port: caps.events.port }, caps.events.path).catch(() => []);
+      if (kinds) found = await onvif.eventKinds(onvif.at(ctx, caps.events), caps.events.path).catch(() => []);
     }
     return {
-      device, profiles, profile: pick.token, rtsp: rtspParts, snapshot: snapshot ? { port: snapshot.port || 80, path: snapshot.path } : null,
+      device, profiles, profile: pick.token, rtsp: rtspParts,
+      snapshot: snapshot ? { port: snapshot.port || (snapshot.tls ? 443 : 80), path: snapshot.path, ...(snapshot.tls ? { tls: true } : {}) } : null,
       events, kinds: found, codec: pick.codec, width: pick.width, height: pick.height, offsetMs: ctx.offsetMs,
-      media: { port: mctx.port, path: mediaPath },
+      media: { port: mctx.port, path: mediaPath, ...(mctx.tls ? { tls: true } : {}) },
     };
   }
 
@@ -393,6 +441,12 @@ class CameraService {
   }
 
   _disk() {
+    // wo die Clips liegen (Ordner der NAS / Docker-Volume / im Container) – ändert sich nur mit einem Neustart, stündlich frisch
+    if (!this.mountAt || this.now() - this.mountAt > CLEAN_EVERY_MS) {
+      this.mountAt = this.now();
+      const m = mountOf(this.recDir, this.mountinfo());
+      Object.assign(this.storage, { mount: m ? m.mount : null, folder: (m && m.folder) || null, volume: (m && m.volume) || null });
+    }
     try {
       fs.accessSync(this.recDir, fs.constants.W_OK);
       const s = this.statfs(this.recDir);
@@ -414,7 +468,7 @@ class CameraService {
         const cr = this.creds.get(rt.cam.id);
         const ev = rt.info && rt.info.events;
         if (!ev) return;
-        const ctx = { ...this._ctx(rt, cr), port: ev.port, signal: ctrl.signal };
+        const ctx = { ...onvif.at(this._ctx(rt, cr), ev), signal: ctrl.signal };
         let sub = null;
         try {
           sub = await onvif.createPullPoint(ctx, ev.path);
@@ -701,7 +755,10 @@ class CameraService {
     if (rt.info && rt.info.snapshot && this.allowed(rt.cam.host)) {
       const cr = this.creds.get(id);
       try {
-        const r = await camHttp.request({ host: rt.cam.host, port: rt.info.snapshot.port, path: rt.info.snapshot.path, user: cr && cr.user, password: cr && cr.password, maxBytes: SNAP_MAX, timeoutMs: 8000 });
+        const r = await camHttp.request({
+          host: rt.cam.host, port: rt.info.snapshot.port, path: rt.info.snapshot.path, tls: rt.info.snapshot.tls === true, insecure: rt.cam.tlsInsecure === true,
+          user: cr && cr.user, password: cr && cr.password, maxBytes: SNAP_MAX, timeoutMs: 8000,
+        });
         if (r.status === 200 && isJpeg(r.body)) {
           rt.snapshotAt = this.now();
           if (r.body.length <= max) return { data: r.body, at: this.now() };
@@ -709,6 +766,7 @@ class CameraService {
       } catch (e) {
         if (!wait) return null;
         if (codeOf(e) === 'auth_failed') throw new CamError('auth_failed', 'the camera refused the user or password');
+        if (codeOf(e) === 'tls_untrusted') throw new CamError('tls_untrusted', 'the certificate of the camera is not trusted');
       }
     }
     if (!wait) return null;
@@ -774,34 +832,43 @@ class CameraService {
       let d;
       try { d = await rtsp.describe({ host: u.host, port: u.port, path: u.path, user: cu, password: cp }); } catch (e) { throw this._probeError(e); }
       const snap = await this._probeGrab({ host: u.host, port: u.port, path: u.path, user: cu, password: cp, codec: d.codec });
-      return { ok: true, source: 'rtsp', host: u.host, info: { manufacturer: null, model: null, firmware: null }, profiles: [], rtsp: { port: u.port, path: u.path }, events: { supported: false, kinds: [] }, codec: d.codec, audio: d.audio, snapshot: snap };
+      return { ok: true, source: 'rtsp', host: u.host, info: { manufacturer: null, model: null, firmware: null }, profiles: [], rtsp: { port: u.port, path: u.path }, events: { supported: false, kinds: [] }, codec: d.codec, width: null, height: null, audio: d.audio, snapshot: snap };
     }
     const host = typeof q.host === 'string' ? q.host.trim() : '';
     if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) throw new CamError('invalid_request', 'invalid address', 400);
     if (!this.allowed(host)) throw new CamError('not_allowed', 'the address is not in the home network of this gateway', 403);
     const devPath = typeof q.onvifPath === 'string' && /^\/[A-Za-z0-9._~/-]{0,127}$/.test(q.onvifPath) ? q.onvifPath : onvif.DEVICE_PATH;
-    const ports = Number.isInteger(q.onvifPort) && q.onvifPort > 0 && q.onvifPort < 65536 ? [q.onvifPort] : ONVIF_PORTS;
+    // HTTPS: onvifTls (der Admin wählte es) – sonst erst die üblichen http-Ports, zuletzt 443 mit TLS
+    const insecure = q.tlsInsecure === true;
+    const given = Number.isInteger(q.onvifPort) && q.onvifPort > 0 && q.onvifPort < 65536 ? q.onvifPort : null;
+    const tries = given
+      ? [{ port: given, tls: q.onvifTls === true }]
+      : (q.onvifTls === true ? ONVIF_TLS_PORTS.map((p) => ({ port: p, tls: true }))
+        : [...ONVIF_PORTS.map((p) => ({ port: p, tls: false })), ...ONVIF_TLS_PORTS.map((p) => ({ port: p, tls: true }))]);
     let lastErr = null;
-    for (const port of ports) {
+    for (const { port, tls } of tries) {
       try {
-        const info = await this.onvifInfo({ host, port, path: devPath, user, password, kinds: true, allProfiles: true, profile: typeof q.profile === 'string' ? q.profile : null });
+        const info = await this.onvifInfo({ host, port, path: devPath, tls, insecure, user, password, kinds: true, allProfiles: true, profile: typeof q.profile === 'string' ? q.profile : null });
         let snapshot = null;
         if (info.snapshot) {
           try {
-            const r = await camHttp.request({ host, port: info.snapshot.port, path: info.snapshot.path, user, password, maxBytes: SNAP_MAX, timeoutMs: 8000 });
+            const r = await camHttp.request({ host, port: info.snapshot.port, path: info.snapshot.path, tls: info.snapshot.tls === true, insecure, user, password, maxBytes: SNAP_MAX, timeoutMs: 8000 });
             if (r.status === 200 && isJpeg(r.body) && r.body.length <= 1024 * 1024) snapshot = { data: r.body.toString('base64'), mime: 'image/jpeg' };
           } catch { snapshot = null; }
         }
         if (!snapshot) snapshot = await this._probeGrab({ host, port: info.rtsp.port, path: info.rtsp.path, user, password, codec: info.codec });
+        const audio = await this._audioOf({ host }, info.rtsp, { user, password });
         return {
-          ok: true, source: 'onvif', host, onvif: { port, path: devPath }, info: info.device, profile: info.profile,
+          ok: true, source: 'onvif', host, onvif: tls ? { port, path: devPath, tls: true } : { port, path: devPath }, tlsInsecure: tls && insecure,
+          info: info.device, profile: info.profile,
           profiles: info.profiles.map((p) => ({ token: p.token, name: p.name, codec: p.codec, width: p.width, height: p.height, rtsp: p.rtsp, snapshot: p.snapshot })),
-          rtsp: info.rtsp, events: { supported: !!info.events, kinds: info.kinds }, codec: info.codec, audio: null, snapshot,
+          rtsp: info.rtsp, events: { supported: !!info.events, kinds: info.kinds }, codec: info.codec, width: info.width || null, height: info.height || null, audio, snapshot,
         };
       } catch (e) {
         lastErr = e;
         const c = codeOf(e);
-        if (c === 'auth_failed' || ports.length === 1) break;
+        // falsches Passwort / nicht geprüftes Zertifikat: das ist die Kamera – kein weiterer Port
+        if (c === 'auth_failed' || c === 'tls_untrusted' || tries.length === 1) break;
       }
     }
     throw this._probeError(lastErr);
@@ -812,6 +879,7 @@ class CameraService {
     if (c === 'auth_failed') return new CamError('auth_failed', 'the camera refused the user or password', 401);
     if (c === 'no_stream') return new CamError('no_stream', 'the camera offers no usable video stream', 502);
     if (c === 'not_onvif') return new CamError('not_onvif', 'the camera does not answer ONVIF', 502);
+    if (c === 'tls_untrusted') return new CamError('tls_untrusted', 'the certificate of the camera is not trusted (self-signed?) – choose "do not check the certificate" if you trust it', 502);
     return new CamError('unreachable', 'the camera does not answer', 502);
   }
 
@@ -845,6 +913,8 @@ class CameraService {
       codec: rt.codec || null,
       width: rt.width || null,
       height: rt.height || null,
+      // Tonspur im Stream (aus dem SDP): true/false, null = unbekannt
+      audio: typeof rt.audio === 'boolean' ? rt.audio : null,
       stream: this.service() === 'missing' ? 'service_missing' : this.ringState(rt.cam.id),
       recording: mayRecord(rt.cam, this.cfg.nobodyHome),
       snapshotAt: iso(rt.snapshotAt),
@@ -881,7 +951,7 @@ class CameraService {
       cameras: rts.length,
       recording: rts.filter((rt) => mayRecord(rt.cam, this.cfg.nobodyHome)).length,
       live: rts.filter((rt) => rt.liveUntil > this.now()).length,
-      storage: { free: this.storage.free, total: this.storage.total, problem: this.storage.problem },
+      storage: { free: this.storage.free, total: this.storage.total, problem: this.storage.problem, mount: this.storage.mount },
       host: { cores: os.cpus().length, memTotal, arch: process.arch },
       error: this.lastError ? { code: this.lastError.code, at: this.lastError.at } : null,
     };
@@ -901,4 +971,4 @@ class CameraService {
   }
 }
 
-module.exports = { CameraService, CamError, parseRtspUrl, codeOf, dayOf, PRE_MS, POST_MS, MAX_CLIP_MS };
+module.exports = { CameraService, CamError, parseRtspUrl, codeOf, dayOf, mountOf, PRE_MS, POST_MS, MAX_CLIP_MS };

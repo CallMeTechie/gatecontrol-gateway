@@ -3,10 +3,12 @@
 // Eine Test-Kamera mit ONVIF (SOAP 1.2, WS-UsernameToken), Snapshot per
 // HTTP-Digest und PullPoint-Ereignissen – genug für tests/cameras.test.js.
 // Nennt in ihren Antworten absichtlich eine FREMDE Adresse (203.0.113.9):
-// das Gateway darf nur Port und Pfad übernehmen.
+// das Gateway darf nur Port und Pfad übernehmen. Mit `tls: { key, cert }`
+// spricht sie HTTPS (selbst signiert) und nennt https-Adressen.
 
 const crypto = require('node:crypto');
 const http = require('node:http');
+const https = require('node:https');
 
 const JPEG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16]), Buffer.from('JFIF\0'), Buffer.alloc(64, 1), Buffer.from([0xff, 0xd9])]);
 
@@ -40,10 +42,10 @@ function checkDigest(h, user, password, method, realm, nonce) {
   return p.username === user && p.nonce === nonce && p.response === H(`${ha1}:${nonce}:${p.nc}:${p.cnonce}:${p.qop}:${ha2}`);
 }
 
-function createFakeCamera({ user = 'admin', password = 'geheim', events = [] } = {}) {
+function createFakeCamera({ user = 'admin', password = 'geheim', events = [], tls = null } = {}) {
   const state = { calls: [], pulls: 0, subscribed: 0, renewed: 0, queue: events.slice() };
   const nonce = crypto.randomBytes(8).toString('hex');
-  const server = http.createServer((req, res) => {
+  const handler = (req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
@@ -65,7 +67,7 @@ function createFakeCamera({ user = 'admin', password = 'geheim', events = [] } =
         return send(soapOk(`<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:UTCDateTime><tt:Time><tt:Hour>${d.getUTCHours()}</tt:Hour><tt:Minute>${d.getUTCMinutes()}</tt:Minute><tt:Second>${d.getUTCSeconds()}</tt:Second></tt:Time><tt:Date><tt:Year>${d.getUTCFullYear()}</tt:Year><tt:Month>${d.getUTCMonth() + 1}</tt:Month><tt:Day>${d.getUTCDate()}</tt:Day></tt:Date></tt:UTCDateTime></tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>`));
       }
       if (!checkToken(body, user, password)) return send(FAULT, 400);
-      const foreign = `http://203.0.113.9:${port}`;
+      const foreign = `${tls ? 'https' : 'http'}://203.0.113.9:${port}`;
       switch (op) {
         case 'GetDeviceInformation':
           return send(soapOk('<tds:GetDeviceInformationResponse><tds:Manufacturer>Reolink</tds:Manufacturer><tds:Model>E1 Zoom</tds:Model><tds:FirmwareVersion>v3.1.0</tds:FirmwareVersion><tds:SerialNumber>123</tds:SerialNumber></tds:GetDeviceInformationResponse>'));
@@ -99,7 +101,8 @@ function createFakeCamera({ user = 'admin', password = 'geheim', events = [] } =
         default: return send(FAULT, 400);
       }
     });
-  });
+  };
+  const server = tls ? https.createServer({ key: tls.key, cert: tls.cert }, handler) : http.createServer(handler);
   return {
     state,
     JPEG,

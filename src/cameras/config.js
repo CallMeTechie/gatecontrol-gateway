@@ -68,7 +68,8 @@ function normCamera(c) {
   if (!isRfc1918(host)) return null;
   let onvif = null;
   if (isObj(c.onvif) && port(c.onvif.port) && typeof c.onvif.path === 'string' && ONVIF_PATH_RE.test(c.onvif.path)) {
-    onvif = { port: c.onvif.port, path: c.onvif.path };
+    // tls: ONVIF über HTTPS (die Kamera nannte eine https-Adresse oder der Admin wählte es)
+    onvif = c.onvif.tls === true ? { port: c.onvif.port, path: c.onvif.path, tls: true } : { port: c.onvif.port, path: c.onvif.path };
   }
   let rtsp = null;
   if (isObj(c.rtsp) && port(c.rtsp.port) && typeof c.rtsp.path === 'string' && RTSP_PATH_RE.test(c.rtsp.path)) {
@@ -89,6 +90,8 @@ function normCamera(c) {
     events,
     retentionDays: days,
     audio: c.audio === true,
+    // „Zertifikat nicht prüfen“ (HTTPS mit selbst signiertem Zertifikat) – nur wenn der Admin es wählt
+    tlsInsecure: c.tlsInsecure === true,
     codec: c.codec === 'h265' ? 'h265' : (c.codec === 'h264' ? 'h264' : null),
   };
 }

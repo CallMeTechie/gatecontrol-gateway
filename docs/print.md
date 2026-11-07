@@ -84,7 +84,7 @@ macht das Plugin „Drucken & Scannen“ (`gatecontrol-print`) am Server.
   der Drucker nimmt das Format nicht). Bilder macht der Server zu JPEG oder
   zu einer PDF-Seite.
 
-## Umwandeln (PDF an Drucker ohne PDF)
+## Umwandeln (PDF an Drucker ohne PDF, ab 1.30.0)
 
 Viele Tintenstrahler – z. B. HP OfficeJet Pro 8720 – nennen per IPP nur
 `image/pwg-raster`, `image/urf`, `image/jpeg`, `application/pclm` und
