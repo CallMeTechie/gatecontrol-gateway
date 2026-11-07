@@ -1,0 +1,10 @@
+[Unit]
+Description=GateControl Gateway: Dienst kameras auf Wunsch des Gateways anlegen
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/cameras.md
+
+[Path]
+PathExists=/opt/gatecontrol-gateway/gateway-state/cameras-start
+Unit=gatecontrol-cameras.service
+
+[Install]
+WantedBy=multi-user.target

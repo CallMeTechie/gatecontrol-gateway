@@ -77,3 +77,12 @@ auf `127.0.0.1:11435`; das Gateway lädt die Modelle und leitet die Fragen weite
 - **WoL funktioniert nicht** → Gateway ist nicht im gleichen L2-Segment wie Ziel, oder Host-Bridge statt NAT notwendig
 - **Gateway zeigt als offline in UI** → `sudo docker compose logs gateway`, häufig sind es DNS-Auflösung oder Tunnel-Probleme
 - **„Edge-Dienst fehlt“ / Zwischenspeicher „Ordner nicht beschreibbar“** → ältere Compose-Datei ohne `edge`/`mqtt` bzw. ohne `${GC_CACHE_DIR:-./gateway-cache}:/cache`; aktuelle Datei aus dem Assistenten nehmen (Handbuch Kapitel 6)
+
+## Kameras (optional)
+
+Der Dienst `kameras` ([docs/cameras.md](../cameras.md)) steht in
+`docker-compose.example.yml` im Profil `kameras`. Einschalten in GateControl
+(Gateway › Funktionen › Kameras), dann die Compose-Datei aus GateControl neu holen
+(enthält `kameras` ohne Profil) oder `COMPOSE_PROFILES=kameras` in `.env` setzen und
+`docker compose up -d`. Er öffnet keinen Port und hat keine Rechte; Clips liegen im
+Volume `cam-recordings` oder unter `GC_CAMERA_DIR`.
