@@ -103,7 +103,7 @@ Herstellerformate. Für sie rendert das Gateway PDF selbst
   available }`, Capability `print-convert`.
 * **Ziel:** PWG-Raster (wenn `pwg-raster-document-resolution-supported`
   genannt ist), sonst URF (`urf-supported` mit `RS…` und `W8`/`SRGB24`),
-  sonst **PCLm** (`application/PCLm`, ab 1.31.0, siehe unten), sonst je Seite
+  sonst **PCLm** (`application/PCLm`, ab 1.32.0, siehe unten), sonst je Seite
   ein JPEG (je Seite ein `Print-Job`, Name „… (2/5)“). Herstellerformate
   (PCL, PostScript, HP-eigene) erzeugt das Gateway nicht.
 * **PCLm** (Wi-Fi Alliance, z. B. HP-Drucker, die außer JPEG nur das nennen):
@@ -144,7 +144,7 @@ Herstellerformate. Für sie rendert das Gateway PDF selbst
 * **Ein Auftrag je Gerät:** Druck und Scan laufen je Gerät nacheinander; ein
   zweiter Scan während eines Scans → 409 `scanner_busy`.
 
-## Papier und Fach (ab 1.31.0)
+## Papier und Fach (ab 1.32.0)
 
 * **Bericht:** `printer.media = { sizes, default, sources, sourceDefault,
   ready }`. `sizes`: nur die Formate, die GateControl anbietet (PWG-Namen:
@@ -161,7 +161,7 @@ Herstellerformate. Für sie rendert das Gateway PDF selbst
   nicht hin – dann druckt er auf seinem Standardpapier. Beim Umwandeln wird für
   das gewählte Papier gerendert.
 
-## Zustände beim Drucken (ab 1.31.0)
+## Zustände beim Drucken (ab 1.32.0)
 
 Während `Get-Job-Attributes` fragt das Gateway bei einem angehaltenen Auftrag
 (`processing-stopped`, `printer-stopped`) den Drucker nach dem Grund und meldet
@@ -172,7 +172,7 @@ zurückgehaltenen Auftrag `held`. Läuft er weiter, kommt `printing` ohne
 `message`. Die Apps zeigen das als „Papier fehlt“, „Klappe offen“ usw.
 Nach einer Office-Datei trägt `printing` die Seitenzahl des PDFs (`pages`).
 
-## Office-Dateien (ab 1.31.0)
+## Office-Dateien (ab 1.32.0)
 
 Schalter `features.print.office` (Standard aus; Capability `print-office`).
 Word (`docx`), Excel (`xlsx`), PowerPoint (`pptx`), OpenDocument (`odt`, `ods`,
@@ -222,7 +222,7 @@ PDF.
 * **Aktualisieren:** das Image `:office` wird beim ersten Einschalten geladen;
   ein Gateway-Update (`deploy/update.sh`) zieht nur Gateway und Edge nach.
 
-## Texterkennung (ab 1.31.0)
+## Texterkennung (ab 1.32.0)
 
 Schalter `features.print.ocr` (Standard aus; Capability `print-ocr`). Aus den
 Seiten eines Scans wird ein **durchsuchbares PDF** (das Bild bleibt, der Text
