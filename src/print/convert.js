@@ -75,8 +75,8 @@ const dpiOf = (r) => {
 
 /** PWG-Medienname ("iso_a4_210x297mm", "na_letter_8.5x11in") → { name, w, h } in Punkt, sonst null. */
 function mediaOf(name) {
-  if (typeof name !== 'string') return null;
-  const m = /_(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)(mm|in)$/.exec(name);
+  if (typeof name !== 'string' || name.length > 80) return null;
+  const m = /_(\d{1,5}(?:\.\d{1,4})?)x(\d{1,5}(?:\.\d{1,4})?)(mm|in)$/.exec(name);
   if (!m) return null;
   const k = m[3] === 'mm' ? PT_PER_MM : 72;
   const w = Number(m[1]) * k;
@@ -226,15 +226,37 @@ async function pageSizes(file, opts) {
   return out;
 }
 
-/** PNM (P5 Grau / P6 RGB, 8 Bit) → { width, height, bpp, data } */
+const PNM_HEAD_MAX = 512;
+const isSpace = (c) => c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d || c === 0x0b || c === 0x0c;
+
+/**
+ * PNM (P5 Grau / P6 RGB, 8 Bit) → { width, height, bpp, data }. Der Kopf wird
+ * Zeichen für Zeichen gelesen (Leerraum, Kommentare „# … bis Zeilenende“,
+ * höchstens PNM_HEAD_MAX Bytes) – linear, ohne regulären Ausdruck.
+ */
 function parsePnm(buf) {
-  const m = /^P([56])\s+(?:#[^\n]*\s+)*(\d+)\s+(\d+)\s+(\d+)\s/.exec(buf.subarray(0, 64).toString('latin1'));
-  if (!m || m[4] !== '255') throw new ConvertError('convert_failed', 'unexpected renderer output');
-  const width = Number(m[2]);
-  const height = Number(m[3]);
-  const bpp = m[1] === '5' ? 1 : 3;
-  const data = buf.subarray(m[0].length);
-  if (data.length < width * height * bpp) throw new ConvertError('convert_failed', 'short renderer output');
+  const bad = (why) => new ConvertError('convert_failed', why || 'unexpected renderer output');
+  if (!Buffer.isBuffer(buf) || buf.length < 3 || buf[0] !== 0x50 || (buf[1] !== 0x35 && buf[1] !== 0x36)) throw bad();
+  const bpp = buf[1] === 0x35 ? 1 : 3;
+  const limit = Math.min(buf.length, PNM_HEAD_MAX);
+  let o = 2;
+  const nums = [];
+  while (nums.length < 3) {
+    // Leerraum und Kommentare überspringen
+    while (o < limit && (isSpace(buf[o]) || buf[o] === 0x23)) {
+      if (buf[o] === 0x23) { while (o < limit && buf[o] !== 0x0a) o++; } else o++;
+    }
+    let n = 0;
+    let digits = 0;
+    while (o < limit && buf[o] >= 0x30 && buf[o] <= 0x39 && digits < 6) { n = n * 10 + (buf[o] - 0x30); o++; digits++; }
+    if (!digits || o >= limit || !isSpace(buf[o])) throw bad();
+    nums.push(n);
+  }
+  o++; // genau ein Leerzeichen nach dem Maximalwert, dann die Pixel
+  const [width, height, max] = nums;
+  if (max !== 255 || !width || !height) throw bad();
+  const data = buf.subarray(o);
+  if (data.length < width * height * bpp) throw bad('short renderer output');
   return { width, height, bpp, data: data.subarray(0, width * height * bpp) };
 }
 

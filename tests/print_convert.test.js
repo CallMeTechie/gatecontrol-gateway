@@ -190,6 +190,23 @@ test('packLine/packPage: Wiederholungen, wörtliche Folgen, gleiche Zeilen – v
   assert.deepEqual([...c.packLine(Buffer.from([7, 8]), 1)], [255, 7, 8]);
 });
 
+test('parsePnm: Kopf linear gelesen (auch Kommentare); bösartige Köpfe schnell abgelehnt', () => {
+  const px = Buffer.from([1, 2, 3, 4, 5, 6]);
+  const ok = c.parsePnm(Buffer.concat([Buffer.from('P5\n# von pdftoppm\n3 2\n255\n'), px]));
+  assert.deepEqual([ok.width, ok.height, ok.bpp, ...ok.data], [3, 2, 1, 1, 2, 3, 4, 5, 6]);
+  const rgb = c.parsePnm(Buffer.concat([Buffer.from('P6 1 2 255 '), px]));
+  assert.deepEqual([rgb.width, rgb.height, rgb.bpp, rgb.data.length], [1, 2, 3, 6]);
+  // „P5 #“ und viele „ #“: früher exponentielles Backtracking im regulären Ausdruck
+  const evil = Buffer.from('P5 #' + ' #'.repeat(50000));
+  const t0 = Date.now();
+  assert.throws(() => c.parsePnm(evil), { code: 'convert_failed' });
+  assert.ok(Date.now() - t0 < 200, 'linear');
+  for (const bad of ['P4\n3 2\n255\n', 'P5\n3 2\n65535\n', 'P5\n3\n', 'P5 x 2 255 ', 'P5\n0 2\n255\n']) {
+    assert.throws(() => c.parsePnm(Buffer.concat([Buffer.from(bad), px])), { code: 'convert_failed' }, bad);
+  }
+  assert.throws(() => c.parsePnm(Buffer.from('P5\n3 2\n255\n\x01')), /short renderer output/);
+});
+
 test('pwgHeader: Felder an den Stellen von PWG 5102.4; urfHeader', () => {
   const h = c.pwgHeader({ width: 2480, height: 3508, dpi: 300, type: 'srgb_8', media: c.A4, duplex: true, pages: 3, transform: -1 });
   assert.equal(h.length, 1796);
