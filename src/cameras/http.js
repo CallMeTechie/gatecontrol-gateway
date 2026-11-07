@@ -1,14 +1,21 @@
 'use strict';
 
 // HTTP zu einer Kamera im LAN (ONVIF/SOAP, Snapshot). Der Aufrufer hat die
-// Adresse schon geprüft (config.hostAllowed); hier: nur `http:` zu genau
-// dieser IPv4-Adresse, keine Weiterleitungen (3xx = Fehler), kein Proxy,
-// Antwort-, Verbindungs- und Zeitgrenzen. Anmeldung per HTTP-Digest
+// Adresse schon geprüft (config.hostAllowed); hier: nur `http:` oder `https:`
+// zu genau dieser IPv4-Adresse, keine Weiterleitungen (3xx = Fehler), kein
+// Proxy, Antwort-, Verbindungs- und Zeitgrenzen. Anmeldung per HTTP-Digest
 // (MD5/SHA-256, qop=auth) und – nur wenn die Kamera nichts anderes anbietet –
 // Basic. Zugänge landen nie im Log.
+//
+// HTTPS (`tls: true`): das Zertifikat wird geprüft (Standard). Viele Kameras
+// haben ein selbst signiertes Zertifikat – dann `tls_untrusted`; nur wenn der
+// Admin bei der Kamera „Zertifikat nicht prüfen“ gewählt hat (`insecure`),
+// nimmt das Gateway jedes Zertifikat (die Verbindung bleibt verschlüsselt,
+// geht weiter nur an die geprüfte Adresse im eigenen Netz).
 
 const crypto = require('node:crypto');
 const http = require('node:http');
+const https = require('node:https');
 const net = require('node:net');
 
 class CamHttpError extends Error {
@@ -83,13 +90,30 @@ function authFor(header, { user, password, method, uri, allowBasic = true }) {
   return null;
 }
 
-function once({ host, port, path, method, headers, body, maxBytes, timeoutMs, connectMs, signal }) {
+// Fehlercodes von Node/OpenSSL, die „Zertifikat nicht vertrauenswürdig“ heißen
+const TLS_UNTRUSTED = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_UNTRUSTED', 'CERT_SIGNATURE_FAILURE',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'HOSTNAME_MISMATCH', 'INVALID_CA', 'CERT_REJECTED',
+]);
+
+/** Ein Socket-/TLS-Fehler → CamHttpError (tls_untrusted bei einem nicht geprüften Zertifikat). */
+function netError(e, tls) {
+  if (tls && e && TLS_UNTRUSTED.has(e.code)) return new CamHttpError('tls_untrusted', 'the certificate of the camera is not trusted');
+  if (tls && e && typeof e.code === 'string' && /^ERR_SSL_|^EPROTO$/.test(e.code)) return new CamHttpError('tls_failed', 'no TLS connection to the camera');
+  return new CamHttpError('unreachable', 'the camera does not answer');
+}
+
+function once({ host, port, path, method, headers, body, maxBytes, timeoutMs, connectMs, signal, tls = false, insecure = false }) {
   return new Promise((resolve, reject) => {
     if (!net.isIPv4(host)) { reject(new CamHttpError('not_allowed', 'not an IPv4 address')); return; }
     let done = false;
     const timers = [];
     const finish = (fn, v) => { if (done) return; done = true; for (const t of timers) clearTimeout(t); if (signal) signal.removeEventListener('abort', onAbort); fn(v); };
-    const req = http.request({ host, port, path, method, headers, agent: false, setHost: true }, (res) => {
+    const opts = { host, port, path, method, headers, agent: false, setHost: true };
+    // HTTPS: geprüft, außer der Admin hat „Zertifikat nicht prüfen“ gewählt; kein SNI für eine IP-Adresse
+    const req = tls ? https.request({ ...opts, rejectUnauthorized: !insecure, servername: '' }, onRes) : http.request(opts, onRes);
+    function onRes(res) {
       const chunks = [];
       let n = 0;
       res.on('data', (c) => {
@@ -99,7 +123,7 @@ function once({ host, port, path, method, headers, body, maxBytes, timeoutMs, co
       });
       res.on('end', () => finish(resolve, { status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
       res.on('error', () => finish(reject, new CamHttpError('unreachable', 'connection lost')));
-    });
+    }
     const onAbort = () => { req.destroy(); finish(reject, new CamHttpError('aborted', 'aborted')); };
     if (signal) { if (signal.aborted) { onAbort(); return; } signal.addEventListener('abort', onAbort, { once: true }); }
     timers.push(setTimeout(() => { req.destroy(); finish(reject, new CamHttpError('timeout', 'the camera did not answer in time')); }, timeoutMs));
@@ -107,21 +131,24 @@ function once({ host, port, path, method, headers, body, maxBytes, timeoutMs, co
       if (!sock.connecting) return;
       const t = setTimeout(() => { req.destroy(); finish(reject, new CamHttpError('unreachable', 'the camera does not answer')); }, connectMs);
       timers.push(t);
-      sock.once('connect', () => clearTimeout(t));
+      sock.once(tls ? 'secureConnect' : 'connect', () => clearTimeout(t));
     });
-    req.on('error', (e) => finish(reject, e instanceof CamHttpError ? e : new CamHttpError('unreachable', 'the camera does not answer')));
+    req.on('error', (e) => finish(reject, e instanceof CamHttpError ? e : netError(e, tls)));
     req.end(body || undefined);
   });
 }
 
 /**
- * Eine Anfrage, bei 401 einmal mit Anmeldung wiederholt.
- * → { status, headers, body (Buffer) }; wirft CamHttpError (unreachable, timeout, too_large, redirect, auth_failed …).
+ * Eine Anfrage, bei 401 einmal mit Anmeldung wiederholt. `tls` = HTTPS, `insecure` = Zertifikat nicht prüfen.
+ * → { status, headers, body (Buffer) }; wirft CamHttpError (unreachable, timeout, too_large, redirect, auth_failed,
+ * tls_untrusted, tls_failed …).
  */
 async function request(opts) {
   const o = {
-    method: 'GET', headers: {}, body: null, maxBytes: 256 * 1024, timeoutMs: 10_000, connectMs: 4_000, allowBasic: true, ...opts,
+    method: 'GET', headers: {}, body: null, maxBytes: 256 * 1024, timeoutMs: 10_000, connectMs: 4_000, allowBasic: true, tls: false, insecure: false, ...opts,
   };
+  o.tls = o.tls === true;
+  o.insecure = o.tls && o.insecure === true;
   if (!Number.isInteger(o.port) || o.port < 1 || o.port > 65535) throw new CamHttpError('invalid', 'invalid port');
   if (typeof o.path !== 'string' || o.path[0] !== '/') throw new CamHttpError('invalid', 'invalid path');
   const base = { ...o.headers, Connection: 'close' };
@@ -136,4 +163,4 @@ async function request(opts) {
   return r;
 }
 
-module.exports = { request, parseChallenge, challenges, digestAuth, basicAuth, authFor, CamHttpError };
+module.exports = { request, parseChallenge, challenges, digestAuth, basicAuth, authFor, CamHttpError, TLS_UNTRUSTED };

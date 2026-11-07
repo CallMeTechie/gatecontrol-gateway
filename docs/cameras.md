@@ -55,7 +55,7 @@ reiner RTSP-Kameras brauchen ihn (`service: missing` → Hinweis im Server).
       "rtsp": null,
       "profile": "MainStreamProfileToken", "stream": "main",
       "record": "motion", "events": ["person", "vehicle", "animal"],
-      "retentionDays": 14, "audio": false, "codec": "h264" } ] }
+      "retentionDays": 14, "audio": false, "tlsInsecure": false, "codec": "h264" } ] }
 ```
 
 * `enabled` – aus: alle ffmpeg-Läufe enden (Steuerdateien weg), keine Ereignisse,
@@ -71,7 +71,8 @@ reiner RTSP-Kameras brauchen ihn (`service: missing` → Hinweis im Server).
 * `cameras` – höchstens 16 je Gateway:
   * `id` `^c[0-9a-f]{15}$`, `name` ≤ 60 Zeichen.
   * `host` – nur RFC 1918 **und** in einem eigenen LAN-Netz des Gateways oder in `subnets`.
-  * `onvif` `{ port 1…65535, path ^/[A-Za-z0-9._~/-]{0,127}$ }` oder `null`.
+  * `onvif` `{ port 1…65535, path ^/[A-Za-z0-9._~/-]{0,127}$, tls? }` oder `null`; `tls: true` = ONVIF über
+    HTTPS (ab Gateway 1.29.0; aus dem Test, wenn die Kamera nur HTTPS anbietet oder eine https-Adresse nennt).
   * `rtsp` `{ port, path }` (Pfad mit Query, `^/[A-Za-z0-9._~/%&=?+:;,-]{0,255}$`) – fester
     RTSP-Pfad (Kamera ohne ONVIF oder vom Admin eingegeben); sonst `null` und das Gateway
     fragt ONVIF `GetStreamUri` für `profile`.
@@ -83,6 +84,9 @@ reiner RTSP-Kameras brauchen ihn (`service: missing` → Hinweis im Server).
     Clip auslösen. `motion` = jede Bewegung (auch ohne Personen-/Fahrzeugerkennung der Kamera).
   * `retentionDays` 1…90 (UI: 7, 14, 30), `audio` (Ton im Ring und in Clips, Standard aus),
     `codec` `h264|h265|null` (aus dem Test, nur für den HLS-Tag).
+  * `tlsInsecure` (ab 1.29.0) – „Zertifikat nicht prüfen“: nur `true`, wenn der Admin es bei der Kamera
+    gewählt hat (selbst signiertes Zertifikat). Standard: das Gateway prüft das Zertifikat jeder
+    HTTPS-Adresse (ONVIF, Snapshot, Ereignisse) und meldet sonst `tls_untrusted`.
 * Fehlt `features.cameras` (älterer Server) → aus.
 
 ## 2. Gateway → Server
@@ -92,11 +96,19 @@ Alle mit dem Gateway-Token (`Authorization: Bearer …`), JSON.
 | Route | Inhalt |
 |---|---|
 | `GET /api/v1/gateway/cameras/credentials` | → `{ rev, cameras: { "<id>": { "user": "admin", "password": "…" } } }` – nur Kameras dieses Gateways, `Cache-Control: no-store`. Das Gateway holt sie beim Start und wenn `credRev` wechselt; im Speicher und verschlüsselt in `/state/cameras-cred.bin` (0600, AES-256-GCM, Schlüssel per HKDF aus dem Gateway-Token), nie im Log. |
-| `POST /api/v1/gateway/cameras/report` | `{ at, service, storage: { path, free, total, used, clips, problem }, cameras: [ { id, state, problem, events, kinds, codec, width, height, stream, snapshotAt, lastEventAt, info: { manufacturer, model, firmware } } ] }` – nach Änderungen (höchstens alle 30 s), sonst alle 5 Min. |
+| `POST /api/v1/gateway/cameras/report` | `{ at, service, storage: { path, free, total, used, clips, problem, mount, folder, volume }, cameras: [ { id, state, problem, events, kinds, codec, width, height, audio, stream, snapshotAt, lastEventAt, info: { manufacturer, model, firmware } } ] }` – nach Änderungen (höchstens alle 30 s), sonst alle 5 Min. |
 | `POST /api/v1/gateway/cameras/events` | `{ events: [ { id, cameraId, kind, kinds, phase, startedAt, endedAt, nobodyHome, clip: { ms, bytes } \| null, thumb } ] }` (≤ 32 je Aufruf) – `phase` `start` (sofort), `update` (Art wechselt, z. B. `motion` → `person`), `end` (mit Clip). Nicht angenommene Meldungen wiederholt das Gateway (≤ 200 im Speicher). |
 
 * Kamera `state`: `ok` | `unreachable` | `auth_failed` | `not_allowed` (Adresse nicht erlaubt) |
-  `no_stream` | `error`; `problem` ein Fehlercode oder `null`.
+  `no_stream` | `tls_untrusted` (ab 1.29.0: HTTPS-Zertifikat nicht vertrauenswürdig – Hinweis
+  „Zertifikat nicht prüfen“) | `error`; `problem` ein Fehlercode oder `null`.
+* `width`/`height` – Auflösung des gewählten Profils (ONVIF), sonst `null`; `audio` (ab 1.29.0) – hat
+  der Stream eine Tonspur (SDP des `DESCRIBE`): `true`/`false`, `null` = unbekannt.
+* `storage.mount` (ab 1.29.0, aus `/proc/self/mountinfo`): `folder` (ein Ordner des Hosts,
+  `GC_CAMERA_DIR`; `folder` ist sein Pfad **innerhalb seines Dateisystems**, auf einer Synology z. B.
+  `/kameras` für `/volume1/kameras`), `volume` (benanntes Docker-Volume, `volume` = sein Name) oder
+  `none` (kein eigener Mount – die Clips lägen im Container und gingen beim Update verloren); `null`
+  unbekannt. Auch klein in der Telemetrie (`storage.mount`).
 * `events`: `pullpoint` (ONVIF-Ereignisse laufen) | `unsupported` (Kamera bietet keine) |
   `off` (`record: never`) | `error`; `kinds` – was die Kamera meldet (`person`, `vehicle`, `animal`, `motion`).
 * `stream`: `running` (ffmpeg läuft) | `idle` | `starting` | `error` | `service_missing`.
@@ -110,7 +122,7 @@ Alle mit dem Gateway-Token (`Authorization: Bearer …`), JSON.
 |---|---|
 | `POST /api/cameras/status {}` | 200 `{ cameras }` – frisch: Dienst, Speicher, Kameras (wie im Bericht), Suchergebnis |
 | `POST /api/cameras/discover {}` | 200 `{ found: [ { host, port, path, manufacturer, model, name, hardware } ] }` – WS-Discovery (≈ 3 s) |
-| `POST /api/cameras/probe { host, onvifPort?, onvifPath?, rtspUrl?, user, password }` | 200 `{ ok: true, source: onvif\|rtsp, info, profiles: [ { token, name, codec, width, height, rtsp: { port, path }, snapshot: bool } ], events: { supported, kinds }, codec, audio, snapshot: { data, mime } \| null }`; 400 `invalid_request`, 403 `not_allowed`, 401 `auth_failed`, 502 `unreachable` \| `not_onvif` \| `no_stream` |
+| `POST /api/cameras/probe { host, onvifPort?, onvifPath?, onvifTls?, tlsInsecure?, rtspUrl?, user, password }` | 200 `{ ok: true, source: onvif\|rtsp, onvif: { port, path, tls? }, tlsInsecure, info, profiles: [ { token, name, codec, width, height, rtsp: { port, path }, snapshot: bool } ], events: { supported, kinds }, codec, width, height, audio, snapshot: { data, mime } \| null }`; 400 `invalid_request`, 403 `not_allowed`, 401 `auth_failed`, 502 `unreachable` \| `not_onvif` \| `no_stream` \| `tls_untrusted` |
 | `POST /api/cameras/snapshot { id, maxBytes? }` | 200 `image/jpeg` (neuestes Bild ≤ `maxBytes`, Standard 4 MB; `X-Snapshot-At`); 404 `unknown_camera`, 409 `not_ready`, 502 `unreachable` \| `auth_failed` |
 | `POST /api/cameras/live { id }` | 200 `{ ready, codec, audio }` – hält den Ring für 60 s wach (jeder Abruf unten verlängert) |
 | `GET /api/cameras/<id>/live/index.m3u8` | HLS-Liste (Segment-Namen relativ: `init.mp4`, `s<n>.m4s`); 409 `not_ready` |
@@ -128,7 +140,15 @@ Alle mit dem Gateway-Token (`Authorization: Bearer …`), JSON.
   LAN-Netz oder in `subnets`. Adressen aus ONVIF-Antworten (`XAddr`, Stream-/
   Snapshot-/Ereignis-Adressen) werden **nur mit Port und Pfad** übernommen, der Host ist
   immer die Adresse der Kamera. Keine Weiterleitungen (3xx = Fehler), kein Proxy, nur
-  `http:`/`rtsp:` (kein TLS-Pfad in dieser Fassung).
+  `http:`, `https:` (ab 1.29.0) und `rtsp:` (RTSPS nicht).
+* **HTTPS (ab 1.29.0):** eine https-Adresse aus einer Antwort (`XAddr`, Snapshot, Abo) behält
+  `tls: true`; ohne `onvifPort` probiert der Test erst die http-Ports `80, 8000, 2020, 8080, 8899`,
+  zuletzt `443` mit TLS (`onvifTls: true` = nur `443` bzw. `onvifPort` mit TLS). Das Zertifikat wird
+  **immer geprüft** (Node/OpenSSL, die IP-Adresse muss im Zertifikat stehen) – ein selbst signiertes
+  Zertifikat ergibt `tls_untrusted`, Test und Kamera halten an (kein stilles Weiterprobieren). Nur mit
+  `tlsInsecure: true` (Admin: „Zertifikat nicht prüfen“) nimmt das Gateway jedes Zertifikat dieser
+  Kamera; die Verbindung bleibt verschlüsselt und geht weiter nur an ihre geprüfte Adresse. TLS ab 1.2
+  (Node-Standard).
 * **Grenzen:** SOAP-Antwort ≤ 256 KB, RTSP `DESCRIBE` ≤ 64 KB, Snapshot ≤ 4 MB,
   Verbindung 4 s, Antwort 10 s (PullMessages: Zeitlimit + 10 s), WS-Discovery-Antwort
   ≤ 64 KB, höchstens 64 Antworten.
@@ -175,7 +195,13 @@ Alle mit dem Gateway-Token (`Authorization: Bearer …`), JSON.
   (die Kameras sind im LAN), **kein Port**, `cpu_shares: 512`, `oom_score_adj: 500`,
   `mem_limit: 768m`, `pids_limit: 64`.
 * Speicher für Clips: `${GC_CAMERA_DIR:-cam-recordings}:/recordings` am **Gateway**-Dienst
-  (benanntes Volume; mit `GC_CAMERA_DIR=/volume1/kameras` in `.env` ein Ordner der NAS).
+  (benanntes Volume; mit `GC_CAMERA_DIR=/volume1/kameras` in `.env` ein Ordner der NAS). Den Ordner wählt
+  man in GateControl (Gateway › Funktionen › Kameras › „Einstellungen“ › „Speicherort für Clips“, ab
+  GateControl 1.242.0): die Compose-Datei, die GateControl dann herunterlädt, trägt ihn als Standard ein
+  (`${GC_CAMERA_DIR:-/volume1/kameras}:/recordings`) – kein SSH, kein `.env` nötig; eine gesetzte
+  `GC_CAMERA_DIR` geht weiter vor. Das Gateway meldet, wo `/recordings` wirklich liegt (`storage.mount`,
+  § 2); passt es nicht zur Wahl, zeigt GateControl „Neue Compose-Datei nötig“. Raspberry-Pi-Image: die
+  Clips bleiben im Volume `cam-recordings` auf der SD-Karte.
 * `docker-compose.example.yml`: Dienst im Profil `kameras`; die Compose-Datei aus GateControl
   enthält ihn ohne Profil, sobald Kameras für das Gateway eingeschaltet sind.
 * Raspberry-Pi-Image: `kameras` ohne Profil; `gatecontrol-start` nimmt den Dienst mit, wenn
@@ -203,8 +229,9 @@ Raspberry Pi 3 B+/3/Zero → „höchstens 1 Kamera mit Bewegungserkennung“, P
   anderen Geheimnisse, letzter Bericht) und `home_camera_events` (Ereignisse, Clip-Daten –
   die Clips selbst bleiben auf dem Gateway). Ereignisse älter als die Aufbewahrung verlieren
   den Clip, nach 90 Tagen sind sie weg.
-* **Schalter:** `gateway_features.settings.cameras { enabled, subnets }`
-  (`PUT /api/v1/gateways/:id/features { cameras: { enabled, subnets } }`), Zeile „Kameras“
+* **Schalter:** `gateway_features.settings.cameras { enabled, subnets, storagePath }`
+  (`PUT /api/v1/gateways/:id/features { cameras: { enabled, subnets, storagePath } }`; `storagePath` ab
+  GateControl 1.242.0: der Ordner am Host für die Clips, nur in der Compose-Datei – nie im Config-Pull), Zeile „Kameras“
   in „Geräte im Heimnetz“ (≈ Speicher, „n Kameras eingebunden“, Weg ins Plugin).
 * **Admin-API** (Admin-Sitzung): `GET /api/v1/gateways/:id/cameras` → `{ cameras, storage,
   service, hints }` (live vom Gateway).
@@ -215,17 +242,18 @@ Raspberry Pi 3 B+/3/Zero → „höchstens 1 Kamera mit Bewegungserkennung“, P
   1 h). `Cache-Control: no-store` (Vorschaubilder: `private, max-age=3600`), `X-Content-Type-Options:
   nosniff`, `Cross-Origin-Resource-Policy: cross-origin`, ≤ 600 Abrufe je Minute und Adresse.
   Plugin-Frames mit `permissions.cameras` dürfen sie laden (`img-src`/`media-src
-  <origin>/camera-media/`).
+  <origin>/camera-media/`; ab GateControl 1.242.0 auch `connect-src <origin>/camera-media/` und
+  `Access-Control-Allow-Origin: *` – der MSE-Player holt `live.mp4` per `fetch`, ohne Cookie).
 * **Host-API `gc.cameras`** (`permissions.cameras`, Installationsdialog „Kameras im Heimnetz“):
 
 | Aufruf | Antwort |
 |---|---|
 | `available()` | `{ available, gateways: [ { id, name, online, supported, enabled, service, storage, hint } ] }` |
-| `list()` | `[ { id, gatewayId, gateway, name, host, source, manufacturer, model, state, online, codec, width, height, events: { supported, kinds }, settings, snapshotAt, lastEventAt } ]` |
+| `list()` | `[ { id, gatewayId, gateway, name, host, source, https, tlsInsecure, manufacturer, model, state, online, codec, width, height, hasAudio, events: { supported, kinds }, settings, snapshotAt, lastEventAt } ]` |
 | `discover({ gatewayId? })` | `{ found: [ { gatewayId, gateway, host, port, path, manufacturer, model, name, cameraId } ] }` |
-| `test({ gatewayId, host, onvifPort?, onvifPath?, rtspUrl?, user, password })` | wie Mgmt `probe` (ohne Zugang) |
-| `add({ gatewayId, name, host, onvifPort?, onvifPath?, rtspUrl?, profile?, user, password, settings? })` | `{ camera, snapshot }` – testet zuerst, speichert nur bei Erfolg |
-| `update(id, { name?, user?, password?, profile?, settings? })` | Kamera |
+| `test({ gatewayId, host, onvifPort?, onvifPath?, onvifTls?, tlsInsecure?, rtspUrl?, user, password })` | wie Mgmt `probe` (ohne Zugang) |
+| `add({ gatewayId, name, host, onvifPort?, onvifPath?, onvifTls?, tlsInsecure?, rtspUrl?, profile?, user, password, settings? })` | `{ camera, snapshot }` – testet zuerst, speichert nur bei Erfolg |
+| `update(id, { name?, user?, password?, profile?, tlsInsecure?, settings? })` | Kamera |
 | `remove(id, { deleteClips? })` | `{ removed }` |
 | `snapshot(id, { maxBytes? })` | `{ data, mime, at }` (Standard ≤ 300 KB – passt für `gc.notify` `image`) |
 | `snapshotUrl(id)` | `{ url, expiresAt }` |
@@ -238,20 +266,37 @@ Raspberry Pi 3 B+/3/Zero → „höchstens 1 Kamera mit Bewegungserkennung“, P
 audio }`. Fehler: `ERR_CAMERAS_DENIED`, `ERR_INVALID`, `ERR_NOT_FOUND`, `ERR_CAMERA_OFFLINE`
 (Gateway nicht erreichbar), `ERR_CAMERA_UNSUPPORTED` (Gateway zu alt / Funktion aus),
 `ERR_CAMERA_AUTH`, `ERR_CAMERA_UNREACHABLE`, `ERR_CAMERA_NOT_ALLOWED`, `ERR_CAMERA_LIMIT`
-(16 je Gateway). Rechte (wer welche Kamera sieht) prüft das Plugin.
+(16 je Gateway), `ERR_CAMERA_TLS` (HTTPS-Zertifikat nicht vertrauenswürdig, ab GateControl 1.242.0). Rechte (wer welche Kamera sieht) prüft das Plugin.
 
 ## 8. Plugin „Tür & Kamera“ und Apps
 
-Personen-API des Plugins (Portal, Apps über `/api/v1/client/plugins/gatecontrol-door/api/…`):
+Personen-API des Plugins (Portal-Tab, Apps über
+`/api/v1/client/plugins/gatecontrol-door/api/…`; nur Kameras, die die Person „sieht“ – Spalte auf der
+Seite „Berechtigungen“ des Plugins). Die Kameras im Heimnetz liegen unter `cameras/home…`; Ring-Kameras
+bleiben bei `GET me` und `GET cameras/<Zahl>/snapshot`.
 
 | Route | Antwort |
 |---|---|
-| `GET cameras` | `{ available, minGatecontrol, cameras: [ { id, kind: 'home'\|'ring', name, online, snapshotUrl, live: bool } ] }` |
-| `GET cameras/<id>/live` | wie `gc.cameras.live` (Heimnetz-Kameras; Ring: Standbild) |
-| `GET cameras/<id>/snapshot` | `{ url, at }` |
-| `GET cameras/<id>/clips?day=YYYY-MM-DD` | `{ clips: [ { id, kind, startedAt, ms, thumbUrl, clipUrl } ] }` |
+| `GET cameras/home` | `{ supported, minGatecontrol, every: 10, cameras: [ { id, kind: 'home', name, gatewayId, gateway, model, source, state, online, codec, width, height, audio, hasAudio, events, settings, push, prefs: { push }, snapshotUrl, snapshotAt, lastEventAt } ] }` – `supported: false` bei älterem GateControl |
+| `GET cameras/home/<id>/live` | `{ live: { mode: 'live', via, ready, hls, mp4, snapshot, codec, audio, every, expiresAt } }` im VPN/LAN, sonst `{ live: { mode: 'snapshot', snapshot, every: 10, reason: 'vpn_required' } }` |
+| `GET cameras/home/<id>/still` | `{ still: { data, mime, at } }` (Base64-JPEG ≤ 700 KB, „Standbild“ zum Speichern) |
+| `GET cameras/home/<id>/clips[?day=YYYY-MM-DD]` | `{ day, clips: [ { id, cameraId, camera, kind, kinds, startedAt, endedAt, nobodyHome, ms, thumbUrl, clipUrl } ] }` |
+| `PUT cameras/home/<id>/prefs { push }` | `{ prefs: { push } }` – eigener Push „Personen an der Kamera“ für diese Kamera (Plugin ≥ 1.7.0) |
 
-Push: Thema `kamera` („Personen an der Kamera“), mit Standbild, höchstens einmal pro Kamera
-alle 5 Minuten; Text „Person an der Einfahrt“, mit „Niemand ist zu Hause“, wenn niemand da ist.
-Eine App öffnet `snapshotUrl`/`hls`/`mp4` auf dem eigenen Server (relative Pfade); ohne VPN
-alle 10 s ein neues `snapshotUrl` (Token gilt 10 Min., `?t=<n>` gegen Zwischenspeicher).
+`<id>` `^c[0-9a-f]{15}$`. `width`/`height` die Auflösung (Bericht des Gateways, sonst `null`),
+`hasAudio` ob der Stream Ton hat (`null` unbekannt), `audio` ob die App „Ton“ anbietet (Ton
+eingeschaltet und nicht `hasAudio: false`), `push` der Schalter des Admins für die Kamera, `prefs.push`
+der eigene. Fehler `cam_*` (`cam_needs_gc`, `cam_auth`, `cam_unreachable`, `cam_not_allowed`,
+`cam_offline`, `cam_unsupported`, `cam_limit`, `cam_not_ready`, `cam_service`, `cam_tls`).
+
+Push: Thema `kamera` („Personen an der Kamera“), mit Standbild, höchstens einmal pro Kamera alle
+5 Minuten, an alle, die die Kamera sehen – außer wer ihn für sich abgeschaltet hat (`prefs.push`);
+Text „Person an der Einfahrt“, mit „Niemand ist zu Hause“, wenn niemand da ist.
+`data.door = { type: 'home_camera_event', cameraId, eventId }`, `data.actions = [ { id: 'open', type:
+'open_app_route', label: 'Ansehen', target: 'plg-gatecontrol-door' } ]` – die Apps öffnen damit die
+Kamera (Android: Knopf in der Mitteilung, Windows: Knopf im Toast).
+
+Eine App öffnet `snapshotUrl`/`hls`/`mp4` auf dem eigenen Server (relative Pfade); ohne VPN alle
+10 s ein neues `snapshotUrl` (Token gilt 10 Min., `?t=<n>` gegen Zwischenspeicher). Browser ohne HLS
+(Firefox, Chrome am PC) spielen `mp4` per Media Source Extensions über den Player des Servers
+(`/plugins/_shared/camera-player/camera-player.js`, GateControl ≥ 1.242.0).
