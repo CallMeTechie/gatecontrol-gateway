@@ -22,7 +22,7 @@ const { parseMatches, scopesOf } = require('../src/cameras/discovery');
 const { parsePlaylist } = require('../src/cameras/ring');
 const fmp4 = require('../src/cameras/fmp4');
 const { CredStore } = require('../src/cameras/creds');
-const { CameraService, parseRtspUrl } = require('../src/cameras/cameras');
+const { CameraService, parseRtspUrl, mountOf } = require('../src/cameras/cameras');
 const { createCamerasRouter, range } = require('../src/api/routes/cameras');
 const { sdpInfo } = require('../src/cameras/rtsp');
 const { createFakeCamera, JPEG } = require('./helpers/fakeCamera');
@@ -31,6 +31,18 @@ const { CAPABILITIES } = require('../src/features/manager');
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
 const HAS_FFMPEG = spawnSync('ffmpeg', ['-version']).status === 0;
+const HAS_OPENSSL = spawnSync('openssl', ['version']).status === 0;
+
+/** Ein selbst signiertes Zertifikat für 127.0.0.1 (wie viele Kameras es haben). */
+function selfSigned() {
+  const dir = tmp('gc-tls-');
+  const r = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', path.join(dir, 'k.pem'), '-out', path.join(dir, 'c.pem'),
+    '-days', '2', '-subj', '/CN=camera', '-addext', 'subjectAltName=IP:127.0.0.1'], { stdio: 'ignore' });
+  if (r.status !== 0) return null;
+  const out = { key: fs.readFileSync(path.join(dir, 'k.pem')), cert: fs.readFileSync(path.join(dir, 'c.pem')) };
+  fs.rmSync(dir, { recursive: true, force: true });
+  return out;
+}
 const CAM = (o = {}) => ({ id: 'c0123456789abcde', name: 'Einfahrt', host: '192.168.1.73', onvif: { port: 8000, path: '/onvif/device_service' }, record: 'motion', events: ['person', 'vehicle'], ...o });
 
 describe('cameras: config', () => {
@@ -66,6 +78,34 @@ describe('cameras: config', () => {
     assert.equal(mayRecord({ record: 'away' }, null), false);
     assert.equal(mayRecord({ record: 'never' }, true), false);
     assert.equal(mayRecord({ record: 'motion' }, false), true);
+  });
+  it('HTTPS: onvif.tls and tlsInsecure only when set exactly (default: check the certificate)', () => {
+    const c = normalizeCameras({ enabled: true, cameras: [CAM({ onvif: { port: 443, path: '/onvif/device_service', tls: true }, tlsInsecure: true }), CAM({ id: 'c111111111111111', onvif: { port: 80, path: '/onvif/device_service', tls: 'yes' }, tlsInsecure: 1 })] });
+    assert.deepEqual(c.cameras[0].onvif, { port: 443, path: '/onvif/device_service', tls: true });
+    assert.equal(c.cameras[0].tlsInsecure, true);
+    assert.deepEqual(c.cameras[1].onvif, { port: 80, path: '/onvif/device_service' });
+    assert.equal(c.cameras[1].tlsInsecure, false);
+  });
+  it('uriParts: https addresses keep only port, path and tls (never the host)', () => {
+    assert.deepEqual(onvif.uriParts('https://203.0.113.9/onvif/media', 'xaddr'), { port: 443, path: '/onvif/media', tls: true });
+    assert.deepEqual(onvif.uriParts('https://203.0.113.9:8443/cgi-bin/snap?x=1', 'http'), { port: 8443, path: '/cgi-bin/snap?x=1', tls: true });
+    assert.deepEqual(onvif.uriParts('http://203.0.113.9/onvif/media', 'xaddr'), { port: 80, path: '/onvif/media' });
+    assert.equal(onvif.uriParts('https://203.0.113.9/live', 'rtsp'), null);
+    assert.equal(onvif.uriParts('ftp://203.0.113.9/x', 'http'), null);
+    assert.deepEqual(onvif.at({ host: '192.168.1.73', port: 80, tls: false, user: 'a' }, { port: 443, tls: true }), { host: '192.168.1.73', port: 443, tls: true, user: 'a' });
+  });
+  it('mountOf: folder of the host, Docker volume, nothing (clips in the container)', () => {
+    const info = [
+      '22 1 0:21 / / rw,relatime - overlay overlay rw',
+      '120 22 253:0 /kameras /recordings rw,relatime - btrfs /dev/mapper/cachedev_0 rw',
+      '121 22 8:1 /var/lib/docker/volumes/gatecontrol_cam-recordings/_data /other rw - ext4 /dev/sda1 rw',
+      '122 22 8:1 /srv/Clips\\040Haus /spaced rw - ext4 /dev/sda1 rw',
+    ].join('\n');
+    assert.deepEqual(mountOf('/recordings', info), { mount: 'folder', folder: '/kameras' });
+    assert.deepEqual(mountOf('/other', info), { mount: 'volume', volume: 'gatecontrol_cam-recordings' });
+    assert.deepEqual(mountOf('/spaced', info), { mount: 'folder', folder: '/srv/Clips Haus' });
+    assert.deepEqual(mountOf('/nowhere', info), { mount: 'none' });
+    assert.equal(mountOf('/recordings', null), null);
   });
   it('parseRtspUrl keeps only rtsp with a clean path', () => {
     assert.deepEqual(parseRtspUrl('rtsp://u:p%40w@192.168.1.80:8554/live?ch=1'), { host: '192.168.1.80', port: 8554, path: '/live?ch=1', user: 'u', password: 'p@w' });
@@ -195,6 +235,63 @@ describe('cameras: probe and events against a test camera', () => {
     const s = await svc.snapshot('c0123456789abcde');
     assert.equal(s.data.equals(JPEG), true);
     await assert.rejects(svc.snapshot('c9999999999999999'), (e) => e.status === 404);
+  });
+});
+
+describe('cameras: HTTPS camera with a self-signed certificate', { skip: !HAS_OPENSSL && 'openssl not installed' }, () => {
+  let cam; let port; let dir; let svc; let cert;
+  before(async () => {
+    cert = selfSigned();
+    cam = createFakeCamera({ tls: cert });
+    port = await cam.listen();
+    dir = tmp('gc-cam-tls-');
+    fs.mkdirSync(path.join(dir, 'ctl'));
+    fs.mkdirSync(path.join(dir, 'rec'));
+    const creds = { sync: async () => false, get: () => ({ user: 'admin', password: 'geheim' }), clear() {} };
+    svc = new CameraService({ ctlDir: path.join(dir, 'ctl'), recDir: path.join(dir, 'rec'), stateDir: dir, creds });
+    svc.allowed = (h) => h === '127.0.0.1';
+    await svc.apply({ enabled: true, cameras: [] });
+  });
+  after(async () => { svc.stop(); await cam.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  it('http client: the certificate is checked by default (tls_untrusted), "do not check" connects', async () => {
+    const q = { host: '127.0.0.1', port, path: '/cgi-bin/snap', user: 'admin', password: 'geheim', tls: true };
+    await assert.rejects(camHttp.request(q), (e) => e.code === 'tls_untrusted');
+    const r = await camHttp.request({ ...q, insecure: true });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.equals(JPEG), true);
+    // insecure without tls means nothing: plain http to a TLS port fails as "unreachable", never silently
+    await assert.rejects(camHttp.request({ ...q, tls: false, insecure: true }), (e) => e.code !== 'tls_untrusted');
+  });
+  it('probe over HTTPS: refused with tls_untrusted (hint for the admin), works with tlsInsecure, keeps tls for every address', async () => {
+    await assert.rejects(svc.probe({ host: '127.0.0.1', onvifPort: port, onvifTls: true, user: 'admin', password: 'geheim' }), (e) => e.code === 'tls_untrusted' && /certificate/.test(e.message));
+    const r = await svc.probe({ host: '127.0.0.1', onvifPort: port, onvifTls: true, tlsInsecure: true, user: 'admin', password: 'geheim' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.onvif, { port, path: '/onvif/device_service', tls: true });
+    assert.equal(r.tlsInsecure, true);
+    assert.equal(r.width, 2560);
+    assert.equal(r.height, 1440);
+    assert.equal(r.audio, null); // no RTSP at the test camera: unknown, never a guess
+    assert.equal(Buffer.from(r.snapshot.data, 'base64').equals(JPEG), true);
+  });
+  it('a configured HTTPS camera resolves, takes snapshots and reports tls_untrusted without the switch', async () => {
+    svc.allowed = () => true;
+    const base = { id: 'c0123456789abcde', name: 'Hof', host: '192.168.1.73', onvif: { port, path: '/onvif/device_service', tls: true }, record: 'never', events: [] };
+    await svc.apply({ enabled: true, cameras: [base] });
+    let rt = svc.cams.get(base.id);
+    rt.cam.host = '127.0.0.1';
+    await svc.resolve(rt);
+    assert.equal(rt.state, 'tls_untrusted');
+    assert.equal(svc.cameraView(rt).state, 'tls_untrusted');
+    await svc.apply({ enabled: true, cameras: [{ ...base, tlsInsecure: true }] });
+    rt = svc.cams.get(base.id);
+    rt.cam.host = '127.0.0.1';
+    await svc.resolve(rt);
+    assert.equal(rt.state, 'ok');
+    assert.equal(rt.info.snapshot.tls, true);
+    assert.equal(svc.cameraView(rt).width, 2560);
+    const s = await svc.snapshot(base.id);
+    assert.equal(s.data.equals(JPEG), true);
   });
 });
 
