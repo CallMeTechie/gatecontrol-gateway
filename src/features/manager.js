@@ -167,7 +167,7 @@ function createFeatureManager({ config, defaultGatewayIp }) {
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,
   });
   const radio = new RadioService({ reporter, stateDir: config.stateDir });
-  const ai = new AiService({ stateDir: config.stateDir });
+  const ai = new AiService({ stateDir: config.stateDir, serverUrl: config.serverUrl, apiToken: config.apiToken });
   const cameras = new CameraService({
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,
   });

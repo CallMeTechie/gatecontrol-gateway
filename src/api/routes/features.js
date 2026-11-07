@@ -33,6 +33,7 @@ const AI_ANSWER_MAX = 256 * 1024;
 //   POST /api/ai/pull/cancel    {}                – Download abbrechen
 //   POST /api/ai/delete         { model }         – Modell löschen
 //   POST /api/ai/chat           { model, system, messages, … } – Antwort als NDJSON-Strom (Body ≤ 2 MB)
+//   POST /api/ai/probe          { url, api, key? } – KI-Server im LAN testen (Modelle), nichts gespeichert
 // Aufträge antworten sofort (202); das Ergebnis kommt über die normalen Berichte.
 function reply(res, outcome, busyError) {
   if (outcome === 'accepted') return res.status(202).json({ accepted: true });
@@ -155,6 +156,15 @@ function createFeaturesRouter({ featureMgr }) {
     const r = ai().removeModel ? await ai().removeModel(req.body && req.body.model) : 'disabled';
     if (r === 'deleted') return res.json({ deleted: true });
     return aiReply(res, r);
+  });
+  // Verbindungstest der Einrichtung: einen KI-Server im LAN fragen, ohne ihn zu speichern
+  // (geht auch, solange die lokale KI aus ist – nur private Ziele, ein Test zugleich)
+  router.post('/ai/probe', async (req, res) => {
+    if (!ai().probe) return res.status(503).json({ error: 'feature_disabled' });
+    const r = await ai().probe(req.body);
+    if (r.error === 'invalid_url' || r.error === 'invalid') return res.status(400).json({ error: r.error });
+    if (r.error === 'busy') return res.status(429).json({ error: 'busy' });
+    return res.json({ probe: r.probe });
   });
   router.post('/ai/chat', express.json({ limit: AI_CHAT_LIMIT }), async (req, res) => {
     const svc = ai();
