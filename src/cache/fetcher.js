@@ -18,9 +18,29 @@ const MAX_WANT_ITEMS = 20_000;
 const MAX_BLOB = 64 * 1024 ** 3;
 const IDLE_MS = 60_000;
 const KIND_RE = /^[a-z][a-z0-9_-]{0,15}$/;
+const RETRY_DEFAULT_MS = 60_000;
+const RETRY_MAX_MS = 3600_000;
 
 class CacheFetchError extends Error {
   constructor(code, message) { super(message || code); this.code = code; }
+}
+
+/** Retry-After (Sekunden oder HTTP-Datum) → ms, 1 s … 1 h, ohne Angabe 60 s. */
+function retryAfterMs(v, now = Date.now()) {
+  const raw = Array.isArray(v) ? v[0] : v;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return RETRY_DEFAULT_MS;
+  const n = Number(raw);
+  const ms = Number.isFinite(n) ? n * 1000 : Date.parse(String(raw)) - now;
+  if (!Number.isFinite(ms)) return RETRY_DEFAULT_MS;
+  return Math.min(RETRY_MAX_MS, Math.max(1000, ms));
+}
+
+/** 429 vom Server: Lauf beenden, Retry-After abwarten (Server-Budget des Zwischenspeichers). */
+function rateLimited(res) {
+  res.resume();
+  const e = new CacheFetchError('rate_limited', 'HTTP 429');
+  e.retryAfterMs = retryAfterMs(res.headers['retry-after']);
+  return e;
 }
 
 const agentFor = (u) => (u.protocol === 'https:' ? https : http);
@@ -57,6 +77,7 @@ function makeCacheClient({ serverUrl, apiToken }) {
 
   async function want() {
     const res = await get(`${serverUrl}/api/v1/gateway/cache/want`, { ...auth, accept: 'application/json' });
+    if (res.statusCode === 429) throw rateLimited(res);
     if (res.statusCode !== 200) { res.resume(); throw new CacheFetchError('http_status', `HTTP ${res.statusCode}`); }
     const chunks = [];
     let n = 0;
@@ -95,6 +116,8 @@ function makeCacheClient({ serverUrl, apiToken }) {
         start = have;
       } else if (res.statusCode === 200) {
         start = 0;
+      } else if (res.statusCode === 429) {
+        throw rateLimited(res);
       } else if (res.statusCode === 416 && have > 0) {
         res.resume();
         fs.rmSync(partFile, { force: true });
@@ -140,4 +163,4 @@ function makeCacheClient({ serverUrl, apiToken }) {
   return { want, blob };
 }
 
-module.exports = { makeCacheClient, parseWant, CacheFetchError };
+module.exports = { makeCacheClient, parseWant, retryAfterMs, CacheFetchError };

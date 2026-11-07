@@ -36,7 +36,7 @@ function makeCache(store, want, maxBytes, { onBlob } = {}) {
         return { fetched: size };
       },
     },
-    stateDir: store.dir, tls: {}, addresses: () => [], freeBytes: () => null,
+    stateDir: store.dir, tls: {}, addresses: () => [], freeBytes: () => null, blobGapMs: 0,
   });
   c.cfg = { enabled: true, kinds: { drive: true }, maxBytes };
   c.store = store;

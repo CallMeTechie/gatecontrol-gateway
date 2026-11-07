@@ -22,7 +22,7 @@ function makeReporter({ serverUrl, apiToken, timeoutMs = 15_000 }) {
       });
       return { ok: true, status: res.status, data: res.data };
     } catch (err) {
-      return { ok: false, status: err.response?.status ?? null, error: err.message };
+      return { ok: false, status: err.response?.status ?? null, error: err.message, retryAfter: err.response?.headers?.['retry-after'] ?? null };
     }
   }
   return { post };
