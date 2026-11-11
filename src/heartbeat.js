@@ -21,6 +21,12 @@ const httpsAgent = new https.Agent({ keepAlive: false });
 // (10s) so the next tick can land before the previous overruns it.
 const DEFAULT_HEALTH_TIMEOUT_MS = 8_000;
 
+/**
+ * Resolves { ok, status, error }: `status` is the HTTP status of the server
+ * (null on network/TLS errors and timeouts), `error` the `error` field of a
+ * JSON answer. The setup page uses it to tell "the server refuses this access"
+ * from "the server is not reachable" (docs/setup-page.md).
+ */
 async function sendHeartbeat({ serverUrl, apiToken, health }) {
   try {
     await axios.post(`${serverUrl}/api/v1/gateway/heartbeat`, health, {
@@ -29,8 +35,15 @@ async function sendHeartbeat({ serverUrl, apiToken, health }) {
       httpAgent,
       httpsAgent,
     });
+    return { ok: true, status: 200, error: null };
   } catch (err) {
     logger.warn({ err: err.message, status: err.response?.status }, 'Heartbeat failed');
+    const data = err.response?.data;
+    return {
+      ok: false,
+      status: err.response?.status ?? null,
+      error: data && typeof data === 'object' && typeof data.error === 'string' ? data.error.slice(0, 64) : null,
+    };
   }
 }
 
@@ -81,10 +94,11 @@ async function _collectHealth(getHealth, timeoutMs) {
   }
 }
 
-function startHeartbeatTicker({ serverUrl, apiToken, getHealth, intervalMs, healthTimeoutMs = DEFAULT_HEALTH_TIMEOUT_MS }) {
+function startHeartbeatTicker({ serverUrl, apiToken, getHealth, intervalMs, healthTimeoutMs = DEFAULT_HEALTH_TIMEOUT_MS, onResult = null }) {
   const tick = async () => {
     const health = await _collectHealth(getHealth, healthTimeoutMs);
-    await sendHeartbeat({ serverUrl, apiToken, health });
+    const result = await sendHeartbeat({ serverUrl, apiToken, health });
+    if (onResult) { try { onResult(result); } catch (_e) { /* listener must not stop the ticker */ } }
   };
   const timer = setInterval(tick, intervalMs);
   tick(); // fire immediately

@@ -76,18 +76,19 @@ for the exact `lxc.conf` patches applied.
 ## Quick Start
 
 1. **GateControl-UI** → Gateways → „Gateway hinzufügen“ → Plattform wählen (Raspberry Pi, Synology NAS, Proxmox, anderer Linux-Rechner)
-2. Den Anweisungen des Assistenten folgen; für Linux: `docker-compose.yml`, `gateway.env` und `update.sh` herunterladen
-3. Auf deinem Heimnetz-Host:
+2. Den Anweisungen des Assistenten folgen; für Linux und Synology: die Compose-Datei (ohne Zugangsdaten) kopieren oder herunterladen
+3. Auf deinem Heimnetz-Host den Container starten und die **Einrichtungsseite** öffnen:
    ```bash
-   sudo mkdir -p /opt/gatecontrol-gateway/config /opt/gatecontrol-gateway/gateway-state /opt/gatecontrol-gateway/gateway-cache
-   sudo mv docker-compose.yml update.sh /opt/gatecontrol-gateway/
-   sudo mv gateway.env /opt/gatecontrol-gateway/config/gateway.env
-   cd /opt/gatecontrol-gateway && sudo docker compose up -d
+   sudo mkdir -p /opt/gatecontrol-gateway && cd /opt/gatecontrol-gateway
+   # docker-compose.yml aus dem Assistenten hier ablegen
+   sudo docker compose up -d
    ```
+   Im Browser im Heimnetz `http://<Adresse des Hosts>:8642` öffnen und Serveradresse und Einrichtungscode aus dem Assistenten eingeben – siehe [Einrichtungsseite](docs/setup-page.md). Der bisherige Weg (`gateway.env` nach `config/` legen) funktioniert weiter.
 4. Fertig — Gateway meldet sich beim Server. In der UI kannst du jetzt Routes mit `target_kind=gateway` anlegen.
 
 ## Security Hardening
 
+- Einrichtungs-/Statusseite (Port 8642): nur aus dem Heimnetz erreichbar, nie über den Tunnel, zeigt keine Geheimnisse – [docs/setup-page.md](docs/setup-page.md)
 - `network_mode: host` bleibt zwingend (dynamische L4-Port-Binding)
 - Container läuft als non-root `gateway` User
 - `cap_drop: ALL` + nur `NET_ADMIN` (wg-quick) + `NET_BIND_SERVICE` (ports <1024)

@@ -41,7 +41,11 @@ function parseEnvFile(contents) {
 }
 
 function loadConfig(path) {
-  const raw = fs.readFileSync(path, 'utf8');
+  return parseConfig(fs.readFileSync(path, 'utf8'));
+}
+
+/** Inhalt einer gateway.env prüfen und in die Konfiguration übersetzen (wirft bei ungültigem Inhalt). */
+function parseConfig(raw) {
   const kv = parseEnvFile(raw);
   const parsed = ConfigSchema.parse(kv);
 
@@ -91,4 +95,4 @@ function isTunnelIpValid(ip) {
   return ip !== '0.0.0.0' && /^\d+\.\d+\.\d+\.\d+$/.test(ip);
 }
 
-module.exports = { loadConfig, isRfc1918, isTunnelIpValid };
+module.exports = { loadConfig, parseConfig, isRfc1918, isTunnelIpValid };

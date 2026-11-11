@@ -14,40 +14,50 @@
 1. **Gateway in GateControl anlegen**
 
    GateControl → Gateways → „Gateway hinzufügen“ → Plattform „Synology NAS“ →
-   „Gateway anlegen und weiter“ → `gatecontrol-gateway-nas.zip` herunterladen.
-   Das Paket enthält `docker-compose.yml` (Host-Netz, wireguard-go, Dienste
-   `gateway`, `edge`, `mqtt`), `config/gateway.env`, `update.sh` und die leeren
-   Ordner `gateway-state/` und `gateway-cache/`. Jeder Download erzeugt einen
-   neuen Zugangsschlüssel.
+   „Gateway anlegen und weiter“. Der Assistent zeigt die Compose-Datei (ohne
+   Zugangsdaten, für alle Gateways gleich), die **Serveradresse** und einen
+   **Einrichtungscode** (10 Minuten gültig, einmalig).
 
-2. **Ordnerstruktur**
+2. **Ordner und Projekt**
 
-   File Station → `docker` → Ordner `gatecontrol-gateway` anlegen, ZIP hochladen
-   und dort „Extrahieren“:
+   Im Assistenten das Paket `gatecontrol-gateway-nas.zip` herunterladen
+   (`docker-compose.yml`, `update.sh` und die leeren Ordner `config/`,
+   `gateway-state/`, `gateway-cache/`), in der File Station unter `docker`
+   einen Ordner `gatecontrol-gateway` anlegen, die ZIP hochladen und dort
+   „Extrahieren“:
    ```
    /volume1/docker/gatecontrol-gateway/
      ├── docker-compose.yml
      ├── update.sh
-     ├── config/
-     │   └── gateway.env
+     ├── config/            ← hier legt das Gateway seine gateway.env ab
      ├── gateway-state/     ← /state (Auto-Update-Flag, last-pull, update.log)
      └── gateway-cache/     ← /cache (Zwischenspeicher, docs/dns-cache.md)
    ```
+   Dann Container Manager → Projekt → Erstellen: Projektname
+   `gatecontrol-gateway`, Pfad `/volume1/docker/gatecontrol-gateway`,
+   „Vorhandene docker-compose.yml verwenden“ → Weiter → Fertig.
 
    **Der Container Manager legt fehlende Bind-Mount-Ordner nicht an** – fehlt
    einer, bricht der Start mit `Bind mount failed: … does not exist` ab. Wer die
-   Compose-Datei selbst schreibt (z. B. aus `docker-compose.example.yml`), legt
-   `config/`, `gateway-state/` und `gateway-cache/` vorher in der File Station an.
-
-3. **Projekt erstellen**
-
-   Container Manager → Projekt → Erstellen:
-   - Projektname `gatecontrol-gateway`, Pfad: `/volume1/docker/gatecontrol-gateway`
-   - „Vorhandene docker-compose.yml verwenden“ → Weiter → Fertig.
+   Compose-Datei nur kopiert und im Container Manager einfügt, legt `config/`,
+   `gateway-state/` und `gateway-cache/` vorher in der File Station an.
 
    Die Meldung „Your kernel does not support PIDs limit …“ ist harmlos: Der
    DSM-Kernel kann `pids_limit` (Dienste `edge`, `mqtt`) nicht setzen, Docker
    lässt die Grenze weg.
+
+3. **Einrichtungsseite öffnen und verbinden**
+
+   Im Browser im Heimnetz `http://<Adresse der Synology>:8642` öffnen,
+   Serveradresse und Einrichtungscode eingeben, „Verbinden“. Die Seite zeigt
+   jeden Schritt; nach etwa einer Minute ist das Gateway online, und der
+   Assistent in GateControl geht von selbst weiter. Fehlt etwas – auf der
+   Synology meist das Gerät `/dev/net/tun` –, sagt die Seite, was zu tun ist,
+   ohne SSH. Einzelheiten: [Einrichtungsseite](../setup-page.md).
+
+   **Bisheriger Weg:** Im Assistenten „Lieber die Datei gateway.env
+   herunterladen“ – das Paket enthält dann zusätzlich `config/gateway.env`;
+   jeder Download erzeugt einen neuen Zugangsschlüssel.
 
 4. **Auto-Update**
 
@@ -63,7 +73,17 @@
 
    Container → `…-gateway-1`, `…-edge-1`, `…-mqtt-1` laufen; Protokoll unter
    Container Manager → Container → Protokoll. In GateControl meldet sich das
-   Gateway im Assistenten (Schritt 4).
+   Gateway im Assistenten (Schritt 4); `http://<Adresse der Synology>:8642`
+   zeigt „Verbunden“.
+
+## Ältere Projekte (`./config:/config:ro`)
+
+Projekte, die mit einer `gateway.env` eingerichtet wurden, laufen unverändert
+weiter – auch mit `:ro` und mit `devices: /dev/net/tun`. Sie zeigen die
+Statusseite; **verbinden** lässt sich über die Seite dort nicht (sie sagt das
+und verbraucht keinen Code). Wer „Zugang erneuern“ künftig ohne neue Datei
+erledigen will, ersetzt die Compose-Datei einmal durch die aktuelle aus
+GateControl (nächster Abschnitt) oder entfernt das `:ro`.
 
 Das Auto-Update tauscht nur das Image, nie die `docker-compose.yml`. Ältere
 Projekte ersetzen die Datei einmal durch die aktuelle aus GateControl

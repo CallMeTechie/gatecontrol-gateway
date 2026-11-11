@@ -3,6 +3,9 @@
 // Standalone healthcheck for Docker HEALTHCHECK. Cannot use process.env
 // because config vars live in /config/gateway.env (volume-mounted), not in
 // the container's Docker env. Parses the file, probes /api/health.
+//
+// Without a usable gateway.env the gateway waits on its setup page
+// (docs/setup-page.md) — then the container is healthy when that page answers.
 
 const fs = require('node:fs');
 const http = require('node:http');
@@ -24,12 +27,17 @@ try {
     else if (k === 'GC_API_PORT') port = Number(v) || port;
   }
 } catch {
-  process.exit(1);
+  ip = undefined;
 }
 
-if (!ip) process.exit(1);
+let url = `http://${ip}:${port}/api/health`;
+if (!ip) {
+  if (/^(off|0|false|no)$/i.test(process.env.GC_SETUP_PAGE || '')) process.exit(1);
+  const setupPort = Number(process.env.GC_SETUP_PORT) || 8642;
+  url = `http://127.0.0.1:${setupPort}/healthz`;
+}
 
-const req = http.get(`http://${ip}:${port}/api/health`, (r) => {
+const req = http.get(url, (r) => {
   process.exit(r.statusCode === 200 ? 0 : 1);
 });
 req.on('error', () => process.exit(1));

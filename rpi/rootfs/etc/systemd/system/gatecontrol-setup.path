@@ -1,0 +1,10 @@
+[Unit]
+Description=GateControl Gateway: nach dem Verbinden über die Einrichtungsseite die übrigen Dienste starten
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/setup-page.md
+
+[Path]
+PathExists=/opt/gatecontrol-gateway/gateway-state/setup-done
+Unit=gatecontrol-setup.service
+
+[Install]
+WantedBy=multi-user.target

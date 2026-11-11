@@ -52,12 +52,19 @@ function makeHostGuard(gwIp) {
   };
 }
 
-async function bootstrap() {
-  const config = loadConfig(DEFAULT_ENV_PATH);
+/**
+ * @param {{ config?: object, hooks?: object }} [opts]  `config`: already loaded
+ *   (index.js, after the setup page wrote gateway.env); `hooks`: feedback for
+ *   the setup/status page (src/setup/controller.js) — all optional.
+ */
+async function bootstrap(opts = {}) {
+  const hooks = opts.hooks || {};
+  const config = opts.config || loadConfig(DEFAULT_ENV_PATH);
   logger.info({ tunnelIp: config.tunnelIp, apiPort: config.apiPort, proxyPort: config.proxyPort }, 'Starting GateControl Home Gateway');
 
   // 1. Bring up WireGuard
   await wireguard.writeConfAndBringUp(config);
+  hooks.onStage?.('wg_up');
 
   // 1b. Edge-Container (optional, docs/edge.md): Gateway-Socket für den
   //     Edge-Container (Relay zum Server, Pakete, gc.lan/mDNS/MQTT per RPC)
@@ -115,6 +122,7 @@ async function bootstrap() {
   store.on('change', async ({ cfg, hash }) => {
     logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length }, 'Applying new config');
     try { featureMgr.apply(cfg.features); } catch (err) { logger.warn({ err: err.message }, 'features: apply failed'); }
+    try { hooks.onConfig?.(cfg); } catch (err) { logger.warn({ err: err.message }, 'setup page: config not applied'); }
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
     await egressMgr.setRoutes(cfg.egress_routes || []);
@@ -216,6 +224,7 @@ async function bootstrap() {
     serverUrl: config.serverUrl,
     apiToken: config.apiToken,
     intervalMs: config.heartbeatIntervalS * 1000,
+    onResult: hooks.onHeartbeat,
     getHealth: async () => {
       // reconcile=true: the heartbeat tick doubles as the self-heal driver —
       // a detected L4 listener deficit (bind failed, config hash unchanged →
@@ -242,6 +251,14 @@ async function bootstrap() {
       health.telemetry.edge = edgeLink.telemetry();
       // Phase 3a: capabilities, Zustand je Funktion (Karte „Funktionen“), USV, RAM des Prozesses
       try { Object.assign(health.telemetry, featureMgr.telemetry()); } catch (_e) { /* best-effort */ }
+      // Statusseite im Heimnetz (docs/setup-page.md): an/aus und Zustand
+      try {
+        if (hooks.telemetry) {
+          health.telemetry.setup_page = hooks.telemetry();
+          // Capability nur, wenn die Seite wirklich läuft (GC_SETUP_PAGE=off: nicht schaltbar)
+          if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('setup-page');
+        }
+      } catch (_e) { /* best-effort */ }
       health.config_hash = store.currentHash || null;
       return health;
     },
