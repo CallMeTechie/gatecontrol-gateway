@@ -102,15 +102,18 @@ eigene `docker-compose.yml` übernehmen (auf einem Linux-Rechner genügt
 
 **Was der Dienst tut:**
 
-1. Gibt es `/dev/net/tun` schon, meldet er „ist da“ und beendet sich – nichts
-   wird geladen.
+1. Gibt es das Gerät schon (`tun` steht in `/proc/misc`, sobald das Modul
+   geladen ist), meldet er „ist da“ und beendet sich – nichts wird geladen.
 2. Sonst `insmod /lib/modules/tun.ko` (so liegt das Modul auf der Synology;
-   `modprobe` findet es dort meist nicht). Gibt es die Datei nicht (übliches
-   Linux), `modprobe tun`.
-3. Er wartet bis zu 10 Sekunden auf das Gerät. Ist es da: Ende mit Erfolg, das
+   `modprobe` findet es dort meist nicht).
+3. Er wartet bis zu 5 Sekunden auf das Gerät. Ist es da: Ende mit Erfolg, das
    Gateway startet. Sonst steht im Protokoll des Containers `…-tun-loader-1`
    eine Meldung (Deutsch/Englisch) mit dem Weg über den Aufgabenplaner, und
    das Gateway startet nicht – wie ohne den Dienst.
+
+Auf einem Rechner ohne `/lib/modules/tun.ko` (übliches Linux, Raspberry Pi)
+versucht er nur `modprobe tun` und lässt das Gateway in jedem Fall starten –
+dort lädt der Kernel das Modul beim ersten Zugriff ohnehin selbst.
 
 Im Container Manager steht `…-tun-loader-1` danach als **beendet** (Exit-Code
 0) – das ist richtig so, er läuft nur Sekunden. Das Projekt zeigt deshalb
@@ -119,8 +122,8 @@ unter Umständen einen gelben Status, obwohl alles läuft.
 **Rechte:** Der Dienst darf Kernel-Module laden (`cap_add: SYS_MODULE`) – das
 ist ein weitreichendes Recht, deshalb ist alles andere zu: `cap_drop: ALL`,
 kein `privileged`, kein Netz (`network_mode: none`), Dateisystem nur lesbar,
-`no-new-privileges`, `/lib/modules` und `/dev` der NAS nur lesend eingebunden
-(`/dev` nur, um zu sehen, ob das Gerät da ist). Er nutzt das Gateway-Image
+`no-new-privileges`, nur `/lib/modules` der NAS eingebunden, nur lesend (dort
+liegt `tun.ko`). Er nutzt das Gateway-Image
 (kein fremdes Image) mit einem festen Befehl, der in der Compose-Datei steht.
 
 **Nach einem Neustart der NAS:** Docker startet die Container dann selbst –

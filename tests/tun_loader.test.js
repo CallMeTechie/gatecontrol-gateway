@@ -27,16 +27,17 @@ function script() {
   assert.ok(start > 0, 'Skriptblock gefunden');
   const out = [];
   for (let i = start + 1; i < ls.length && (/^ {8}/.test(ls[i]) || ls[i].trim() === ''); i++) out.push(ls[i].slice(8));
+  assert.ok(out.length > 5 && /exit 1/.test(out[out.length - 1]), 'das ganze Skript');
   return out.join('\n').replace(/\$\$/g, '$') + '\n';
 }
 
-// Attrappe: schreibt den Aufruf mit; „lädt“ das Modul, indem sie das Gerät anlegt
-// (Verweis auf /dev/null – ein Zeichengerät, wie /dev/net/tun)
+// Attrappe: schreibt den Aufruf mit; „lädt“ das Modul, indem sie das Gerät in die
+// Liste der misc-Geräte einträgt (/proc/misc: „200 tun“, sobald tun geladen ist)
 const FAKE_TOOL = `#!/bin/sh
 echo "$(basename "$0") $*" >>"$FAKE/calls"
 mode="$(cat "$FAKE/mode")"
 case "$mode" in
-  ok) mkdir -p "$(dirname "$GC_TUN_DEV")" && ln -s /dev/null "$GC_TUN_DEV" ;;
+  ok) echo "200 tun" >>"$GC_TUN_MISC" ;;
   loaded) echo "insmod: can't insert '$1': File exists" >&2; exit 17 ;;
   fail) echo "insmod: can't insert '$1': Operation not permitted" >&2; exit 1 ;;
 esac
@@ -46,17 +47,18 @@ function run({ device = false, ko = true, mode = 'ok' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gw-tun-'));
   const bin = path.join(dir, 'bin');
   const fake = path.join(dir, 'fake');
-  fs.mkdirSync(bin); fs.mkdirSync(fake); fs.mkdirSync(path.join(dir, 'dev'));
+  fs.mkdirSync(bin); fs.mkdirSync(fake);
   for (const t of ['insmod', 'modprobe']) fs.writeFileSync(path.join(bin, t), FAKE_TOOL, { mode: 0o755 });
   fs.writeFileSync(path.join(fake, 'mode'), mode);
   fs.writeFileSync(path.join(fake, 'calls'), '');
-  const dev = path.join(dir, 'dev', 'net', 'tun');
-  if (device) { fs.mkdirSync(path.dirname(dev)); fs.symlinkSync('/dev/null', dev); }
+  // wie /proc/misc: andere Geräte stehen immer drin, auch eines mit ähnlichem Namen
+  const misc = path.join(dir, 'misc');
+  fs.writeFileSync(misc, ' 59 memory_bandwidth\n229 fuse\n 58 tunnel6\n' + (device ? '200 tun\n' : ''));
   const koPath = path.join(dir, 'tun.ko');
   if (ko) fs.writeFileSync(koPath, '');
   const r = spawnSync('/bin/sh', ['-c', script()], {
     encoding: 'utf8',
-    env: { PATH: `${bin}:${process.env.PATH}`, FAKE: fake, GC_TUN_DEV: dev, GC_TUN_KO: koPath, GC_TUN_WAIT: '1' },
+    env: { PATH: `${bin}:${process.env.PATH}`, FAKE: fake, GC_TUN_MISC: misc, GC_TUN_KO: koPath, GC_TUN_WAIT: '1' },
   });
   const calls = fs.readFileSync(path.join(fake, 'calls'), 'utf8').split('\n').filter(Boolean);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -76,11 +78,14 @@ describe('tun-loader: das Skript des Dienstes', () => {
     assert.deepEqual(r.calls, [`insmod ${r.koPath}`]);
     assert.match(r.out, /ist bereit \/ is ready/);
   });
-  it('Gerät fehlt, kein tun.ko (übliches Linux) → modprobe tun, Erfolg', () => {
-    const r = run({ ko: false });
-    assert.equal(r.status, 0);
-    assert.deepEqual(r.calls, ['modprobe tun']);
-    assert.match(r.out, /ist bereit \/ is ready/);
+  it('kein tun.ko (keine Synology) → modprobe tun; das Gateway darf in jedem Fall starten', () => {
+    for (const mode of ['ok', 'fail']) {
+      const r = run({ ko: false, mode });
+      assert.equal(r.status, 0, mode);
+      assert.deepEqual(r.calls, ['modprobe tun']);
+      assert.match(r.out, /keine Synology.*not a Synology/);
+      assert.doesNotMatch(r.out, /FEHLER|ERROR/);
+    }
   });
   it('Laden scheitert → Meldung DE/EN mit dem bisherigen Weg, Exit ≠ 0', () => {
     const r = run({ mode: 'fail' });
@@ -117,7 +122,7 @@ describe('tun-loader: der Dienst in docker-compose.tun-loader.yml', () => {
     has(/\n {6}- no-new-privileges:true\n/);
     assert.doesNotMatch(SERVICE, /privileged|MKNOD|SYS_ADMIN|docker\.sock/);
     const mounts = SERVICE.split('\n').filter((l) => /^ {6}- \//.test(l) && !/\/bin\/sh/.test(l)).map((l) => l.trim().split(/\s+/)[1]);
-    assert.deepEqual(mounts, ['/lib/modules:/lib/modules:ro', '/dev:/host/dev:ro']);
+    assert.deepEqual(mounts, ['/lib/modules:/lib/modules:ro']);
   });
   it('dasselbe Image wie das Gateway (kein fremdes Image)', () => {
     has(/\n {4}image: ghcr\.io\/callmetechie\/gatecontrol-gateway:latest\n/);

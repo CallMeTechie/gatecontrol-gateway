@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # docker-compose.tun-loader.yml gegen einen echten Docker-Daemon (CI-Job tun-loader):
 #   1. Syntax: docker compose config mit docker-compose.example.yml
-#   2. Gerät ist da (auf dem Runner gibt es /dev/net/tun) → Exit 0, nichts geladen
+#   2. Gerät ist da (auf dem Runner steht tun in /proc/misc) → Exit 0, nichts geladen
 #   3. Laden mit genau den Rechten des Dienstes (cap_drop ALL + SYS_MODULE, kein Netz,
 #      nur lesbar, no-new-privileges): das Skript lädt per insmod ein harmloses
 #      Modul des Runners (dummy) – tun selbst ist dort fest im Kernel.
@@ -33,7 +33,7 @@ dc config -q
 dc config --services | grep -qx tun-loader
 
 echo "== 2. /dev/net/tun ist da"
-[ -c /dev/net/tun ] || { echo "der Runner hat kein /dev/net/tun" >&2; exit 1; }
+grep -Eq '^[[:space:]]*[0-9]+[[:space:]]+tun$' /proc/misc || { echo "der Runner hat kein tun in /proc/misc" >&2; exit 1; }
 out="$(dc run -T --rm --no-deps tun-loader 2>&1)" || { echo "$out"; echo "Exit != 0, obwohl das Gerät da ist" >&2; exit 1; }
 echo "$out"
 grep -q "nothing to load" <<<"$out"
@@ -51,7 +51,7 @@ esac
 chmod -R a+rX "$WORK"
 sudo rmmod dummy 2>/dev/null || true
 if lsmod | grep -q '^dummy '; then echo "dummy ließ sich nicht entladen" >&2; exit 1; fi
-load() { dc "$@" run -T --rm --no-deps -v "$WORK/mod:/mod:ro" -e GC_TUN_KO=/mod/dummy.ko -e GC_TUN_DEV=/host/dev/gc-tun-test-none -e GC_TUN_WAIT=1 tun-loader 2>&1; }
+load() { dc "$@" run -T --rm --no-deps -v "$WORK/mod:/mod:ro" -e GC_TUN_KO=/mod/dummy.ko -e GC_TUN_MISC=/dev/null -e GC_TUN_WAIT=1 tun-loader 2>&1; }
 
 echo "-- Gegenprobe zuerst: ohne SYS_MODULE"
 out="$(load -f "$WORK/nocap.yml")" && { echo "$out"; echo "Exit 0 ohne Gerät" >&2; exit 1; }
@@ -59,7 +59,7 @@ echo "$out"
 if lsmod | grep -q '^dummy '; then echo "Modul ohne SYS_MODULE geladen?!" >&2; exit 1; fi
 
 echo "-- mit den Rechten des Dienstes"
-# das Gerät dieses Laufs gibt es nie → Exit 1 mit der Meldung; geladen sein muss das Modul trotzdem
+# für diesen Lauf ist die Geräteliste leer (/dev/null) → Exit 1 mit der Meldung; geladen sein muss das Modul trotzdem
 out="$(load)" && { echo "$out"; echo "Exit 0 ohne Gerät" >&2; exit 1; }
 echo "$out"
 grep -q "FEHLER: " <<<"$out"
