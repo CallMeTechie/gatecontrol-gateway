@@ -37,23 +37,27 @@ oder dunkel nach System. Sie lädt nichts von außen.
   höchstens 10 Minuten; ein „noch nicht gültiges“ oder „abgelaufenes“
   Zertifikat zählt als falsche Uhr. Ohne Internet bleibt sie „noch nicht
   geprüft“ und sperrt nicht.
-- **VPN-Gerät vorhanden** – `/dev/net/tun` lässt sich öffnen (fehlt nur der
-  Geräteknoten im Container, legt das Gateway ihn an) oder der Kernel kann
-  WireGuard selbst.
+- **VPN-Gerät vorhanden** – `/dev/net/tun` lässt sich öffnen oder der Kernel
+  kann WireGuard selbst. Das Gateway legt das Gerät nicht selbst an.
 - **Ordner config beschreibbar** – echte Schreibprobe.
 
 Geprüft wird nur, während jemand die Seite offen hat.
 
-**Synology, „VPN-Gerät fehlt“:** DSM stellt `/dev/net/tun` erst bereit, wenn
-das Modul `tun` geladen ist. Ohne SSH: Systemsteuerung › Aufgabenplaner ›
-Erstellen › Ausgelöste Aufgabe › Benutzerdefiniertes Skript, Benutzer `root`,
-Ereignis „Hochfahren“, Befehl `insmod /lib/modules/tun.ko`; Aufgabe markieren
-und „Ausführen“. Die Seite zeigt diese Schritte nur auf einer Synology. Damit
-der Container in diesem Zustand überhaupt startet, erlaubt die Compose-Datei
-das Gerät per Regel (`device_cgroup_rules: 'c 10:200 rwm'`, dazu `MKNOD`)
-statt mit `devices: /dev/net/tun` – mit `devices` verweigert Docker den Start,
-solange das Gerät am Host fehlt. Ältere Compose-Dateien mit `devices` laufen
-unverändert weiter.
+**„VPN-Gerät fehlt“:** Die Compose-Datei bindet das Gerät wie bisher mit
+`devices: - /dev/net/tun:/dev/net/tun` ein. Die Meldung erscheint, wenn der
+Container läuft, das Gerät aber fehlt oder nicht nutzbar ist – etwa in einem
+Proxmox-LXC ohne durchgereichtes Gerät, bei einer eigenen Compose-Datei ohne
+`devices` oder wenn das Modul `tun` am Rechner nicht geladen ist
+(`sudo modprobe tun`).
+
+**Synology:** Dort hilft die Seite bei diesem Punkt **nicht** – fehlt
+`/dev/net/tun` am Host, startet Docker den Container gar nicht erst (Meldung
+mit `/dev/net/tun` im Container Manager), und die Seite ist nicht erreichbar.
+Das Modul lädst du vor dem Start des Projekts, ohne SSH: Systemsteuerung ›
+Aufgabenplaner › Erstellen › Ausgelöste Aufgabe › Benutzerdefiniertes Skript,
+Benutzer `root`, Ereignis „Hochfahren“, Befehl `insmod /lib/modules/tun.ko`;
+Aufgabe markieren und „Ausführen“. Auf vielen Geräten (z. B. DS918+, DS218+)
+ist das Gerät ohnehin da.
 
 **„Ordner config nicht beschreibbar“:** In älteren Compose-Dateien steht
 `./config:/config:ro`. Für die Einrichtungsseite das `:ro` entfernen und das

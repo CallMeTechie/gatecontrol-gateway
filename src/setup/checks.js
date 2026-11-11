@@ -80,23 +80,12 @@ async function kernelWireguard({ exec = run } = {}) {
 }
 
 /**
- * /dev/net/tun benutzbar? Fehlt nur der Geräteknoten im Container (Compose mit
- * `device_cgroup_rules` statt `devices`), wird er angelegt. Öffnen ohne ioctl
- * ändert nichts; ENODEV heißt: Modul `tun` nicht geladen.
+ * /dev/net/tun benutzbar? Öffnen ohne ioctl ändert nichts; ENOENT heißt: das
+ * Gerät ist nicht in den Container eingebunden, ENODEV: Modul `tun` nicht
+ * geladen. Angelegt oder verändert wird hier nichts.
  */
-async function tunUsable({ dev = '/dev/net/tun', exec = run, fsImpl = fs } = {}) {
-  const open = () => {
-    try { fsImpl.closeSync(fsImpl.openSync(dev, 'r+')); return true; } catch (err) { return err.code; }
-  };
-  let r = open();
-  if (r === 'ENOENT') {
-    try { fsImpl.mkdirSync(path.dirname(dev), { recursive: true }); } catch { /* /dev nicht beschreibbar */ }
-    if (await exec('mknod', [dev, 'c', '10', '200'])) {
-      try { fsImpl.chmodSync(dev, 0o600); } catch { /* best effort */ }
-      r = open();
-    }
-  }
-  return r === true;
+async function tunUsable({ dev = '/dev/net/tun', fsImpl = fs } = {}) {
+  try { fsImpl.closeSync(fsImpl.openSync(dev, 'r+')); return true; } catch { return false; }
 }
 
 /** VPN-Gerät: Kernel-WireGuard oder /dev/net/tun für wireguard-go. */

@@ -82,10 +82,6 @@ async function main() {
       process.removeListener('SIGINT', quit);
     }
   }
-  // Compose-Dateien mit `device_cgroup_rules` statt `devices: /dev/net/tun`:
-  // der Geräteknoten wird im Container angelegt, falls er fehlt (best effort –
-  // mit Kernel-WireGuard braucht ihn niemand).
-  try { await require('./setup/checks').tunUsable(); } catch (_e) { /* wg-quick meldet es */ }
   try {
     ctx = await bootstrap({ config: config || undefined, hooks: setup ? setup.controller.hooks : undefined });
     logger.info('Gateway running');

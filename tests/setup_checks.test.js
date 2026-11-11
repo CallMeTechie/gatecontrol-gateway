@@ -48,23 +48,19 @@ describe('setup page: self checks', () => {
     assert.deepEqual(await checkVpnDevice({ tunUsable: async () => false, kernelWireguard: async () => false }), { ok: false, via: null });
   });
 
-  it('creates the missing device node (compose with device_cgroup_rules) and reports a missing module', async () => {
+  it('/dev/net/tun: usable when it opens; a missing device or module is reported, nothing is created', async () => {
+    const ok = { openSync: () => 3, closeSync: () => {} };
+    assert.equal(await tunUsable({ fsImpl: ok }), true);
     const calls = [];
-    let exists = false;
-    const fsImpl = {
-      openSync: () => { if (!exists) throw Object.assign(new Error('x'), { code: 'ENOENT' }); return 3; },
-      closeSync: () => {}, mkdirSync: () => {}, chmodSync: () => {},
-    };
-    const exec = async (cmd, args) => { calls.push([cmd, ...args].join(' ')); exists = true; return true; };
-    assert.equal(await tunUsable({ dev: '/dev/net/tun', exec, fsImpl }), true);
-    assert.deepEqual(calls, ['mknod /dev/net/tun c 10 200']);
-
-    // Knoten da, Modul nicht geladen (Synology vor insmod): ENODEV
-    const noModule = { openSync: () => { throw Object.assign(new Error('x'), { code: 'ENODEV' }); }, closeSync: () => {} };
-    assert.equal(await tunUsable({ exec: async () => { throw new Error('no mknod'); }, fsImpl: noModule }), false);
-    // mknod nicht erlaubt
-    const missing = { openSync: () => { throw Object.assign(new Error('x'), { code: 'ENOENT' }); }, closeSync: () => {}, mkdirSync: () => {} };
-    assert.equal(await tunUsable({ exec: async () => false, fsImpl: missing }), false);
+    const failing = (code) => ({
+      openSync: () => { throw Object.assign(new Error('x'), { code }); }, closeSync: () => {},
+      mkdirSync: () => calls.push('mkdir'), chmodSync: () => calls.push('chmod'), writeFileSync: () => calls.push('write'),
+    });
+    // Gerät nicht in den Container eingebunden / Modul nicht geladen
+    assert.equal(await tunUsable({ fsImpl: failing('ENOENT') }), false);
+    assert.equal(await tunUsable({ fsImpl: failing('ENODEV') }), false);
+    assert.deepEqual(calls, [], 'the gateway never creates the device node itself');
+    assert.doesNotMatch(require('node:fs').readFileSync(require.resolve('../src/setup/checks'), 'utf8'), /mknod/);
   });
 
   it('config folder: real write probe, nothing left behind', () => {

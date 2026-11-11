@@ -22,7 +22,7 @@
       c_clock_help: 'Die Uhr des Geräts geht falsch. Stelle Datum und Uhrzeit ein oder schalte den Abgleich mit einem Zeitserver ein.',
       c_clock_help_syno: 'Die Uhr der Synology geht falsch. Systemsteuerung › Regionale Optionen › Zeit: mit einem Zeitserver synchronisieren.',
       c_tun_ok: 'VPN-Gerät vorhanden', c_tun_bad: 'VPN-Gerät fehlt',
-      c_tun_help_syno: 'Die Synology stellt /dev/net/tun erst nach einem Befehl bereit.',
+      c_tun_help_syno: 'Dem Container fehlt /dev/net/tun. Die Synology stellt das Gerät erst nach einem Befehl bereit, und die Compose-Datei muss es einbinden.',
       c_tun_help: 'Das Gateway braucht das Gerät /dev/net/tun des Rechners.',
       c_config_ok: 'Ordner config beschreibbar', c_config_bad: 'Ordner config nicht beschreibbar',
       c_config_help: 'Das Gateway kann die Zugangsdaten nicht speichern.',
@@ -31,6 +31,7 @@
       fix_dsm_2: 'Benutzer {root}, Ereignis {boot}', fix_dsm_boot: 'Hochfahren',
       fix_dsm_3: 'Befehl: {cmd}',
       fix_dsm_4: 'Aufgabe markieren und „Ausführen“ wählen',
+      fix_dsm_5: 'In der Compose-Datei muss beim Dienst gateway unter {devices} stehen: {line} – dann das Projekt im Container Manager neu erstellen',
       fix_tun: 'So behebst du das',
       fix_tun_1: 'Auf dem Rechner das Modul laden: {cmd}',
       fix_tun_2: 'In der Compose-Datei beim Dienst gateway unter {devices} eintragen: {line}',
@@ -91,7 +92,7 @@
       c_clock_help: 'The clock of the device is wrong. Set date and time or switch on time synchronisation.',
       c_clock_help_syno: 'The clock of the Synology is wrong. Control Panel › Regional Options › Time: synchronise with a time server.',
       c_tun_ok: 'VPN device present', c_tun_bad: 'VPN device missing',
-      c_tun_help_syno: 'The Synology only provides /dev/net/tun after a command.',
+      c_tun_help_syno: 'The container lacks /dev/net/tun. The Synology only provides the device after a command, and the compose file has to pass it in.',
       c_tun_help: 'The gateway needs the device /dev/net/tun of the host.',
       c_config_ok: 'Folder config writable', c_config_bad: 'Folder config not writable',
       c_config_help: 'The gateway cannot store the access data.',
@@ -100,6 +101,7 @@
       fix_dsm_2: 'User {root}, event {boot}', fix_dsm_boot: 'Boot-up',
       fix_dsm_3: 'Command: {cmd}',
       fix_dsm_4: 'Select the task and choose “Run”',
+      fix_dsm_5: 'In the compose file the service gateway needs under {devices}: {line} – then recreate the project in Container Manager',
       fix_tun: 'How to fix this',
       fix_tun_1: 'Load the module on the host: {cmd}',
       fix_tun_2: 'In the compose file, add to the service gateway under {devices}: {line}',
@@ -321,7 +323,8 @@
           h('li', { text: t('fix_dsm_1') }),
           h('li', {}, rich('fix_dsm_2', { root: 'root', boot: t('fix_dsm_boot') })),
           h('li', {}, rich('fix_dsm_3', { cmd: 'insmod /lib/modules/tun.ko' })),
-          h('li', { text: t('fix_dsm_4') })
+          h('li', { text: t('fix_dsm_4') }),
+          h('li', {}, rich('fix_dsm_5', { devices: 'devices:', line: '- /dev/net/tun:/dev/net/tun' }))
         ])]));
       } else {
         out.push(h('div', { class: 'note help' }, [h('b', { text: t('fix_tun') }), h('ol', {}, [

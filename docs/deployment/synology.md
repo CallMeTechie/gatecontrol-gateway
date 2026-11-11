@@ -51,9 +51,16 @@
    Im Browser im Heimnetz `http://<Adresse der Synology>:8642` öffnen,
    Serveradresse und Einrichtungscode eingeben, „Verbinden“. Die Seite zeigt
    jeden Schritt; nach etwa einer Minute ist das Gateway online, und der
-   Assistent in GateControl geht von selbst weiter. Fehlt etwas – auf der
-   Synology meist das Gerät `/dev/net/tun` –, sagt die Seite, was zu tun ist,
-   ohne SSH. Einzelheiten: [Einrichtungsseite](../setup-page.md).
+   Assistent in GateControl geht von selbst weiter. Fehlt etwas (kein
+   Internet, falsche Uhrzeit, Ordner `config` nicht beschreibbar), sagt die
+   Seite, was zu tun ist. Einzelheiten: [Einrichtungsseite](../setup-page.md).
+
+   **Startet das Projekt nicht und die Meldung nennt `/dev/net/tun`**, fehlt
+   der NAS das Gerät – dann gibt es auch die Seite noch nicht. Ohne SSH:
+   Systemsteuerung › Aufgabenplaner › Erstellen › Ausgelöste Aufgabe ›
+   Benutzerdefiniertes Skript, Benutzer `root`, Ereignis „Hochfahren“, Befehl
+   `insmod /lib/modules/tun.ko`; Aufgabe markieren, „Ausführen“, Projekt
+   starten.
 
    **Bisheriger Weg:** Im Assistenten „Lieber die Datei gateway.env
    herunterladen“ – das Paket enthält dann zusätzlich `config/gateway.env`;
@@ -79,7 +86,7 @@
 ## Ältere Projekte (`./config:/config:ro`)
 
 Projekte, die mit einer `gateway.env` eingerichtet wurden, laufen unverändert
-weiter – auch mit `:ro` und mit `devices: /dev/net/tun`. Sie zeigen die
+weiter – auch mit `:ro`. Sie zeigen die
 Statusseite; **verbinden** lässt sich über die Seite dort nicht (sie sagt das
 und verbraucht keinen Code). Wer „Zugang erneuern“ künftig ohne neue Datei
 erledigen will, ersetzt die Compose-Datei einmal durch die aktuelle aus

@@ -46,13 +46,12 @@ services:
       - NET_RAW           # keepalived VRRP + GARP
       - SETGID            # keepalived enable_script_security
       - SETUID            # keepalived enable_script_security
-      - MKNOD             # /dev/net/tun im Container anlegen (device_cgroup_rules)
     # security_opt.no-new-privileges bewusst NICHT gesetzt — siehe
     # docker-compose.example.yml (wg-quick braucht ambient NET_ADMIN).
     read_only: true
     user: "0:0"
-    device_cgroup_rules:
-      - 'c 10:200 rwm'    # /dev/net/tun (wie docker-compose.example.yml)
+    devices:
+      - /dev/net/tun:/dev/net/tun
     tmpfs:
       - /tmp
       - /run
