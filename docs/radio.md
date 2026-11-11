@@ -90,7 +90,7 @@ Management-API (über den Tunnel, `X-Gateway-Token`):
 | `POST /api/radio/zigbee/unlock {}` | 202 – deCONZ nimmt 60 s lang neue Schlüssel an (Smart-Home-Plugin) |
 | `POST /api/radio/zigbee/retry {}` | 202 – Schlüssel neu holen |
 | `POST /api/radio/zigbee/remove { ieee }` | zigbee2mqtt: 202; 400; 404 `not_found`; 409 `not_running` – Gerät abmelden (`bridge/request/device/remove`) |
-| `POST /api/radio/zigbee/set { ieee, set }` | zigbee2mqtt: 202; 400 (`invalid_request`: Gerät kann das nicht); 404; 409 – `set` `{ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, cover, pos }` → `zigbee2mqtt/<Name>/set` |
+| `POST /api/radio/zigbee/set { ieee, set }` | zigbee2mqtt: 202; 400 (`invalid_request`: Gerät kann das nicht); 404; 409 – `set` `{ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, cover, pos }` → `zigbee2mqtt/<Name>/set`; ein Kanal `{ on, channel }` (→ `state_<Kanal>`), ein Thermostat `{ setpoint, mode }`; `{ ota: check \| update }` → `zigbee2mqtt/bridge/request/device/ota_update/…` |
 | `POST /api/radio/thread/form { name? }` | 202; 409 `not_running` \| `has_network` – neues Thread-Netz (Rest zufällig) |
 | `POST /api/radio/thread/join { dataset }` | 202; 400; 409 – aktiver Datensatz eines anderen Border Routers (TLV-Hex), nie im Log |
 | `POST /api/radio/thread/dataset {}` | 200 `{ dataset }` (TLV-Hex, `Cache-Control: no-store`); 409 `not_running` \| `no_network` – für Matter-Controller, nie in der Telemetrie |
@@ -142,16 +142,37 @@ Adapter und MQTT-Zugang über Umgebungsvariablen (`ZIGBEE2MQTT_CONFIG_*`).
 * **Geräte:** aus `zigbee2mqtt/bridge/devices` (≤ 128, ohne Koordinator), Art
   (`light`, `plug`, `cover`, `sensor`, `remote`, `other`) und Fähigkeiten
   (`bri`, `ct`, `color: xy|hs`, `position`, `power`, `battery`) aus
-  `definition.exposes`, nur der erste Kanal; Zustände aus `zigbee2mqtt/<Name>`
+  `definition.exposes`; Zustände aus `zigbee2mqtt/<Name>`
   mit denselben Wertnamen wie die Bluetooth-Sensoren (`temperature`, `humidity`,
   `opening` = `!contact`, `motion`, `moisture_wet` …) plus `on`, `bri` (0–100),
   `ct`, `pos`. Neu angelernte Geräte aus `bridge/event` (`device_joined`,
   `device_interview`) als `recent`.
+* **Mehrere Kanäle** (2-/3-fach-Schalter: `exposes` vom Typ `switch`/`light`
+  mit `endpoint` und `state_<endpoint>`): ab zwei Kanälen `caps.channels`
+  (`["l1","l2"]`, höchstens 8, Namen `[a-z0-9_]{1,8}`) und `values.ch`
+  (`{ l1: true, l2: false }`); `on` bleibt der erste Kanal. Geschaltet wird ein
+  Kanal mit `set { on, channel }`; Helligkeit und Farbe nur für den ersten.
+* **Thermostate** (`exposes` vom Typ `climate` mit
+  `occupied_heating_setpoint` oder `current_heating_setpoint`): Art `climate`,
+  `caps.setpoint { min, max, step }` (ohne Angabe 5–30 °C in 0,5-Schritten),
+  `caps.modes` (aus `system_mode`: `off`, `heat`, `auto`, `cool`, `fan_only`,
+  `dry`); Werte `temperature` (`local_temperature`), `setpoint`, `mode`,
+  `heating` (`running_state`, sonst `pi_heating_demand > 0`), `valve`.
+  `set { setpoint, mode }` – das Soll wird auf Grenzen und Schrittweite gebracht.
+* **OTA-Updates:** `caps.ota`, wenn die Definition `supports_ota` hat;
+  `values.ota { state: idle|available|updating|scheduled, progress (ganze %),
+  installed, latest, checked, error: check_failed|update_failed }` aus dem
+  Feld `update` des Geräts (älter: `update_available`). `set { ota: "check" }`
+  bzw. `"update"` geht an `bridge/request/device/ota_update/check|update`
+  (`{ id: <IEEE> }`); die Antwort (`bridge/response/…`) setzt `checked` bzw.
+  `error`. Während eines Updates geht ein Bericht je ganzem Prozent raus.
 * **Bericht** `POST /api/v1/gateway/radio/zigbee { stack, reportedAt, devices }`
   bei Änderung höchstens alle 5 s, sonst alle 5 Min. Das Smart-Home-Plugin
   schaltet über den Server (`/api/radio/zigbee/set`).
-* **Nicht dabei:** die Weboberfläche von zigbee2mqtt, OTA-Updates, Gruppen,
-  Bindungen, mehrkanalige Geräte über den ersten Kanal hinaus, Thermostate.
+* **Nicht dabei:** die Weboberfläche von zigbee2mqtt, Gruppen, Bindungen,
+  Helligkeit/Farbe je Kanal eines mehrkanaligen Geräts, Zeitpläne und
+  Voreinstellungen (`preset`) von Thermostaten, geplante OTA-Updates
+  (`ota_update/schedule`).
 
 ## Thread (OpenThread Border Router)
 
