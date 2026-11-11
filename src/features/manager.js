@@ -31,7 +31,9 @@ const logger = require('../logger');
 // print-ocr / print-office / print-media: Texterkennung, Office-Dateien, Papier und Fach (docs/print.md)
 // radio-stacks: Funk mit zigbee2mqtt, Thread Border Router und Schlüsseln verschlüsselter Sensoren (docs/radio.md)
 // radio-stick-assign: Funksticks von Hand Zigbee/Thread/„nicht verwenden“ zuordnen (features.radio.sticks, docs/radio.md)
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras']);
+// ipv6-lan: Heimnetz ohne IPv4 – meldet lan_ip6/lan_subnets6 (ULA), USV-Server auch unter einer privaten IPv6-Adresse
+// speed-volume: Speedtests halten features.inetq.speedVolume ein (Tagesbudget im State-Verzeichnis, Deckel je Richtung)
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';

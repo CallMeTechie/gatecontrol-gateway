@@ -38,3 +38,26 @@ test('collectTelemetry exposes lan_ip — private IPv4 or null, never loopback/p
     assert.ok(!t.lan_ip.startsWith('127.'), 'never loopback');
   }
 });
+
+test('collectTelemetry exposes lan_ip6 / lan_subnets6 — unique local addresses (fc00::/7) only', () => {
+  const { collectTelemetry } = require('../src/health/telemetry');
+  const { isUlaIpv6 } = require('../src/discovery/lanInterfaces');
+  const t = collectTelemetry();
+  assert.ok('lan_ip6' in t && Array.isArray(t.lan_subnets6));
+  if (t.lan_ip6 !== null) assert.ok(isUlaIpv6(t.lan_ip6), t.lan_ip6);
+  for (const s of t.lan_subnets6) {
+    assert.equal(typeof s.iface, 'string');
+    assert.match(s.cidr, /^f[cd][0-9a-f:]*\/\d{2,3}$/);
+  }
+  // mdns_name comes from the heartbeat (bootstrap), not from collectTelemetry — no socket here
+  assert.equal('mdns_name' in t, false);
+});
+
+test('telemetry.runtime: container (Docker/Podman) or native (Proxmox LXC installer, no edge container)', () => {
+  const { collectTelemetry, runtimeKind } = require('../src/health/telemetry');
+  assert.equal(runtimeKind((f) => f === '/.dockerenv'), 'container');
+  assert.equal(runtimeKind((f) => f === '/run/.containerenv'), 'container');
+  assert.equal(runtimeKind(() => false), 'native');
+  assert.equal(runtimeKind(() => { throw new Error('EACCES'); }), null);
+  assert.ok(['container', 'native'].includes(collectTelemetry().runtime));
+});

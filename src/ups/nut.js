@@ -2,14 +2,15 @@
 
 // USV-Zustand über einen NUT-Server (Network UPS Tools, TCP 3493), z. B. die
 // Synology (Vertrag Phase 3a, Abschnitt 5). Nur lesende Befehle ohne
-// Anmeldung: `LIST UPS`, `LIST VAR <ups>`. Ziel nur RFC 1918. Alle 30 s;
-// Ergebnis geht als `telemetry.ups` mit dem Heartbeat an den Server.
+// Anmeldung: `LIST UPS`, `LIST VAR <ups>`. Ziel nur im Heimnetz: RFC 1918 oder
+// – in einem Netz ohne IPv4 – eine private IPv6-Adresse (ULA, fc00::/7). Alle
+// 30 s; Ergebnis geht als `telemetry.ups` mit dem Heartbeat an den Server.
 
 const net = require('node:net');
 const dns = require('node:dns');
 const logger = require('../logger');
 const { FeatureStatus, loop } = require('../features/status');
-const { isPrivateIpv4 } = require('../discovery/lanInterfaces');
+const { isPrivateIpv4, isUlaIpv6 } = require('../discovery/lanInterfaces');
 
 const INTERVAL_MS = 30_000;
 const TIMEOUT_MS = 5_000;
@@ -106,9 +107,18 @@ function openSession({ host, port, timeoutMs = TIMEOUT_MS, connect = net.createC
 }
 
 async function resolvePrivate(host, lookup) {
+  if (net.isIPv6(host)) {
+    if (!isUlaIpv6(host)) throw new NutError('not_private');
+    return host;
+  }
   let ip = host;
   if (!net.isIPv4(host)) {
-    try { ip = (await lookup(host, { family: 4 })).address; } catch (_e) { throw new NutError('connect'); }
+    try { ip = (await lookup(host, { family: 4 })).address; } catch (_e) {
+      // kein A-Eintrag: ein Heimnetz ohne IPv4 – dann zählt der AAAA-Eintrag (nur ULA)
+      try { ip = (await lookup(host, { family: 6 })).address; } catch (_e2) { throw new NutError('connect'); }
+      if (!isUlaIpv6(ip)) throw new NutError('not_private');
+      return ip;
+    }
   }
   if (!isPrivateIpv4(ip)) throw new NutError('not_private');
   return ip;

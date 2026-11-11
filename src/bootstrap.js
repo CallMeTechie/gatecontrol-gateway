@@ -25,6 +25,7 @@ const { createLanScanRouter } = require('./api/routes/lanScan');
 const { createSelfCheckRunner } = require('./health/selfCheckRunner');
 const { tcpProbe } = require('./health/selfCheck');
 const { collectTelemetry, defaultGatewayIp } = require('./health/telemetry');
+const { MdnsNameProbe } = require('./health/mdnsName');
 const { sendMagicPacket, waitForReachable } = require('./wol');
 const { startHeartbeatTicker } = require('./heartbeat');
 const { computeConfigHash: libComputeHash } = require('@callmetechie/gatecontrol-config-hash');
@@ -210,6 +211,10 @@ async function bootstrap() {
   }
   poller.start();
 
+  // mDNS name of this host ("pi-keller.local") — reported only once it really
+  // answers in the LAN (health/mdnsName.js); asked again every few minutes.
+  const mdnsName = new MdnsNameProbe({ getInterface: () => _primaryLanIp(defaultGatewayIp()), logger });
+
   // 8. Heartbeat LAST — so if an earlier step throws, the ticker is never
   //    started and shutdown handler needn't defend against undefined ctx.hb.
   const hb = startHeartbeatTicker({
@@ -236,6 +241,8 @@ async function bootstrap() {
       // every heartbeat; server persists the whole payload into
       // gateway_meta.last_health and the admin UI pulls what it needs.
       health.telemetry = collectTelemetry();
+      // null until the name answers; an older server ignores the field
+      try { health.telemetry.mdns_name = mdnsName.current(); } catch (_e) { health.telemetry.mdns_name = null; }
       health.telemetry.scan_egress_listeners = egressMgr.getStatus();
       try { health.telemetry.scan_egress_near = await nearMgr.getStatus(store.egressRoutes); } catch (_e) { /* best-effort */ }
       // Edge-Container: Zusammenfassung (null = kein Edge-Dienst); Abgleich läuft im eigenen 30-s-Takt

@@ -21,7 +21,7 @@ describe('normalizeFeatures', () => {
     const f = normalizeFeatures({});
     assert.equal(f.received, true);
     assert.deepEqual(f.netwatch, { enabled: true, portscan: true });
-    assert.deepEqual(f.inetq, { enabled: true, speedtest: '4x', targets: ['1.1.1.1', '9.9.9.9'] });
+    assert.deepEqual(f.inetq, { enabled: true, speedtest: '4x', targets: ['1.1.1.1', '9.9.9.9'], speedVolume: { dayBytes: null, downBytes: null, upBytes: null } });
     assert.deepEqual(f.presence, { enabled: true, macs: [], awayAfterSec: 600 });
     assert.equal(f.ups.enabled, false);
   });
@@ -49,11 +49,22 @@ describe('normalizeFeatures', () => {
     assert.equal(normalizeFeatures({ inetq: { speedtest: 'off' } }).inetq.speedtest, 'off');
   });
 
+  it('inetq.speedVolume: volume of the speed tests, checked (missing or odd values → none)', () => {
+    const l = (speedVolume) => normalizeFeatures({ inetq: { speedVolume } }).inetq.speedVolume;
+    assert.deepEqual(l({ dayBytes: 12_000_000_000, downBytes: 200_000_000, upBytes: 200_000_000 }), { dayBytes: 12_000_000_000, downBytes: 200_000_000, upBytes: 200_000_000 });
+    assert.deepEqual(l({ dayBytes: '12', downBytes: 5, upBytes: -1 }), { dayBytes: null, downBytes: null, upBytes: null });
+    assert.deepEqual(l({ dayBytes: 2e12, upBytes: 1.5e6 }), { dayBytes: null, downBytes: null, upBytes: 1_500_000 });
+    assert.deepEqual(l('x'), { dayBytes: null, downBytes: null, upBytes: null });
+  });
+
   it('ups only with a usable host, validates name and port', () => {
     assert.equal(normalizeFeatures({ ups: { enabled: true, host: '' } }).ups.enabled, false);
     assert.equal(normalizeFeatures({ ups: { enabled: true, host: 'bad host;rm' } }).ups.enabled, false);
     const u = normalizeFeatures({ ups: { enabled: true, host: '192.168.1.10', port: 3493, name: 'ups' } }).ups;
     assert.deepEqual(u, { enabled: true, host: '192.168.1.10', port: 3493, name: 'ups' });
+    // Heimnetz ohne IPv4: private IPv6-Adresse (fc00::/7); Link-Local und öffentliche Adressen nicht
+    assert.deepEqual(normalizeFeatures({ ups: { enabled: true, host: 'fd00:1::10' } }).ups, { enabled: true, host: 'fd00:1::10', port: 3493, name: null });
+    for (const host of ['fe80::1', '2a02:8070::5', '::1', 'fd00::1%eth0']) assert.equal(normalizeFeatures({ ups: { enabled: true, host } }).ups.enabled, false, host);
     const v = normalizeFeatures({ ups: { enabled: true, host: 'nas.fritz.box', port: 99999, name: 'a b\nLIST' } }).ups;
     assert.deepEqual(v, { enabled: true, host: 'nas.fritz.box', port: 3493, name: null });
   });

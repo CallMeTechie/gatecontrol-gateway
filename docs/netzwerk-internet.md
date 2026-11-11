@@ -24,7 +24,8 @@ Konfiguration sofort beim nächsten Hash-Vergleich):
 ```js
 features: {
   netwatch: { enabled, portscan },
-  inetq:    { enabled, speedtest: 'off' | '4x' | 'hourly', targets?: ['1.1.1.1', …] },
+  inetq:    { enabled, speedtest: 'off' | '4x' | 'hourly', targets?: ['1.1.1.1', …],
+              speedVolume?: { dayBytes?, downBytes?, upBytes? } },
   presence: { enabled, macs: ['aa:bb:…'], awayAfterSec?: 600 },
   ups:      { enabled, host, port: 3493, name: null | 'ups' },
 }
@@ -34,7 +35,8 @@ features: {
 wie bisher. Alle Werte werden geprüft und begrenzt (`src/features/config.js`):
 MACs normalisiert, höchstens 256; höchstens 4 Messziele (keine Loopback-,
 Null- oder Multicast-Adressen); `awayAfterSec` 60–3600; USV-Name nur
-`[A-Za-z0-9_.-]`.
+`[A-Za-z0-9_.-]`; `speedVolume` nur ganze Zahlen von 1 MB bis 1 TB (sonst gilt
+der Wert als nicht gesetzt).
 
 Hash: ohne `features` der Bibliotheks-Hash wie bisher, mit `features`
 `'sha256:' + sha256(libHash + '\n' + stableJson(features))` (Objektschlüssel
@@ -150,14 +152,38 @@ Plan `4x` = 00/06/12/18 Uhr Ortszeit + Zufallsminute, `hourly` = jede Stunde +
 Zufallsminute, nicht während eines Ausfalls; während des Tests wird nicht
 gemessen. „Jetzt messen“: `POST /api/inetq/speedtest` → 202 / 409
 `speedtest_running` / 503 `feature_disabled`. Volumen: ≈ 10 s × Rate × 2
-(300 Mbit/s ≈ 750 MB); der Server begrenzt auf 3 GB je 24 h (`error: 'budget'`).
+(300 Mbit/s ≈ 750 MB).
 Pi 3 B+: Ethernet hängt am USB 2.0, höchstens ca. 300 Mbit/s.
+
+**Tagesbudget** (`src/inetq/budget.js`, Capability `speed-volume`): das Gateway
+zählt selbst, wie viel Volumen und wie viele Tests in den letzten 24 Stunden
+gelaufen sind – in Stundenfächern in `/state/inetq-budget.json`, also über
+Neustart und Update hinweg (der Server zählt nur im Arbeitsspeicher). Limit:
+`features.inetq.speedVolume.dayBytes`, ohne das Feld (älterer Server) 12 GB wie
+beim Server. Ein Test nimmt sich nie mehr als den Rest (Download höchstens die
+Hälfte davon, Upload was danach bleibt). Sind weniger als 20 MB übrig, startet
+kein Test: das Gateway sendet nichts und meldet dem Server
+`{ at, downMbps: null, upMbps: null, bytes: 0, error: 'budget' }`. Lehnt der
+Server einen Stream mit 429 `budget` ab, wartet das Gateway dessen
+`Retry-After` ab (ohne die Kopfzeile eine Stunde, nie länger als 24 h) – auch
+das steht in der Datei.
+
+**Volumen je Test begrenzen**: `speedVolume.downBytes` / `speedVolume.upBytes`
+deckeln eine Richtung über alle Streams zusammen. Am Deckel endet die
+Richtung vor Ablauf der 10 s; gemessen wird über die Zeit bis dahin, das
+Ergebnis trägt `limited: true`. Der Download ließ sich schon bisher kürzen
+(der Server schickt weniger als verlangt), den Upload bestimmt das Gateway –
+deshalb gilt der Deckel hier für beide Richtungen gleich. Die letzte Anfrage
+einer Richtung verlangt bzw. sendet nur noch den Rest bis zum Deckel.
 
 ## USV (`src/ups/nut.js`)
 
 NUT-Client ohne Anmeldung: `LIST UPS` (wenn kein Name gesetzt: die erste),
-`LIST VAR <name>`, `LOGOUT`. Ziel nur RFC 1918 (auch ein Hostname muss auf eine
-private Adresse auflösen). Ergebnis im Heartbeat:
+`LIST VAR <name>`, `LOGOUT`. Ziel nur im Heimnetz: RFC 1918 oder – Capability
+`ipv6-lan`, für Heimnetze ohne IPv4 – eine private IPv6-Adresse (ULA,
+`fc00::/7`; nie Link-Local, nie öffentlich). Auch ein Hostname muss auf eine
+private Adresse auflösen (A-Eintrag; gibt es keinen, der AAAA-Eintrag).
+Ergebnis im Heartbeat:
 
 ```js
 telemetry.ups = { name, status: 'OL' | 'OB LB' | …, charge, runtimeSec, model, mfr, at }
@@ -179,8 +205,39 @@ Im Heartbeat zusätzlich:
   nächster Portscan; aktuelle Messung, laufender Ausfall, Puffer, nächster und
   letzter Speedtest, Messart icmp/tcp; Anzahl verfolgter und anwesender Geräte;
   USV-Ziel)
+- `features.inetq.speedBudget: { usedBytes, limitBytes, tests, blockedUntil }`
+  – Tagesbudget der Speedtests (s. o.; `null`, solange die Funktion aus ist)
 - `ups` (s. o.)
 - `process_mem: { rss, heapUsed }` des Gateway-Prozesses
+- `mdns_name`: der mDNS-Name des Gateways im Heimnetz, z. B. `pi-keller.local`
+  (`src/health/mdnsName.js`). Gemeldet nur, wenn `<Rechnername>.local` im LAN
+  wirklich mit einer eigenen Adresse antwortet (Avahi/Bonjour des Hosts:
+  Pi-Image, Synology, viele Linux-Rechner) – das Gateway fragt alle 10 Minuten
+  nach; ohne Antwort (Bridge-Netz, kein mDNS-Dienst) `null`.
+- `runtime`: `container` (Docker/Podman) oder `native` (Proxmox-LXC-Installer
+  ohne Docker – dort gibt es keinen Edge-Container, der Server zeigt dazu einen
+  Hinweis)
+- `lan_ip6`, `lan_subnets6: [{ iface, cidr }]` (Capability `ipv6-lan`): die
+  private IPv6-Adresse (ULA, `fc00::/7`) und die ULA-Subnetze des LAN – für
+  Heimnetze ohne IPv4, neben `lan_ip`/`lan_subnets`. Ohne ULA `null` / `[]`.
+
+## Heimnetz nur mit IPv6
+
+Ein Gateway ohne private IPv4-Adresse meldet `lan_ip: null` und
+`lan_subnets: []`. Was dann geht und was nicht:
+
+| Funktion | Stand |
+|---|---|
+| Tunnel und Heartbeat | setzen voraus, dass der Server über IPv6 erreichbar ist (AAAA-Eintrag) – hier unverändert |
+| HTTP- und L4-Routen zu einem Ziel mit IPv6-Adresse | gehen (HTTP: die Adresse steht in der Backend-URL in Klammern – ohne sie kam keine Verbindung zustande) |
+| DNS-Filter, Zwischenspeicher im LAN | lauschen auch auf der ULA-Adresse |
+| Lokale KI im LAN | Adresse auch als ULA (`http://[fd00::20]:11434`) |
+| USV | NUT-Server auch unter einer ULA-Adresse |
+| `lan_ip6` / `lan_subnets6` | gemeldet (der Server erkennt daran „Gerät ist zu Hause“ und gibt den Apps die LAN-Adresse des Zwischenspeichers) |
+| Netzwerk-Wächter, Anwesenheit, LAN-Scan, Portscan | nur IPv4 (ARP, Durchlauf eines Subnetzes – ein /64 lässt sich nicht durchsuchen) |
+| Internetqualität | Messziele und Router nur IPv4 – ohne IPv4-Weg ins Internet zeigt sie einen Ausfall; dort ausschalten |
+| MQTT-Broker, mDNS-Ankündigung, Edge-Plugins im LAN | nur IPv4 |
+| Wake-on-LAN, Drucken & Scannen, Kameras | nur IPv4 |
 
 ## Ortszeit
 

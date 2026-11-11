@@ -127,6 +127,68 @@ describe('InetQuality', () => {
     assert.equal(q.requestSpeedtest(), 'disabled');
   });
 
+  it('speed test budget: counted in the state dir, survives a restart, caps and blocks the next test', async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'iq-'));
+    const seen = [];
+    const run = async (o) => { seen.push({ maxDownBytes: o.maxDownBytes, maxUpBytes: o.maxUpBytes, maxTotalBytes: o.maxTotalBytes }); return { at: o.now(), downMbps: 300, upMbps: 40, bytes: 700_000_000, streams: 4 }; };
+    const a = setup({ stateDir, speedtest: run });
+    a.q.apply({ enabled: true, speedtest: 'off', targets: ['1.1.1.1'], speedVolume: { dayBytes: 1_000_000_000, downBytes: 200_000_000, upBytes: 150_000_000 } });
+    a.q.loop.stop();
+    assert.equal(a.q.requestSpeedtest(), 'accepted');
+    await flush();
+    assert.deepEqual(seen[0], { maxDownBytes: 200_000_000, maxUpBytes: 150_000_000, maxTotalBytes: 1_000_000_000 });
+    assert.deepEqual(a.q.telemetry().speedBudget, { usedBytes: 700_000_000, limitBytes: 1_000_000_000, tests: 1, blockedUntil: null });
+    a.q.stop();
+
+    // Neustart: das Budget kommt aus /state/inetq-budget.json, der nächste Test bekommt nur den Rest
+    const b = setup({ stateDir, speedtest: run });
+    b.q.apply({ enabled: true, speedtest: 'off', targets: ['1.1.1.1'], speedVolume: { dayBytes: 1_000_000_000 } });
+    b.q.loop.stop();
+    assert.equal(b.q.telemetry().speedBudget.usedBytes, 700_000_000);
+    assert.equal(b.q.requestSpeedtest(), 'accepted');
+    await flush();
+    assert.deepEqual(seen[1], { maxDownBytes: null, maxUpBytes: null, maxTotalBytes: 300_000_000 });
+
+    // aufgebraucht: kein Test mehr, dem Server als abgelehnt gemeldet
+    assert.equal(b.q.requestSpeedtest(), 'accepted');
+    await flush();
+    assert.equal(seen.length, 2);
+    assert.equal(b.q.telemetry().lastSpeedtest.error, 'budget');
+    assert.equal(b.q.telemetry().lastSpeedtest.bytes, 0);
+    assert.ok(b.q.telemetry().speedBudget.blockedUntil > b.now());
+    const sent = b.posts.filter((p) => p.body.speedtests.some((x) => x.error === 'budget'));
+    assert.equal(sent.length, 1);
+    // einen Tag später ist wieder Platz
+    b.advance(25 * 3600_000);
+    assert.equal(b.q.telemetry().speedBudget.usedBytes, 0);
+    assert.equal(b.q.requestSpeedtest(), 'accepted');
+    await flush();
+    assert.equal(seen.length, 3);
+  });
+
+  it('speed test budget: without a limit from the server 12 GB a day; a refusal of the server pauses the tests', async () => {
+    let n = 0;
+    const { q, advance } = setup({ speedtest: async (o) => {
+      n++;
+      const r = { at: o.now(), downMbps: null, upMbps: null, bytes: 0, streams: 4, error: 'budget' };
+      Object.defineProperty(r, 'refused', { value: { retryAfterS: 7200 }, enumerable: false });
+      return r;
+    } });
+    q.apply({ enabled: true, speedtest: 'off', targets: ['1.1.1.1'] });
+    q.loop.stop();
+    assert.equal(q.telemetry().speedBudget.limitBytes, 12_000_000_000);
+    q.requestSpeedtest();
+    await flush();
+    assert.equal(n, 1);
+    q.requestSpeedtest();
+    await flush();
+    assert.equal(n, 1, 'no request while the server refuses');
+    advance(2 * 3600_000 + 1000);
+    q.requestSpeedtest();
+    await flush();
+    assert.equal(n, 2);
+  });
+
   it('report batches at most 600 samples and keeps the rest', async () => {
     const { q, posts } = setup();
     q.apply({ enabled: true, speedtest: 'off', targets: ['1.1.1.1'] });
