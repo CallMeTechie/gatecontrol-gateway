@@ -18,6 +18,16 @@
 //   POST /api/v1/gateway/radio/zigbee { stack, devices: [...] }
 // bei Änderung höchstens alle 5 s, sonst alle 5 Min. Höchstens 128 Geräte.
 // Alles von zigbee2mqtt ist Eingabe von außen: Längen geprüft, Namen gekürzt.
+//
+// Mehrkanal-Geräte (2-/3-fach-Schalter: state_l1, state_l2 …): caps.channels
+// ['l1', 'l2'], values.ch { l1: true, … }, geschaltet mit { on, channel }.
+// Thermostate (exposes „climate“): kind 'climate', caps.setpoint { min, max,
+// step } und caps.modes, values temperature / setpoint / mode / heating /
+// valve, gesetzt mit { setpoint } / { mode }. OTA: caps.ota (definition.
+// supports_ota), values.ota { state, progress, installed, latest, checked,
+// error } aus dem Feld „update“ des Geräts; { ota: 'check' | 'update' } geht
+// an bridge/request/device/ota_update/…, die Antwort kommt über
+// bridge/response/device/ota_update/….
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -40,6 +50,12 @@ const PAIR_TAIL_MS = 30_000;
 const IEEE_RE = /^0x[0-9a-f]{16}$/;
 const STATE_RE = /^(idle|wait|running|exit) ([A-Za-z0-9-]{1,16}) ([0-9]{1,12})\s*$/;
 const ADAPTERS = ['ember', 'zstack', 'deconz'];
+const CHANNEL_RE = /^[a-z0-9_]{1,8}$/;
+const MAX_CHANNELS = 8;
+const CLIMATE_MODES = ['off', 'heat', 'auto', 'cool', 'fan_only', 'dry'];
+const SETPOINT_PROPS = ['occupied_heating_setpoint', 'current_heating_setpoint'];
+const OTA_STATES = ['idle', 'available', 'updating', 'scheduled'];
+const OTA_TOPIC = 'bridge/response/device/ota_update/';
 const SENSOR_PROPS = ['temperature', 'humidity', 'pressure', 'illuminance', 'illuminance_lux', 'co2', 'contact', 'occupancy', 'presence', 'water_leak', 'smoke', 'pm25', 'soil_moisture'];
 
 function readText(file, max = 4096) {
@@ -73,10 +89,21 @@ function ieeeOf(v) {
 const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const round = (v, d = 2) => Math.round(v * 10 ** d) / 10 ** d;
 
-/** Was ein Gerät kann, aus definition.exposes: { kind, caps } (nur der erste Kanal, keine Endpunkte _l2 …). */
+/**
+ * Was ein Gerät kann, aus definition.exposes: { kind, caps }. Helligkeit und Farbe nur vom ersten Kanal; mehrere
+ * geschaltete Endpunkte (state_l1, state_l2 …) als caps.channels, ein Thermostat als kind 'climate'.
+ */
 function summarize(def) {
   const types = new Set();
   const props = new Map();
+  const chProps = {};
+  // Endpunkte mit eigenem Schaltzustand: { type: 'switch' | 'light', endpoint: 'l1', features: [{ property: 'state_l1' }] }
+  for (const e of (def && Array.isArray(def.exposes) ? def.exposes : []).slice(0, 64)) {
+    if (!e || typeof e !== 'object' || (e.type !== 'switch' && e.type !== 'light') || !Array.isArray(e.features) || typeof e.endpoint !== 'string') continue;
+    const id = e.endpoint.toLowerCase();
+    const st = e.features.find((f) => f && f.name === 'state' && typeof f.property === 'string' && /^state_[A-Za-z0-9_]{1,12}$/.test(f.property));
+    if (st && CHANNEL_RE.test(id) && !(id in chProps) && Object.keys(chProps).length < MAX_CHANNELS) chProps[id] = st.property;
+  }
   const walk = (list, depth) => {
     if (!Array.isArray(list) || depth > 4) return;
     for (const e of list.slice(0, 64)) {
@@ -96,8 +123,10 @@ function summarize(def) {
   walk(def && def.exposes, 0);
   const has = (p) => props.has(p);
   const stateProp = has('state') ? 'state' : ([...props.keys()].find((p) => /^state_[a-z0-9]{1,8}$/.test(p)) || null);
+  const setpointProp = SETPOINT_PROPS.find(has) || null;
   let kind = 'other';
-  if (types.has('light')) kind = 'light';
+  if (types.has('climate') && setpointProp) kind = 'climate';
+  else if (types.has('light')) kind = 'light';
   else if (types.has('cover')) kind = 'cover';
   else if (types.has('switch') || (stateProp && !SENSOR_PROPS.some(has))) kind = 'plug';
   else if (SENSOR_PROPS.some(has)) kind = 'sensor';
@@ -111,9 +140,40 @@ function summarize(def) {
     else if (has('color_hs')) caps.color = 'hs';
   }
   if (kind === 'cover' && has('position')) caps.position = true;
+  if ((kind === 'light' || kind === 'plug') && Object.keys(chProps).length >= 2) {
+    caps.channels = Object.keys(chProps);
+    caps.chProps = chProps;
+    // `on` ohne Kanal bleibt der erste (ältere Server kennen keine Kanäle)
+    caps.stateProp = chProps[caps.channels[0]];
+  }
+  if (kind === 'climate') {
+    const sp = props.get(setpointProp) || {};
+    const min = finite(sp.value_min);
+    const max = finite(sp.value_max);
+    const step = finite(sp.value_step);
+    caps.setpointProp = setpointProp;
+    caps.setpoint = { min: min != null && min >= 0 && min <= 40 ? min : 5, max: 30, step: step != null && step >= 0.1 && step <= 5 ? step : 0.5 };
+    caps.setpoint.max = max != null && max > caps.setpoint.min && max <= 50 ? max : Math.max(30, caps.setpoint.min + 1);
+    const mode = props.get('system_mode');
+    const modes = mode && Array.isArray(mode.values) ? CLIMATE_MODES.filter((m) => mode.values.includes(m)) : [];
+    if (modes.length) caps.modes = modes;
+  }
   if (has('power')) caps.power = true;
   if (has('battery')) caps.battery = true;
+  if (def && def.supports_ota === true) caps.ota = true;
   return { kind, caps };
+}
+
+/** Das Feld „update“ eines Geräts (zigbee2mqtt ≥ 1.33; davor update_available) → { state, progress, installed, latest }. */
+function otaOf(p) {
+  const u = p.update && typeof p.update === 'object' ? p.update : null;
+  if (!u) return typeof p.update_available === 'boolean' ? { state: p.update_available ? 'available' : 'idle' } : null;
+  const o = { state: OTA_STATES.includes(u.state) ? u.state : 'idle' };
+  if (o.state === 'updating' && finite(u.progress) != null) o.progress = Math.max(0, Math.min(100, Math.round(u.progress)));
+  for (const [k, from] of [['installed', u.installed_version], ['latest', u.latest_version]]) {
+    if (finite(from) != null || (typeof from === 'string' && /^[\w.+-]{1,32}$/.test(from))) o[k] = String(from);
+  }
+  return o;
 }
 
 /** Zustand von zigbee2mqtt/<Name> → die Werte, die an den Server gehen (Namen wie bei den Bluetooth-Sensoren). */
@@ -136,15 +196,49 @@ function valuesOf(p, caps = {}) {
   for (const k of ['smoke', 'tamper', 'vibration', 'battery_low']) if (typeof p[k] === 'boolean') v[k] = p[k];
   if (finite(p.linkquality) != null) v.linkquality = Math.round(p.linkquality);
   if (typeof p.action === 'string' && /^[a-z0-9_-]{1,32}$/i.test(p.action)) v.action = p.action;
+  if (caps.chProps) {
+    const ch = {};
+    for (const [id, prop] of Object.entries(caps.chProps)) if (p[prop] === 'ON' || p[prop] === 'OFF') ch[id] = p[prop] === 'ON';
+    if (Object.keys(ch).length) v.ch = ch;
+  }
+  if (caps.setpointProp) {
+    // ein Thermostat: gemessen (local_temperature), Soll, Modus, heizt gerade, Ventil
+    if (finite(p.local_temperature) != null) v.temperature = round(p.local_temperature, 1);
+    if (finite(p[caps.setpointProp]) != null) v.setpoint = round(p[caps.setpointProp], 1);
+    if (typeof p.system_mode === 'string' && CLIMATE_MODES.includes(p.system_mode)) v.mode = p.system_mode;
+    if (finite(p.pi_heating_demand) != null) v.valve = Math.max(0, Math.min(100, Math.round(p.pi_heating_demand)));
+    if (typeof p.running_state === 'string') v.heating = p.running_state === 'heat';
+    else if (v.valve != null) v.heating = v.valve > 0;
+  }
+  if (caps.ota) {
+    const ota = otaOf(p);
+    if (ota) v.ota = ota;
+  }
   return v;
 }
 
-/** Ein Befehl des Servers ({ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, pos }) → Nutzlast für <Name>/set oder null. */
+/**
+ * Ein Befehl des Servers ({ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, pos }, ein Kanal { on, channel },
+ * ein Thermostat { setpoint, mode }) → Nutzlast für <Name>/set oder null.
+ */
 function setPayload(dev, set) {
   const s = set && typeof set === 'object' ? set : {};
   const c = dev.caps || {};
   const out = {};
   const num = (x) => typeof x === 'number' && Number.isFinite(x);
+  if ('channel' in s) {
+    // ein Kanal eines Mehrkanal-Geräts: nur an/aus, nur ein Kanal, den das Gerät hat
+    const prop = c.chProps && typeof s.channel === 'string' && Object.prototype.hasOwnProperty.call(c.chProps, s.channel) ? c.chProps[s.channel] : null;
+    return prop && typeof s.on === 'boolean' ? { [prop]: s.on ? 'ON' : 'OFF' } : null;
+  }
+  if (dev.kind === 'climate') {
+    if (num(s.setpoint) && c.setpoint && c.setpointProp) {
+      const { min, max, step } = c.setpoint;
+      out[c.setpointProp] = round(Math.max(min, Math.min(max, Math.round(s.setpoint / step) * step)), 1);
+    }
+    if (typeof s.mode === 'string' && Array.isArray(c.modes) && c.modes.includes(s.mode)) out.system_mode = s.mode;
+    return Object.keys(out).length ? out : null;
+  }
   if ((dev.kind === 'light' || dev.kind === 'plug') && typeof s.on === 'boolean') out[c.stateProp || 'state'] = s.on ? 'ON' : 'OFF';
   if (dev.kind === 'light' && c.bri && num(s.bri)) {
     out.brightness = Math.round(Math.max(0, Math.min(100, s.bri)) * 2.54);
@@ -202,6 +296,7 @@ class Zigbee2Mqtt {
     this.values = new Map();     // ieee → Werte
     this.seen = new Map();       // ieee → ms
     this.available = new Map();  // ieee → true|false
+    this.otaInfo = new Map();    // ieee → { checked: ms, error: 'check_failed' | 'update_failed' }
     this.recent = [];
     this.pairUntil = 0;
     this.lastError = null;
@@ -322,6 +417,7 @@ class Zigbee2Mqtt {
     if (rest === 'bridge/info') return this._info(text);
     if (rest === 'bridge/devices') return this._devices(text);
     if (rest === 'bridge/event') return this._event(text);
+    if (rest.startsWith(OTA_TOPIC)) return this._otaResponse(rest.slice(OTA_TOPIC.length), text);
     if (rest.startsWith('bridge/')) return;
     let name = rest;
     let avail = false;
@@ -340,7 +436,10 @@ class Zigbee2Mqtt {
     try { j = JSON.parse(text); } catch { return; }
     const dev = this.devices.get(ieee);
     const before = JSON.stringify(this.values.get(ieee) || {});
-    const next = { ...(this.values.get(ieee) || {}), ...valuesOf(j, dev && dev.caps) };
+    const fresh = valuesOf(j, dev && dev.caps);
+    // ein Kanal meldet oft nur sich selbst (state_l2): die anderen bleiben
+    if (fresh.ch) fresh.ch = { ...((this.values.get(ieee) || {}).ch || {}), ...fresh.ch };
+    const next = { ...(this.values.get(ieee) || {}), ...fresh };
     this.values.set(ieee, next);
     this.seen.set(ieee, this.now());
     if (JSON.stringify(next) !== before) this.dirty = true;
@@ -381,6 +480,36 @@ class Zigbee2Mqtt {
     this.devices = next;
     this.byTopic = new Map([...next.values()].map((d) => [d.topic, d.ieee]));
     for (const k of [...this.values.keys()]) if (!next.has(k)) { this.values.delete(k); this.seen.delete(k); this.available.delete(k); }
+    for (const k of [...this.otaInfo.keys()]) if (!next.has(k)) this.otaInfo.delete(k);
+    this.dirty = true;
+  }
+
+  /** Antwort auf bridge/request/device/ota_update/check|update: { data: { id }, status: 'ok' | 'error' }. */
+  _otaResponse(action, text) {
+    if (action !== 'check' && action !== 'update') return;
+    let j;
+    try { j = JSON.parse(text); } catch { return; }
+    const data = j && j.data && typeof j.data === 'object' ? j.data : {};
+    const ieee = ieeeOf(data.id) || this.byTopic.get(String(data.id || '')) || null;
+    if (!ieee || !this.devices.has(ieee)) return;
+    const info = { ...(this.otaInfo.get(ieee) || {}) };
+    if (j.status === 'ok') {
+      delete info.error;
+      if (action === 'check') {
+        info.checked = this.now();
+        const v = this.values.get(ieee) || {};
+        if (typeof data.update_available === 'boolean' && (v.ota || {}).state !== 'updating') {
+          this.values.set(ieee, { ...v, ota: { ...(v.ota || {}), state: data.update_available ? 'available' : 'idle' } });
+        }
+      }
+    } else {
+      info.error = action === 'check' ? 'check_failed' : 'update_failed';
+      const v = this.values.get(ieee) || {};
+      // ein Update, das nicht anläuft: nicht weiter „läuft“ zeigen (zigbee2mqtt meldet den Zustand gleich selbst)
+      if (action === 'update' && (v.ota || {}).state === 'updating') this.values.set(ieee, { ...v, ota: { state: 'available' } });
+      logger.info({ action, err: clean(String(j.error || ''), 120) }, 'radio: zigbee ota request failed');
+    }
+    this.otaInfo.set(ieee, info);
     this.dirty = true;
   }
 
@@ -434,6 +563,7 @@ class Zigbee2Mqtt {
     const ieee = ieeeOf(id);
     const dev = ieee && this.devices.get(ieee);
     if (!dev) return 'not_found';
+    if (set && typeof set === 'object' && 'ota' in set) return this._ota(dev, set.ota);
     const body = setPayload(dev, set);
     if (!body) return 'invalid';
     if (!this.running()) return 'not_running';
@@ -442,8 +572,30 @@ class Zigbee2Mqtt {
     const v = { ...(this.values.get(ieee) || {}) };
     if (body[dev.caps.stateProp || 'state'] === 'ON' || body[dev.caps.stateProp || 'state'] === 'OFF') v.on = body[dev.caps.stateProp || 'state'] === 'ON';
     if (Number.isFinite(body.brightness)) v.bri = Math.round(body.brightness / 2.54);
+    if (set && typeof set.channel === 'string') v.ch = { ...(v.ch || {}), [set.channel]: set.on === true };
+    if (dev.kind === 'climate') {
+      if (Number.isFinite(body[dev.caps.setpointProp])) v.setpoint = body[dev.caps.setpointProp];
+      if (typeof body.system_mode === 'string') v.mode = body.system_mode;
+    }
     this.values.set(ieee, v);
     this.dirty = true;
+    return 'accepted';
+  }
+
+  /** Firmware über Funk: nach einem Update suchen ('check') oder es starten ('update'). */
+  async _ota(dev, action) {
+    if ((action !== 'check' && action !== 'update') || !dev.caps.ota) return 'invalid';
+    if (!this.running()) return 'not_running';
+    await this._publish(`${BASE}/bridge/request/device/ota_update/${action}`, { id: dev.ieee });
+    const info = { ...(this.otaInfo.get(dev.ieee) || {}) };
+    delete info.error;
+    this.otaInfo.set(dev.ieee, info);
+    if (action === 'update') {
+      const v = this.values.get(dev.ieee) || {};
+      this.values.set(dev.ieee, { ...v, ota: { ...(v.ota || {}), state: 'updating', progress: 0 } });
+    }
+    this.dirty = true;
+    logger.info({ model: dev.model, action }, 'radio: zigbee ota requested');
     return 'accepted';
   }
 
@@ -469,11 +621,16 @@ class Zigbee2Mqtt {
   /** Geräteliste für den Server und den Reiter „Funk“. */
   list() {
     return [...this.devices.values()].map((d) => {
-      const { stateProp, ...caps } = d.caps; // eslint-disable-line no-unused-vars
+      const { stateProp, chProps, setpointProp, ...caps } = d.caps; // eslint-disable-line no-unused-vars
+      let values = this.values.get(d.ieee) || {};
+      if (caps.ota) {
+        const info = this.otaInfo.get(d.ieee) || {};
+        values = { ...values, ota: { state: 'idle', ...(values.ota || {}), ...(info.checked ? { checked: new Date(info.checked).toISOString() } : {}), ...(info.error ? { error: info.error } : {}) } };
+      }
       return {
         ieee: d.mac, name: d.name, model: d.model, vendor: d.vendor, description: d.description, type: d.type, power: d.power,
         supported: d.supported, interview: d.interview, disabled: d.disabled, kind: d.kind, caps,
-        values: this.values.get(d.ieee) || {},
+        values,
         available: this.available.has(d.ieee) ? this.available.get(d.ieee) : null,
         seenAt: this.seen.has(d.ieee) ? new Date(this.seen.get(d.ieee)).toISOString() : null,
       };
