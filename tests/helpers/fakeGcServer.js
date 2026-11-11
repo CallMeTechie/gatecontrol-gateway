@@ -9,7 +9,8 @@ const crypto = require('node:crypto');
 
 async function startFakeServer({ token = 'gc_gw_' + 'a'.repeat(64), maxStreams = 8, status = {}, streamBytesPerSec = 0 } = {}) {
   const posts = [];
-  const counters = { down: 0, up: 0, active: 0, maxActive: 0, authFail: 0 };
+  // maxActiveDown/-Up: gleichzeitige Streams je Richtung
+  const counters = { down: 0, up: 0, active: 0, maxActive: 0, activeDown: 0, activeUp: 0, maxActiveDown: 0, maxActiveUp: 0, authFail: 0 };
   const block = crypto.randomBytes(64 * 1024);
   const server = http.createServer((req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) {
@@ -20,8 +21,10 @@ async function startFakeServer({ token = 'gc_gw_' + 'a'.repeat(64), maxStreams =
     const url = new URL(req.url, 'http://x');
     if (url.pathname.startsWith('/api/v1/gateway/speedtest/')) {
       if (status.speedtest) {
-        res.writeHead(status.speedtest, { 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ error: status.speedtest === 429 ? 'busy' : 'nope' }));
+        const headers = { 'Content-Type': 'application/json' };
+        if (status.speedtestRetryAfter) headers['Retry-After'] = String(status.speedtestRetryAfter);
+        res.writeHead(status.speedtest, headers);
+        return res.end(JSON.stringify({ error: status.speedtestError || (status.speedtest === 429 ? 'busy' : 'nope') }));
       }
       if (counters.active >= maxStreams) {
         res.writeHead(429, { 'Content-Type': 'application/json' });
@@ -29,7 +32,11 @@ async function startFakeServer({ token = 'gc_gw_' + 'a'.repeat(64), maxStreams =
       }
       counters.active++;
       counters.maxActive = Math.max(counters.maxActive, counters.active);
-      const done = () => { counters.active--; };
+      const dir = url.pathname.endsWith('/down') ? 'Down' : 'Up';
+      counters[`active${dir}`]++;
+      counters[`maxActive${dir}`] = Math.max(counters[`maxActive${dir}`], counters[`active${dir}`]);
+      let ended = false;
+      const done = () => { if (ended) return; ended = true; counters.active--; counters[`active${dir}`]--; };
       if (url.pathname.endsWith('/down') && req.method === 'GET') {
         const n = Math.min(100_000_000, Math.max(1, Number(url.searchParams.get('bytes')) || 25_000_000));
         res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': n, 'Cache-Control': 'no-store' });

@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('node:http');
+const net = require('node:net');
 const httpProxy = require('http-proxy');
 const logger = require('../logger');
 const { getPinnedAgent, PIN_MISMATCH_CODE } = require('./tlsPin');
@@ -9,6 +10,15 @@ const { getPinnedAgent, PIN_MISMATCH_CODE } = require('./tlsPin');
 // pinning but the configured fingerprint is unusable. Same shape as the
 // upstream-error body below so clients see one consistent format.
 const PIN_CONFIG_CODE = 'ERR_TLS_PIN_CONFIG';
+
+/**
+ * The backend URL of a route. An IPv6 literal (a target in an IPv6-only home
+ * network, e.g. fd00::20) needs brackets in a URL — without them the port
+ * would read as part of the address and the route would never connect.
+ */
+function targetUrl(scheme, host, port) {
+  return `${scheme}://${net.isIPv6(host) ? `[${host}]` : host}:${port}`;
+}
 
 /**
  * Create the HTTP reverse-proxy server. Reads `X-Gateway-Target-Domain`
@@ -123,7 +133,7 @@ function createHttpProxy({ router, onUpstreamUnreachable }) {
   // route's fingerprint before the request is allowed onto the socket.
   const proxyOptionsFor = (target, { upgrade }) => {
     const scheme = target.backendHttps ? 'https' : 'http';
-    const options = { target: `${scheme}://${target.host}:${target.port}` };
+    const options = { target: targetUrl(scheme, target.host, target.port) };
     if (target.backendHttps && target.backendTlsFingerprint) {
       options.agent = getPinnedAgent({
         host: target.host,
@@ -172,4 +182,4 @@ function createHttpProxy({ router, onUpstreamUnreachable }) {
   return server;
 }
 
-module.exports = { createHttpProxy };
+module.exports = { createHttpProxy, targetUrl };

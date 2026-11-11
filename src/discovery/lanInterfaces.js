@@ -1,6 +1,7 @@
 'use strict';
 
 const os = require('node:os');
+const net = require('node:net');
 
 const WG_INTERFACE = 'gatecontrol0';
 
@@ -116,7 +117,103 @@ function primaryLanIp(defaultGwIp, ifaces = os.networkInterfaces()) {
   return cands[0].address;                                     // deterministic fallback
 }
 
+// ─── IPv6 home networks ──────────────────────────────────────────────────
+// A LAN without IPv4 has no RFC1918 address — the gateway then reports its
+// unique local addresses (ULA, fc00::/7) next to lan_ip / lan_subnets, as
+// `lan_ip6` / `lan_subnets6`. Only ULA: link-local (fe80::/10) needs a zone
+// and is the same prefix in every network; global addresses change with the
+// provider and must not be self-reported as "the home LAN".
+
+/** "fd00:1::5" → 8 groups as numbers, or null (no zone, no embedded IPv4). */
+function _v6Groups(ip) {
+  if (typeof ip !== 'string' || !net.isIPv6(ip) || ip.includes('.') || ip.includes('%')) return null;
+  const [head, tail] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail !== undefined && tail !== '' ? tail.split(':') : [];
+  const fill = tail === undefined ? 0 : 8 - h.length - t.length;
+  const groups = [...h, ...Array(Math.max(0, fill)).fill('0'), ...t].map((g) => parseInt(g, 16));
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : null;
+}
+
+/** Shortest form: longest run of zero groups (≥ 2) as "::", lower-case hex. */
+function _v6String(groups) {
+  let best = { at: -1, len: 0 };
+  for (let i = 0; i < 8; i++) {
+    let j = i;
+    while (j < 8 && groups[j] === 0) j++;
+    if (j - i > best.len) best = { at: i, len: j - i };
+    if (j > i) i = j;
+  }
+  const hex = groups.map((g) => g.toString(16));
+  if (best.len < 2) return hex.join(':');
+  return `${hex.slice(0, best.at).join(':')}::${hex.slice(best.at + best.len).join(':')}`;
+}
+
+/** Unique local IPv6 address (fc00::/7), e.g. fd00::1 — never link-local, loopback or global. */
+function isUlaIpv6(ip) {
+  const g = _v6Groups(ip);
+  return !!g && (g[0] & 0xfe00) === 0xfc00;
+}
+
+/** Network of `ip` with `prefix` bits, shortest form — or null. */
+function _v6Network(ip, prefix) {
+  const g = _v6Groups(ip);
+  if (!g || !Number.isInteger(prefix) || prefix < 0 || prefix > 128) return null;
+  return _v6String(g.map((v, i) => {
+    const bits = Math.min(16, Math.max(0, prefix - i * 16));
+    return bits === 16 ? v : v & ((0xffff << (16 - bits)) & 0xffff);
+  }));
+}
+
+function _v6Prefix(addr) {
+  const m = /\/(\d{1,3})$/.exec(String(addr.cidr || ''));
+  return m ? Number(m[1]) : null;
+}
+
+/** ULA entries on physical-LAN interfaces: [{ iface, address, prefix }] (interface order, then as listed). */
+function _ulaEntries(ifaces) {
+  const out = [];
+  for (const [name, addrs] of Object.entries(ifaces)) {
+    if (!isPhysicalLan(name)) continue;
+    for (const addr of (addrs || [])) {
+      if (!addr || (addr.family !== 'IPv6' && addr.family !== 6) || addr.internal) continue;
+      if (!isUlaIpv6(addr.address)) continue;
+      const prefix = _v6Prefix(addr);
+      if (prefix === null || prefix < 48 || prefix > 127) continue; // wider than a ULA site prefix, or a host route
+      out.push({ iface: name, address: addr.address.toLowerCase(), prefix });
+    }
+  }
+  return out;
+}
+
+/**
+ * ULA subnets of the physical LAN as { iface, cidr } (e.g. "fd12:3456:789a:1::/64"),
+ * deduplicated, at most 8 — reported as `lan_subnets6`. Empty without ULA.
+ * `ifaces` is injectable for tests.
+ */
+function lanSubnets6(ifaces = os.networkInterfaces()) {
+  const seen = new Set();
+  const out = [];
+  for (const e of _ulaEntries(ifaces)) {
+    const network = _v6Network(e.address, e.prefix);
+    if (!network) continue;
+    const cidr = `${network}/${e.prefix}`;
+    if (seen.has(cidr)) continue;
+    seen.add(cidr);
+    out.push({ iface: e.iface, cidr });
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
+/** The host's first ULA address on a physical-LAN interface — reported as `lan_ip6` — or null. */
+function primaryLanIp6(ifaces = os.networkInterfaces()) {
+  const e = _ulaEntries(ifaces)[0];
+  return e ? _v6String(_v6Groups(e.address)) : null;
+}
+
 module.exports = {
   lanSubnets, primaryLanIp, isPhysicalLan, netmaskToPrefix, networkAddress, ipInCidr,
   isPrivateIpv4: _isPrivateIpv4,
+  isUlaIpv6, lanSubnets6, primaryLanIp6,
 };

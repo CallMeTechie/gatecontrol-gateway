@@ -45,7 +45,15 @@ des Gateways (wireguard-go mit File-Capability, iptables) nützen im
 Edge-Container nichts: ohne Capabilities im Bounding-Set und mit
 `no-new-privileges` bekommt kein Programm dort Rechte. Der Auto-Update
 (`deploy/update.sh`) zieht den Edge-Container nach einem erfolgreichen
-Gateway-Update mit und rollt ihn bei einem Rollback mit zurück.
+Gateway-Update mit und rollt ihn bei einem Rollback mit zurück. Danach
+erneuert er auch das Image des Dienstes `office`, wenn der auf dem Host
+angelegt ist ([print.md](print.md) „Office-Dateien“ › „Aktualisieren“).
+
+Der Proxmox-Installer (`scripts/install-pve.sh`) legt das Gateway **ohne
+Docker** in einem LXC-Container an – dort gibt es keinen Edge-Container und
+keinen MQTT-Broker. Das Gateway meldet das als `telemetry.runtime: 'native'`
+(und `telemetry.edge: null`); der Server zeigt beim Gateway einen Hinweis statt
+der Aufforderung, eine Compose-Datei zu erneuern.
 
 ### Volumes und Rechte
 

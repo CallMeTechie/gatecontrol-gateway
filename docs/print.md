@@ -219,8 +219,15 @@ PDF.
   noch nicht da → `waiting` (`office_starting`, neuer Versuch alle 2 Min.),
   LibreOffice scheitert → `failed/office_failed`, länger als 180 s →
   `failed/office_timeout`.
-* **Aktualisieren:** das Image `:office` wird beim ersten Einschalten geladen;
-  ein Gateway-Update (`deploy/update.sh`) zieht nur Gateway und Edge nach.
+* **Aktualisieren:** das Image `:office` wird beim ersten Einschalten geladen.
+  Ein Gateway-Update (`deploy/update.sh`) erneuert es mit: nach dem gelungenen
+  Update von Gateway und Edge – und nachdem das Ergebnis gemeldet ist – lädt
+  das Skript `:office` neu, wenn der Dienst in der Compose-Datei steht **und**
+  sein Container auf dem Host angelegt ist (ohne den Schalter lädt also weiter
+  niemand das Image). Ein laufender Dienst wird neu angelegt und das alte Image
+  freigegeben, ein gestoppter bekommt das neue Image beim nächsten Start. Ein
+  Fehler dabei ändert das Ergebnis des Gateway-Updates nicht; nach einem
+  Rollback bleibt das Office-Image, wie es ist.
 
 ## Texterkennung (ab 1.33.0)
 

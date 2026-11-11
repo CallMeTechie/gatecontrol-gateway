@@ -88,6 +88,19 @@ describe('queryUps against a fake NUT server', () => {
     const r = await queryUps({ host: 'nas.fritz.box', lookup: async () => ({ address: '192.168.1.10' }), connect: via(nut.port) });
     assert.equal(r.name, 'apc');
   });
+
+  it('a home network without IPv4: a unique local IPv6 address (fc00::/7), literal or resolved', async () => {
+    const seen = [];
+    const v6 = (o) => { seen.push(o.host); return net.createConnection({ host: '127.0.0.1', port: nut.port }); };
+    assert.equal((await queryUps({ host: 'fd12:3456:789a:1::10', connect: v6 })).name, 'apc');
+    // der Name hat keinen A-Eintrag → der AAAA-Eintrag zählt
+    const lookup = async (h, o) => { if (o.family === 4) throw new Error('ENOTFOUND'); return { address: 'fd00::10' }; };
+    assert.equal((await queryUps({ host: 'nas.fritz.box', lookup, connect: v6 })).name, 'apc');
+    assert.deepEqual(seen, ['fd12:3456:789a:1::10', 'fd00::10']);
+    for (const host of ['fe80::1', '2a02:8070::5', '::1', '::ffff:192.168.1.10']) await assert.rejects(queryUps({ host }), { code: 'not_private' }, host);
+    await assert.rejects(queryUps({ host: 'nas.example', lookup: async (h, o) => { if (o.family === 4) throw new Error('x'); return { address: '2a02::1' }; } }), { code: 'not_private' });
+    await assert.rejects(queryUps({ host: 'nas.example', lookup: async () => { throw new Error('ENOTFOUND'); } }), { code: 'connect' });
+  });
 });
 
 describe('queryUps error paths', () => {

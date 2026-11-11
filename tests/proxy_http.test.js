@@ -6,7 +6,7 @@ const http = require('node:http');
 const net = require('node:net');
 const crypto = require('node:crypto');
 const { Router } = require('../src/proxy/router');
-const { createHttpProxy } = require('../src/proxy/http');
+const { createHttpProxy, targetUrl } = require('../src/proxy/http');
 
 // Raw WebSocket handshake against `port` for `domain`. Resolves with the
 // status/header block once the response head arrives; rejects if the socket
@@ -95,6 +95,44 @@ describe('HTTP proxy', () => {
       }, r => { r.resume(); r.on('end', () => resolve(r.statusCode)); }).end();
     });
     assert.equal(status, 502);
+  });
+});
+
+describe('HTTP proxy — IPv6 target (home network without IPv4)', () => {
+  it('targetUrl: an IPv6 literal goes into brackets, names and IPv4 stay as they are', () => {
+    assert.equal(targetUrl('http', 'fd00::20', 8080), 'http://[fd00::20]:8080');
+    assert.equal(targetUrl('https', 'FD12:3456:789a:1::5', 5001), 'https://[FD12:3456:789a:1::5]:5001');
+    assert.equal(targetUrl('http', '192.168.1.20', 80), 'http://192.168.1.20:80');
+    assert.equal(targetUrl('https', 'nas.fritz.box', 5001), 'https://nas.fritz.box:5001');
+    const u = new URL(targetUrl('http', 'fd00::20', 8080));
+    assert.equal(u.hostname, '[fd00::20]');
+    assert.equal(u.port, '8080');
+  });
+
+  // Ziel als IPv6-Adresse ohne Klammern, wie der Server sie als target_lan_host schickt
+  it('proxies to an IPv6 literal target', async (t) => {
+    const upstream = http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ host: req.headers.host, path: req.url })); });
+    const listening = await new Promise((resolve) => { upstream.once('error', () => resolve(false)); upstream.listen(0, '::1', () => resolve(true)); });
+    if (!listening) { t.skip('no IPv6 loopback on this machine'); return; }
+    const router = new Router();
+    router.setRoutes([{ id: 7, domain: 'v6.example', target_lan_host: '::1', target_lan_port: upstream.address().port }]);
+    const proxy = createHttpProxy({ router });
+    await new Promise((r) => proxy.listen(0, '127.0.0.1', r));
+    try {
+      const res = await new Promise((resolve, reject) => {
+        const req = http.request({ host: '127.0.0.1', port: proxy.address().port, path: '/v6', headers: { host: 'v6.example', 'X-Gateway-Target-Domain': 'v6.example' } }, (r) => {
+          let b = ''; r.on('data', (c) => { b += c; });
+          r.on('end', () => resolve({ status: r.statusCode, body: b }));
+        });
+        req.on('error', reject);
+        req.end();
+      });
+      assert.equal(res.status, 200, res.body);
+      assert.equal(JSON.parse(res.body).path, '/v6');
+    } finally {
+      proxy.close();
+      upstream.close();
+    }
   });
 });
 

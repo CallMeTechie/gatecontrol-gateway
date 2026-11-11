@@ -7,6 +7,7 @@
 const crypto = require('node:crypto');
 const net = require('node:net');
 const { normalizeMac } = require('./macs');
+const { isUlaIpv6 } = require('../discovery/lanInterfaces');
 const { validTimezone } = require('./timezone');
 const { normalizeDns } = require('../dns/config');
 const { normalizeCache } = require('../cache/config');
@@ -29,6 +30,12 @@ function isHostname(h) {
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const bool = (v, dflt) => (typeof v === 'boolean' ? v : dflt);
+
+// Volumen der Speedtests (features.inetq.speedVolume, Server ab der Fassung mit
+// diesem Feld; fehlt es: Tageslimit wie bisher 12 GB, kein Deckel je Test).
+const SPEED_MIN_BYTES = 1_000_000;
+const SPEED_MAX_DAY_BYTES = 1_000_000_000_000;
+const speedBytes = (v) => (Number.isSafeInteger(v) && v >= SPEED_MIN_BYTES && v <= SPEED_MAX_DAY_BYTES ? v : null);
 
 
 /** Öffentlich sinnvolle IPv4-Messziele: keine Null-, Loopback-, Multicast- oder Broadcast-Adressen. */
@@ -69,7 +76,8 @@ function normalizeFeatures(raw) {
   const upsHost = typeof up.host === 'string' ? up.host.trim() : '';
   const upsPort = Number.isInteger(up.port) && up.port > 0 && up.port < 65536 ? up.port : 3493;
   const upsName = typeof up.name === 'string' && UPS_NAME_RE.test(up.name) ? up.name : null;
-  const hostOk = upsHost !== '' && (net.isIPv4(upsHost) || isHostname(upsHost));
+  // IPv4, Name oder – Heimnetz ohne IPv4 – eine private IPv6-Adresse (fc00::/7); ob das Ziel privat ist, prüft ups/nut.js
+  const hostOk = upsHost !== '' && (net.isIPv4(upsHost) || isUlaIpv6(upsHost) || isHostname(upsHost));
 
   return {
     received: present,
@@ -78,6 +86,11 @@ function normalizeFeatures(raw) {
       enabled: present && bool(iq.enabled, true),
       speedtest: SPEEDTEST_PLANS.has(iq.speedtest) ? iq.speedtest : '4x',
       targets: targets.length ? targets : [...DEFAULT_TARGETS],
+      // dayBytes: Volumen in 24 h; downBytes/upBytes: Deckel je Test und Richtung (null = keiner)
+      speedVolume: (() => {
+        const l = isObj(iq.speedVolume) ? iq.speedVolume : {};
+        return { dayBytes: speedBytes(l.dayBytes), downBytes: speedBytes(l.downBytes), upBytes: speedBytes(l.upBytes) };
+      })(),
     },
     presence: { enabled: present && bool(pr.enabled, true), macs, awayAfterSec: away },
     ups: {
