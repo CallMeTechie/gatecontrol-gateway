@@ -91,6 +91,18 @@ jobs:
       - name: Broker mit TLS-Listener
         run: sudo env MOSQUITTO=/usr/sbin/mosquitto "$(command -v node)" tests/live/mqtt-tls-live.js
 
+  tun-loader:
+    # Wählbarer Dienst tun-loader (docker-compose.tun-loader.yml, „VPN-Gerät
+    # automatisch bereitstellen“) gegen einen echten Docker-Daemon: Syntax, „Gerät
+    # ist da“ und das Laden eines Kernel-Moduls mit genau den Rechten des Dienstes
+    # (cap_drop ALL + SYS_MODULE, kein Netz, nur lesbar) samt Gegenprobe.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: tun-loader im Container
+        run: bash tests/live/tun-loader-live.sh
+
   edge-fence:
     # Netzgrenze des Edge-Containers (nur noch für alte Compose-Dateien mit Edge
     # im Host-Netz) gegen den echten Kernel, je Backend in einem eigenen

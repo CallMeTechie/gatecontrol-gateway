@@ -50,6 +50,9 @@ services:
     # TUN device needed by wireguard-go (userspace WG impl).
     # On some hosts (Synology DSM, minimal VMs, LXC containers) the device must be
     # explicitly passed through. Requires `modprobe tun` on host if /dev/net/tun missing.
+    # Synology: the device only exists once the module is loaded (DSM task scheduler:
+    # insmod /lib/modules/tun.ko). Optional (test): docker-compose.tun-loader.yml adds a
+    # one-shot service that does this before the gateway starts — docs/deployment/synology.md.
     devices:
       - /dev/net/tun:/dev/net/tun
     tmpfs:

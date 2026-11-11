@@ -92,6 +92,8 @@ DSM does not support systemd. Use the built-in Task Scheduler with a short polli
 
 The script is safe to run on every invocation — if no `pending-update` flag exists in the state directory it exits immediately (after acquiring the lock, which takes < 1 ms). The flock lock also prevents overlap if a run takes longer than one polling interval.
 
+With the optional service `tun-loader` in the compose file ([„VPN-Gerät automatisch bereitstellen“](deployment/synology.md#vpn-gerät-automatisch-bereitstellen-test)) the same task also brings the gateway back after a reboot of the NAS: Docker restarts containers without compose then, so `tun-loader` does not run, `/dev/net/tun` is missing and the gateway stays down with a start error. `update.sh` sees exactly that error and starts the gateway again (`docker compose up -d --no-recreate gateway`, which runs `tun-loader` first) — at most once every 10 minutes, logged as `tun: …` in `update.log`. A gateway stopped by hand has no such error and stays stopped; without `tun-loader` in the compose file nothing changes.
+
 ---
 
 ## Lockfile and consume-on-lock behavior
