@@ -244,6 +244,157 @@ describe('radio: zigbee2mqtt', () => {
     assert.equal(await z.set('0x00158d0001a2b3c4', { on: true }), 'invalid', 'a sensor cannot be switched');
   });
 
+  // Definitionen, wie zigbee2mqtt 2.x sie in bridge/devices liefert (gekürzt): 3-fach-Schalter, Heizkörperthermostat, Steckdose mit OTA
+  const sw = (ep) => ({ type: 'switch', endpoint: ep, features: [{ type: 'binary', name: 'state', property: `state_${ep}`, endpoint: ep, value_on: 'ON', value_off: 'OFF', value_toggle: 'TOGGLE', access: 7 }] });
+  const MORE = [
+    { type: 'Router', ieee_address: '0xa4c1380000112233', friendly_name: 'Schalter Flur', supported: true, interview_completed: true, power_source: 'Mains (single phase)',
+      definition: { model: 'TS0003', vendor: 'Tuya', description: '3 gang switch', supports_ota: true, exposes: [sw('l1'), sw('l2'), sw('l3'), { type: 'numeric', name: 'linkquality', property: 'linkquality', access: 1 }] } },
+    { type: 'EndDevice', ieee_address: '0x54ef441000aabbcc', friendly_name: 'Heizung Bad', supported: true, interview_completed: true, power_source: 'Battery',
+      definition: { model: 'SRTS-A01', vendor: 'Aqara', description: 'Smart radiator thermostat E1', supports_ota: true, exposes: [
+        { type: 'climate', features: [
+          { type: 'numeric', name: 'occupied_heating_setpoint', property: 'occupied_heating_setpoint', value_min: 5, value_max: 30, value_step: 0.5, unit: '°C', access: 7 },
+          { type: 'numeric', name: 'local_temperature', property: 'local_temperature', unit: '°C', access: 5 },
+          { type: 'enum', name: 'system_mode', property: 'system_mode', values: ['off', 'heat', 'emergency_heating'], access: 7 },
+          { type: 'enum', name: 'running_state', property: 'running_state', values: ['idle', 'heat'], access: 5 }] },
+        { type: 'numeric', name: 'pi_heating_demand', property: 'pi_heating_demand', access: 1 },
+        { type: 'numeric', name: 'battery', property: 'battery', access: 1 }] } },
+    { type: 'Router', ieee_address: '0x000d6ffffe1a2b3c', friendly_name: 'Steckdose Kaffee', supported: true, interview_completed: true, power_source: 'Mains (single phase)',
+      definition: { model: 'E1603', vendor: 'IKEA', description: 'TRADFRI control outlet', supports_ota: true, exposes: [{ type: 'switch', features: [{ type: 'binary', name: 'state', property: 'state', value_on: 'ON', value_off: 'OFF', access: 7 }] }] } },
+    { type: 'Router', ieee_address: '0x00124b0000000009', friendly_name: 'Alt', supported: true, interview_completed: true,
+      definition: { model: 'X', vendor: 'Y', exposes: [{ type: 'switch', features: [{ type: 'binary', name: 'state', property: 'state', access: 7 }] }] } },
+  ];
+  function running(extra = {}) {
+    const mq = fakeMqtt();
+    const z = new Zigbee2Mqtt({ stateDir: state, ctlDir: ctl, now: () => clock, ...extra });
+    z.attach(mq);
+    z.apply({ want: true, stick });
+    mq.emit('zigbee2mqtt/bridge/state', 'online');
+    mq.emit('zigbee2mqtt/bridge/devices', JSON.stringify(MORE));
+    return { mq, z, by: () => Object.fromEntries(z.list().map((d) => [d.name, d])) };
+  }
+
+  it('several channels (state_l1, state_l2 …): caps.channels, a value per channel, each switched by itself', async () => {
+    const { mq, z, by } = running();
+    const d = by()['Schalter Flur'];
+    assert.equal(d.kind, 'plug');
+    assert.deepEqual(d.caps, { channels: ['l1', 'l2', 'l3'], ota: true }, 'no internal property names in the report');
+    mq.emit('zigbee2mqtt/Schalter Flur', { state_l1: 'ON', state_l2: 'OFF', state_l3: 'ON', linkquality: 87 });
+    assert.deepEqual(by()['Schalter Flur'].values, { on: true, linkquality: 87, ch: { l1: true, l2: false, l3: true }, ota: { state: 'idle' } }, '`on` stays the first channel (older servers)');
+    mq.emit('zigbee2mqtt/Schalter Flur', { state_l2: 'ON' }); // a channel reports only itself
+    assert.deepEqual(by()['Schalter Flur'].values.ch, { l1: true, l2: true, l3: true });
+    assert.equal(await z.set('a4:c1:38:00:00:11:22:33', { on: false, channel: 'l3' }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Schalter Flur/set', { state_l3: 'OFF' }]);
+    assert.deepEqual(by()['Schalter Flur'].values.ch, { l1: true, l2: true, l3: false }, 'carried along until zigbee2mqtt reports');
+    assert.equal(by()['Schalter Flur'].values.on, true, 'the first channel is untouched');
+    const n = mq.st.pubs.length;
+    for (const bad of [{ on: true, channel: 'l9' }, { on: true, channel: '__proto__' }, { on: true, channel: 3 }, { channel: 'l1' }, { on: 'yes', channel: 'l1' }]) {
+      assert.equal(await z.set('a4:c1:38:00:00:11:22:33', bad), 'invalid', JSON.stringify(bad));
+    }
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { on: true, channel: 'l1' }), 'invalid', 'a device without channels has none');
+    assert.equal(mq.st.pubs.length, n, 'nothing sent');
+    // without a channel: as before, the first one (an older server)
+    assert.equal(await z.set('a4:c1:38:00:00:11:22:33', { on: false }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Schalter Flur/set', { state_l1: 'OFF' }]);
+    assert.equal(by()['Steckdose Kaffee'].caps.channels, undefined);
+    // one endpoint only, odd endpoint names, more than eight
+    assert.equal(summarize({ exposes: [sw('l1')] }).caps.channels, undefined);
+    assert.deepEqual(summarize({ exposes: [sw('left'), sw('right'), sw('../../x'), sw('L1')] }).caps.channels, ['left', 'right', 'l1']);
+    assert.equal(summarize({ exposes: Array.from({ length: 12 }, (_, i) => sw('l' + i)) }).caps.channels.length, 8);
+    z.stop();
+  });
+
+  it('a thermostat: kind climate with limits and modes; measured, target, mode, heating; set within its limits', async () => {
+    const { mq, z, by } = running();
+    const d = by()['Heizung Bad'];
+    assert.equal(d.kind, 'climate');
+    assert.deepEqual(d.caps, { setpoint: { min: 5, max: 30, step: 0.5 }, modes: ['off', 'heat'], battery: true, ota: true });
+    mq.emit('zigbee2mqtt/Heizung Bad', { local_temperature: 20.44, occupied_heating_setpoint: 21.5, system_mode: 'heat', running_state: 'heat', pi_heating_demand: 37, battery: 64, linkquality: 60 });
+    assert.deepEqual(by()['Heizung Bad'].values, { battery: 64, linkquality: 60, temperature: 20.4, setpoint: 21.5, mode: 'heat', valve: 37, heating: true, ota: { state: 'idle' } });
+    mq.emit('zigbee2mqtt/Heizung Bad', { running_state: 'idle', system_mode: 'emergency_heating' });
+    assert.deepEqual([by()['Heizung Bad'].values.heating, by()['Heizung Bad'].values.mode], [false, 'heat'], 'an unknown mode is not reported');
+    assert.equal(await z.set('54:ef:44:10:00:aa:bb:cc', { setpoint: 22.26 }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Heizung Bad/set', { occupied_heating_setpoint: 22.5 }]);
+    assert.equal(by()['Heizung Bad'].values.setpoint, 22.5);
+    assert.equal(await z.set('54:ef:44:10:00:aa:bb:cc', { setpoint: 99, mode: 'off' }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Heizung Bad/set', { occupied_heating_setpoint: 30, system_mode: 'off' }]);
+    for (const bad of [{ mode: 'emergency_heating' }, { mode: 'auto' }, { setpoint: '21' }, { on: true }, {}]) assert.equal(await z.set('54:ef:44:10:00:aa:bb:cc', bad), 'invalid', JSON.stringify(bad));
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { setpoint: 21 }), 'invalid', 'a plug is no thermostat');
+    // current_heating_setpoint (Tuya), no limits given; a climate without a setpoint is none
+    const tuya = summarize({ exposes: [{ type: 'climate', features: [{ type: 'numeric', name: 'current_heating_setpoint', property: 'current_heating_setpoint' }, { type: 'numeric', name: 'local_temperature', property: 'local_temperature' }, { type: 'enum', name: 'system_mode', property: 'system_mode', values: ['auto', 'heat', 'off'] }] }] });
+    assert.deepEqual(tuya, { kind: 'climate', caps: { setpointProp: 'current_heating_setpoint', setpoint: { min: 5, max: 30, step: 0.5 }, modes: ['off', 'heat', 'auto'] } });
+    assert.deepEqual(valuesOf({ current_heating_setpoint: 19, local_temperature: 18.26, pi_heating_demand: 0 }, tuya.caps), { temperature: 18.3, setpoint: 19, valve: 0, heating: false });
+    assert.notEqual(summarize({ exposes: [{ type: 'climate', features: [{ type: 'numeric', name: 'local_temperature', property: 'local_temperature' }] }] }).kind, 'climate');
+    z.stop();
+  });
+
+  it('firmware over the air: what zigbee2mqtt knows of a device, check and update through bridge/request, the answers', async () => {
+    const { mq, z, by } = running();
+    assert.deepEqual([by()['Steckdose Kaffee'].caps.ota, by()['Alt'].caps.ota], [true, undefined]);
+    assert.deepEqual(by()['Steckdose Kaffee'].values, { ota: { state: 'idle' } });
+    assert.equal(by()['Alt'].values.ota, undefined, 'no OTA for this device: nothing');
+    mq.emit('zigbee2mqtt/Steckdose Kaffee', { state: 'OFF', update: { state: 'available', installed_version: 587765297, latest_version: 587814449 } });
+    assert.deepEqual(by()['Steckdose Kaffee'].values, { on: false, ota: { state: 'available', installed: '587765297', latest: '587814449' } });
+    mq.emit('zigbee2mqtt/Alt', { state: 'ON', update: { state: 'available' } });
+    assert.deepEqual(by()['Alt'].values, { on: true });
+    // search
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { ota: 'check' }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/bridge/request/device/ota_update/check', { id: '0x000d6ffffe1a2b3c' }]);
+    clock += 4000;
+    mq.emit('zigbee2mqtt/bridge/response/device/ota_update/check', { data: { id: '0x000d6ffffe1a2b3c', update_available: true }, status: 'ok' });
+    assert.deepEqual(by()['Steckdose Kaffee'].values.ota, { state: 'available', installed: '587765297', latest: '587814449', checked: new Date(clock).toISOString() });
+    // start: shown as running at once, then the progress of the device (whole percent)
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { ota: 'update' }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/bridge/request/device/ota_update/update', { id: '0x000d6ffffe1a2b3c' }]);
+    assert.deepEqual([by()['Steckdose Kaffee'].values.ota.state, by()['Steckdose Kaffee'].values.ota.progress], ['updating', 0]);
+    mq.emit('zigbee2mqtt/Steckdose Kaffee', { update: { state: 'updating', progress: 37.62, remaining: 800, installed_version: 587765297, latest_version: 587814449 } });
+    assert.equal(by()['Steckdose Kaffee'].values.ota.progress, 38);
+    z.dirty = false;
+    mq.emit('zigbee2mqtt/Steckdose Kaffee', { update: { state: 'updating', progress: 37.9, remaining: 790, installed_version: 587765297, latest_version: 587814449 } });
+    assert.equal(z.dirty, false, 'the same whole percent again is no new report');
+    mq.emit('zigbee2mqtt/Steckdose Kaffee', { update: { state: 'idle', installed_version: 587814449, latest_version: 587814449 } });
+    assert.deepEqual(by()['Steckdose Kaffee'].values.ota, { state: 'idle', installed: '587814449', latest: '587814449', checked: new Date(clock).toISOString() });
+    // a failed search / a failed start (the device sleeps, no image): an error, never "running" for ever
+    await z.set('a4:c1:38:00:00:11:22:33', { ota: 'check' });
+    mq.emit('zigbee2mqtt/bridge/response/device/ota_update/check', { data: { id: '0xa4c1380000112233' }, status: 'error', error: 'Failed to check if update available for \'Schalter Flur\' (Device didn\'t respond to OTA request)' });
+    assert.deepEqual(by()['Schalter Flur'].values.ota, { state: 'idle', error: 'check_failed' });
+    await z.set('a4:c1:38:00:00:11:22:33', { ota: 'update' });
+    assert.deepEqual(by()['Schalter Flur'].values.ota, { state: 'updating', progress: 0 }, 'a new request clears the old error');
+    mq.emit('zigbee2mqtt/bridge/response/device/ota_update/update', { data: { id: 'Schalter Flur' }, status: 'error', error: 'Update failed' });
+    assert.deepEqual(by()['Schalter Flur'].values.ota, { state: 'available', error: 'update_failed' });
+    // refused: a device without OTA, something else than check / update; answers for unknown devices and broken ones are ignored
+    const n = mq.st.pubs.length;
+    assert.equal(await z.set('00:12:4b:00:00:00:00:09', { ota: 'update' }), 'invalid');
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { ota: 'erase' }), 'invalid');
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { ota: true }), 'invalid');
+    assert.equal(await z.set('00:00:00:00:00:00:00:01', { ota: 'check' }), 'not_found');
+    assert.equal(mq.st.pubs.length, n);
+    mq.emit('zigbee2mqtt/bridge/response/device/ota_update/check', { data: { id: '0x0000000000000001' }, status: 'ok' });
+    mq.emit('zigbee2mqtt/bridge/response/device/ota_update/check', 'not json');
+    mq.emit('zigbee2mqtt/bridge/response/device/ota_update/schedule', { data: { id: '0x000d6ffffe1a2b3c' }, status: 'error' });
+    assert.equal(by()['Steckdose Kaffee'].values.ota.error, undefined);
+    // an older zigbee2mqtt: update_available
+    assert.deepEqual(valuesOf({ update_available: true }, { ota: true }), { ota: { state: 'available' } });
+    assert.deepEqual(valuesOf({ update: { state: 'nonsense', progress: 500, installed_version: '<b>', latest_version: '2.3.089' } }, { ota: true }), { ota: { state: 'idle', latest: '2.3.089' } });
+    assert.deepEqual(valuesOf({ update: { state: 'available' } }, {}), {}, 'not without the capability');
+    // not running: nothing goes out
+    mq.emit('zigbee2mqtt/bridge/state', 'offline');
+    assert.equal(await z.set('00:0d:6f:ff:fe:1a:2b:3c', { ota: 'check' }), 'not_running');
+    z.stop();
+  });
+
+  it('the report to the server carries channels, thermostat values and OTA', async () => {
+    const posts = [];
+    const { mq, z } = running({ reporter: { post: async (p, b) => { posts.push([p, b]); return { ok: true, status: 200 }; } } });
+    mq.emit('zigbee2mqtt/Schalter Flur', { state_l1: 'ON', state_l2: 'OFF' });
+    mq.emit('zigbee2mqtt/Heizung Bad', { local_temperature: 20, occupied_heating_setpoint: 21, system_mode: 'heat', update: { state: 'scheduled' } });
+    await z.report(true);
+    const dev = Object.fromEntries(posts[0][1].devices.map((d) => [d.name, d]));
+    assert.deepEqual([dev['Schalter Flur'].caps.channels, dev['Schalter Flur'].values.ch], [['l1', 'l2', 'l3'], { l1: true, l2: false }]);
+    assert.deepEqual([dev['Heizung Bad'].kind, dev['Heizung Bad'].values.setpoint, dev['Heizung Bad'].values.ota], ['climate', 21, { state: 'scheduled' }]);
+    assert.doesNotMatch(JSON.stringify(posts[0][1]), /chProps|setpointProp|stateProp/);
+    z.stop();
+  });
+
   it('helpers: summarize, valuesOf, setPayload, deviceOf, ieee conversion', () => {
     assert.equal(macOfIeee('0x00158D0001A2B3C4'), '00:15:8d:00:01:a2:b3:c4');
     assert.equal(ieeeOf('00:15:8d:00:01:a2:b3:c4'), '0x00158d0001a2b3c4');
