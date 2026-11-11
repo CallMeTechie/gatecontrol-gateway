@@ -228,6 +228,9 @@ main() {
   [ "$(id -u)" = 0 ] || { echo "Bitte als root ausführen (sudo gatecontrol-start)" >&2; exit 1; }
   install -d -m 0755 "$GC_RUN" "$GC_DIR/gateway-state" "$GC_DIR/gateway-cache" "$GC_DIR/deconz"
   install -d -m 0700 -o root -g root "$CONFIG_DIR"
+  # Flag der Einrichtungsseite (gatecontrol-setup.path) zuerst verbrauchen:
+  # das Gateway legt es nach jedem Verbinden neu an.
+  rm -f -- "$GC_DIR/gateway-state/setup-done"
 
   local imported=0 rc=0
   import_env || rc=$?

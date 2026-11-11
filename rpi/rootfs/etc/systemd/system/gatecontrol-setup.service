@@ -6,8 +6,7 @@ After=docker.service gatecontrol-gateway.service
 
 [Service]
 Type=oneshot
-# zuerst verbrauchen: das Gateway legt das Flag bei jedem Verbinden neu an
-ExecStartPre=/bin/rm -f /opt/gatecontrol-gateway/gateway-state/setup-done
+# gatecontrol-start verbraucht das Flag gateway-state/setup-done zuerst (das Gateway legt es bei jedem Verbinden neu an)
 # GC_SETUP_RUN=1: der Hostname bleibt bis zum nächsten Start (die Seite ist noch offen)
 Environment=GC_SETUP_RUN=1
 ExecStart=/usr/local/sbin/gatecontrol-start

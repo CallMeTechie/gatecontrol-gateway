@@ -89,10 +89,12 @@ expect ".env geschrieben (der Container wird später nicht neu erstellt)" grep -
 echo "== über die Einrichtungsseite verbunden (gatecontrol-setup.service, GC_SETUP_RUN=1)"
 install -d -m 0700 "$T/opt/config"
 valid_env >"$T/opt/config/gateway.env"
+: >"$T/opt/gateway-state/setup-done"
 : >"$T/docker.log"
 expect "Exit 0" env GC_SETUP_RUN=1 PATH="$T/bin:$PATH" GC_LIB="$ROOTFS/usr/local/lib/gatecontrol" GC_DIR="$T/opt" GC_BOOT="$T/boot" \
   GC_RUN="$T/run" GC_ETC="$T/etc" GC_ISSUE_DIR="$T/issue" bash "$START"
 expect "Status OK" grep -q '^OK' "$T/run/status"
+expect "Flag setup-done verbraucht (sonst startete gatecontrol-setup.path in einer Schleife)" test ! -e "$T/opt/gateway-state/setup-done"
 expect "Hostname bleibt gatecontrol (Seite ist noch offen)" grep -qx 'gatecontrol' "$T/hostname"
 expect "Gateway + Edge + MQTT gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway edge mqtt$' "$T/docker.log"
 expect "Gateway nicht neu erstellt" not grep -q 'force-recreate' "$T/docker.log"
