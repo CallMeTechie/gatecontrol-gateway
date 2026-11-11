@@ -16,11 +16,17 @@
 // KI-Server im LAN: Adresse als private IPv4/IPv6 oder als Name (resolve.js,
 // nur private Adressen), optional mit API-Schlüssel (creds.js – vom Server
 // geholt, nie im Config-Pull, nie im Log). Grafikkarte: gpu.js.
+//
+// https mit selbst signiertem Zertifikat: der Admin heftet es an (lan.pin, SHA-256).
+// „Verbindung testen“ zeigt dafür das Zertifikat des Servers (nur der Handshake,
+// src/proxy/tlsPin.js); danach gilt jede Verbindung nur mit genau diesem Zertifikat.
+// Ohne Pin bleibt die normale Prüfung – sie wird nie abgeschaltet.
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { normalizeAi, parseLanUrl, validModel, validKey, APIS } = require('./config');
+const { normalizeAi, parseLanUrl, parsePin, validModel, validKey, APIS, PIN_INVALID } = require('./config');
+const { inspectLeafCertificate } = require('../proxy/tlsPin');
 const { createOllama, createOpenAi } = require('./backends');
 const { createResolver } = require('./resolve');
 const { AiKeyStore } = require('./creds');
@@ -44,8 +50,11 @@ const GPU_EVERY_MS = 10 * 60_000;
 const MAX_ACTIVE = 1;
 const MAX_WAITING = 2;
 const STATE_RE = /^(idle|running|exit) ([0-9]{1,12})\s*$/;
-// was dieses Gateway kann (der Server schaltet danach frei): GPU-Bericht, API-Schlüssel, Namen/IPv6, Verbindungstest
-const SUPPORTS = Object.freeze(['gpu', 'lanKey', 'lanHost', 'probe']);
+// was dieses Gateway kann (der Server schaltet danach frei): GPU-Bericht, API-Schlüssel, Namen/IPv6, Verbindungstest,
+// angeheftetes Zertifikat (https mit selbst signiertem Zertifikat)
+const SUPPORTS = Object.freeze(['gpu', 'lanKey', 'lanHost', 'probe', 'lanPin']);
+// der Test zeigt das Zertifikat des Servers, wenn es die Prüfung nicht besteht oder nicht das angeheftete ist
+const TLS_ERRORS = new Set(['tls_untrusted', 'tls_pin_mismatch']);
 
 function readText(file, max = 4096) {
   try {
@@ -99,7 +108,7 @@ function parseChat(b) {
 class AiService {
   constructor({
     stateDir = null, ctlDir = '/gc-ai', sysRoot = '/sys', procRoot = '/proc', now = Date.now, serviceBackend = null, lanBackend = null,
-    serverUrl = null, apiToken = '', keyStore = null, resolver = null,
+    serverUrl = null, apiToken = '', keyStore = null, resolver = null, inspect = inspectLeafCertificate,
   } = {}) {
     Object.assign(this, { stateDir, ctlDir, sysRoot, procRoot, now });
     this.cfg = normalizeAi(undefined);
@@ -107,7 +116,8 @@ class AiService {
     this.resolver = resolver || createResolver();
     this.keys = keyStore || new AiKeyStore({ serverUrl, apiToken, stateDir });
     this.keysBusy = null;
-    this.makeLan = lanBackend || ((lan) => this._lanBackend(lan.url, lan.api, () => this.keys.get()));
+    this.inspect = inspect;
+    this.makeLan = lanBackend || ((lan) => this._lanBackend(lan.url, lan.api, () => this.keys.get(), lan.pin));
     this.lan = null;
     this.reachable = false;
     this.version = null;
@@ -131,12 +141,26 @@ class AiService {
   // ─── Einstellung und Dienst ────────────────────────────────────────────
   wantService() { return this.cfg.enabled && this.cfg.source === 'service'; }
 
-  /** Ein Backend für einen KI-Server im LAN: Namen nur an private Adressen, Schlüssel als Bearer. */
-  _lanBackend(url, api, auth) {
+  /** Ein Backend für einen KI-Server im LAN: Namen nur an private Adressen, Schlüssel als Bearer, https optional mit Pin. */
+  _lanBackend(url, api, auth, pin = null) {
     const p = parseLanUrl(url);
     const base = { protocol: p.protocol, host: p.host, port: p.port, auth };
     if (p.name) base.lookup = this.resolver.lookupFor(p.host);
+    if (p.protocol === 'https:' && pin) base.pin = pin;
     return api === 'openai' ? createOpenAi(base) : createOllama(base);
+  }
+
+  /**
+   * Das Zertifikat, das der KI-Server zeigt (nur der TLS-Handshake, keine Anfrage, kein Schlüssel):
+   * { sha256, subject, issuer, validTo, selfSigned } oder null. Derselbe Weg wie die Anfragen –
+   * Namen nur an private Adressen.
+   */
+  async _certificate(p) {
+    try {
+      const c = await this.inspect({ host: p.host, port: p.port, timeoutMs: 10_000, ...(p.name ? { lookup: this.resolver.lookupFor(p.host) } : {}) });
+      if (!c || typeof c.sha256 !== 'string') return null;
+      return { sha256: c.sha256, subject: cleanText(c.subject, 200) || null, issuer: cleanText(c.issuer, 200) || null, validTo: c.validTo || null, selfSigned: c.selfSigned === true };
+    } catch { return null; }
   }
 
   /** API-Schlüssel mit keyRev abgleichen (im Hintergrund; danach gleich neu fragen). */
@@ -174,7 +198,8 @@ class AiService {
       this.version = null;
       this.models = [];
       this.loadedModels = [];
-      logger.info({ enabled: this.cfg.enabled, source: this.cfg.source, lanApi: this.cfg.lan && this.cfg.lan.api, lanKey: !!(this.cfg.lan && this.cfg.lan.keyRev) }, 'ai: settings applied');
+      logger.info({ enabled: this.cfg.enabled, source: this.cfg.source, lanApi: this.cfg.lan && this.cfg.lan.api, lanKey: !!(this.cfg.lan && this.cfg.lan.keyRev),
+        lanPin: !!(this.cfg.lan && this.cfg.lan.pin) }, 'ai: settings applied');
     }
     this._writeControl();
     this._writeWish();
@@ -370,9 +395,12 @@ class AiService {
 
   // ─── Verbindungstest (Einrichtung, noch nicht gespeichert) ──────────────
   /**
-   * POST /api/ai/probe { url, api, key? } – einen KI-Server im LAN fragen, ohne etwas zu
-   * speichern: → { reachable, version, models, auth, error }. Nur private Ziele (wie lan.url);
-   * ein Test zugleich ('busy'). 'invalid_url' | 'invalid' bei falscher Eingabe.
+   * POST /api/ai/probe { url, api, key?, pin? } – einen KI-Server im LAN fragen, ohne etwas zu
+   * speichern: → { reachable, version, models, auth, pinned, certificate, error }. Nur private
+   * Ziele (wie lan.url); ein Test zugleich ('busy'). 'invalid_url' | 'invalid' bei falscher Eingabe.
+   * https: `pin` (SHA-256) heftet das Zertifikat an. Besteht das Zertifikat die Prüfung nicht
+   * (tls_untrusted) oder ist es nicht das angeheftete (tls_pin_mismatch), trägt `certificate`
+   * das gezeigte Zertifikat – der Admin vergleicht den Fingerabdruck und bestätigt ihn.
    */
   async probe(b) {
     const body = b && typeof b === 'object' && !Array.isArray(b) ? b : {};
@@ -381,17 +409,21 @@ class AiService {
     const api = body.api == null ? 'ollama' : body.api;
     if (!APIS.has(api)) return { error: 'invalid' };
     if (body.key != null && body.key !== '' && !validKey(body.key)) return { error: 'invalid' };
+    const pin = parsePin(body.pin, p.protocol);
+    if (pin === PIN_INVALID) return { error: 'invalid' };
     if (this.probing) return { error: 'busy' };
     const key = body.key ? body.key : null;
-    const b2 = this._lanBackend(p.origin, api, () => key);
+    const b2 = this._lanBackend(p.origin, api, () => key, pin);
     this.probing = true;
     try {
       const version = await b2.version();
       const models = await b2.models();
-      return { probe: { reachable: true, url: p.origin, api, version, models, auth: !!key, error: null } };
+      return { probe: { reachable: true, url: p.origin, api, version, models, auth: !!key, pinned: !!pin, certificate: null, error: null } };
     } catch (e) {
       const code = cleanText(String((e && e.code) || 'error'), 32);
-      return { probe: { reachable: false, url: p.origin, api, version: null, models: [], auth: !!key, error: { code, message: cleanText(String((e && e.message) || e), 160) } } };
+      const certificate = TLS_ERRORS.has(code) ? await this._certificate(p) : null;
+      return { probe: { reachable: false, url: p.origin, api, version: null, models: [], auth: !!key, pinned: !!pin, certificate,
+        error: { code, message: cleanText(String((e && e.message) || e), 160) } } };
     } finally {
       this.probing = false;
     }
@@ -471,7 +503,8 @@ class AiService {
       pull: this._pullView(),
       host: { memTotal: h.memTotal, cores: h.cores, arch: h.arch, gpu: h.gpu, nvidiaDriver: h.nvidiaDriver, kfd: h.kfd, render: h.render },
       gpu: this.serviceGpu(),
-      lan: this.cfg.source === 'lan' && this.cfg.lan ? { url: this.cfg.lan.url, api: this.cfg.lan.api, reachable: this.reachable, auth: !!this.keys.get() } : null,
+      lan: this.cfg.source === 'lan' && this.cfg.lan
+        ? { url: this.cfg.lan.url, api: this.cfg.lan.api, reachable: this.reachable, auth: !!this.keys.get(), pinned: !!this.cfg.lan.pin } : null,
       supports: SUPPORTS.slice(),
       busy: { active: this.active, waiting: this.waiting.length },
       error: this.lastError ? { code: this.lastError.code, at: this.lastError.at } : null,

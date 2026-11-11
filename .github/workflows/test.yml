@@ -70,6 +70,27 @@ jobs:
       - name: Edge-Host im leeren Netz-Namespace
         run: sudo "$(command -v node)" tests/live/edge-isolated-live.js
 
+  mqtt-tls:
+    # MQTT-Broker mit TLS (docs/edge.md „MQTT“): ein echter Mosquitto als Benutzer
+    # 61001 mit den Rechten der Compose-Datei – Port 8883 mit dem selbst erzeugten
+    # Zertifikat des Gateways (Fingerabdruck aus dem Status), Port 1883 daneben.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, registry-url: 'https://npm.pkg.github.com/', scope: '@callmetechie' }
+      - run: npm ci
+        env: { NODE_AUTH_TOKEN: '${{ secrets.GH_PACKAGES_TOKEN }}' }
+      - name: Mosquitto (nur das Programm, der Dienst des Pakets bleibt aus)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mosquitto
+          sudo systemctl disable --now mosquitto || true
+          /usr/sbin/mosquitto -h | head -n 1 || true
+      - name: Broker mit TLS-Listener
+        run: sudo env MOSQUITTO=/usr/sbin/mosquitto "$(command -v node)" tests/live/mqtt-tls-live.js
+
   edge-fence:
     # Netzgrenze des Edge-Containers (nur noch für alte Compose-Dateien mit Edge
     # im Host-Netz) gegen den echten Kernel, je Backend in einem eigenen

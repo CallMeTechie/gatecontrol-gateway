@@ -3,7 +3,7 @@
 // `features.ai` (Vertrag Phase 3c, Schritt 3 §1 – docs/local-ai.md) prüfen.
 //   enabled: true | false
 //   source:  'service' (Dienst ki auf diesem Gateway) | 'lan' (vorhandener KI-Server)
-//   lan:     { url, api: 'ollama' | 'openai', keyRev? } – nur mit source 'lan'
+//   lan:     { url, api: 'ollama' | 'openai', keyRev?, pin? } – nur mit source 'lan'
 // Fehlt `features.ai` (älterer Server) → aus. Die LAN-Adresse ist Server-
 // Eingabe: nur http/https, ein Port, kein Pfad, keine Zugangsdaten; der Host
 // als private IPv4-Adresse (RFC 1918), als private IPv6-Adresse (fc00::/7,
@@ -12,9 +12,14 @@
 // Adressen verbunden. Alles andere → kein LAN-Server.
 // `keyRev`: es gibt einen API-Schlüssel – das Gateway holt ihn selbst
 // (creds.js, nie im Config-Pull).
+// `pin` (nur https): SHA-256-Fingerabdruck des Server-Zertifikats, den der Admin
+// bestätigt hat – verbunden wird dann nur mit genau diesem Zertifikat
+// (src/proxy/tlsPin.js). Ein unlesbarer Pin passt auf kein Zertifikat (PIN_INVALID):
+// lieber keine Verbindung als eine ohne die bestätigte Prüfung.
 
 const net = require('node:net');
 const { isRfc1918 } = require('../print/config');
+const { normalizeFingerprint } = require('../proxy/tlsPin');
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const APIS = new Set(['ollama', 'openai']);
@@ -22,6 +27,14 @@ const APIS = new Set(['ollama', 'openai']);
 const MODEL_RE = /^[a-z0-9][a-z0-9._-]{0,63}(\/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9._-]{1,64})?$/;
 const REV_RE = /^[0-9a-f]{8,64}$/;
 const LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+// ein Pin, der zu keinem Zertifikat passt (kein gültiger Fingerabdruck)
+const PIN_INVALID = 'invalid';
+
+/** `lan.pin` des Servers → Fingerabdruck (hex), PIN_INVALID (unlesbar) oder null (keiner / kein https). */
+function parsePin(raw, protocol) {
+  if (protocol !== 'https:' || raw === undefined || raw === null || raw === '') return null;
+  return normalizeFingerprint(raw) || PIN_INVALID;
+}
 
 /** fc00::/7 – private IPv6-Adressen (ULA), z. B. fd00::1 */
 function isUla(ip) {
@@ -77,7 +90,8 @@ function normalizeAi(raw) {
   if (source === 'lan' && isObj(a.lan)) {
     const p = parseLanUrl(a.lan.url);
     if (p) {
-      lan = { url: p.origin, api: APIS.has(a.lan.api) ? a.lan.api : 'ollama', keyRev: typeof a.lan.keyRev === 'string' && REV_RE.test(a.lan.keyRev) ? a.lan.keyRev : null };
+      lan = { url: p.origin, api: APIS.has(a.lan.api) ? a.lan.api : 'ollama', keyRev: typeof a.lan.keyRev === 'string' && REV_RE.test(a.lan.keyRev) ? a.lan.keyRev : null,
+        pin: parsePin(a.lan.pin, p.protocol) };
     }
   }
   return { enabled: a.enabled === true, source, lan };
@@ -89,4 +103,4 @@ const validModel = (m) => typeof m === 'string' && MODEL_RE.test(m);
 const KEY_RE = /^[\x21-\x7e]{1,512}$/;
 const validKey = (k) => typeof k === 'string' && KEY_RE.test(k);
 
-module.exports = { normalizeAi, parseLanUrl, validModel, validKey, isLanAddress, isUla, isHostname, MODEL_RE, APIS };
+module.exports = { normalizeAi, parseLanUrl, parsePin, validModel, validKey, isLanAddress, isUla, isHostname, MODEL_RE, APIS, PIN_INVALID };

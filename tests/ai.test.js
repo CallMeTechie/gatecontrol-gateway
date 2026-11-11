@@ -115,7 +115,7 @@ describe('ai: features.ai', () => {
 
   it('LAN server: only http/https to a private address (or a name) with a port, no path, no credentials', () => {
     const ok = normalizeAi({ enabled: true, source: 'lan', lan: { url: 'http://192.168.1.20:11434', api: 'ollama' } });
-    assert.deepEqual(ok.lan, { url: 'http://192.168.1.20:11434', api: 'ollama', keyRev: null });
+    assert.deepEqual(ok.lan, { url: 'http://192.168.1.20:11434', api: 'ollama', keyRev: null, pin: null });
     assert.equal(normalizeAi({ enabled: true, source: 'lan', lan: { url: 'http://10.0.0.5:1234/v1', api: 'openai' } }).lan.url, 'http://10.0.0.5:1234');
     assert.equal(parseLanUrl('https://172.16.4.2').port, 443);
     // Namen und private IPv6-Adressen gehen (aufgelöst und geprüft wird beim Verbinden, ai_lan.test.js)
@@ -382,7 +382,7 @@ describe('ai: existing server in the LAN', () => {
   it('only the configured address: the service talks to lan.url, never follows a redirect', async () => {
     stub = await startStub({ redirect: true });
     const svc = new AiService({ stateDir: null, ctlDir: '/nonexistent-gc-ai', lanBackend: (lan) => {
-      assert.deepEqual(lan, { url: 'http://192.168.77.5:1234', api: 'openai', keyRev: null });
+      assert.deepEqual(lan, { url: 'http://192.168.77.5:1234', api: 'openai', keyRev: null, pin: null });
       return createOpenAi(stub.base);
     } });
     await svc.apply({ enabled: true, source: 'lan', lan: { url: 'http://192.168.77.5:1234/v1', api: 'openai' } });

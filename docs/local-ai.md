@@ -19,6 +19,7 @@ entscheidet nach dem Modus, ob die lokale KI oder die Cloud antwortet.
 { "enabled": true, "source": "service", "lan": null }
 { "enabled": true, "source": "lan", "lan": { "url": "http://192.168.1.20:11434", "api": "ollama" } }
 { "enabled": true, "source": "lan", "lan": { "url": "http://ki-pc.local:8000", "api": "openai", "keyRev": "<16 Hex-Zeichen>" } }
+{ "enabled": true, "source": "lan", "lan": { "url": "https://192.168.1.20:11434", "api": "ollama", "pin": "<64 Hex-Zeichen>" } }
 ```
 
 * `enabled` – aus: der Dienst `ki` wird beendet (Steuerdatei weg), der Proxy antwortet `503 feature_disabled`.
@@ -52,6 +53,21 @@ entscheidet nach dem Modus, ob die lokale KI oder die Cloud antwortet.
   Proxy, vLLM `--api-key`, LocalAI, LM Studio, llama.cpp `--api-key`), nie ins Log und
   nie in die Telemetrie. Fehlt `keyRev`, vergisst das Gateway den Schlüssel (auch die
   Datei). Antwortet der Server mit 401/403 → Fehler `unauthorized`.
+* `lan.pin` (nur `https`, Capability-Eintrag `lanPin` in `supports`) – der
+  **SHA-256-Fingerabdruck des Server-Zertifikats** (64 Hex-Zeichen; Doppelpunkte,
+  Großbuchstaben und `sha256:` werden angenommen), den der Admin in GateControl
+  bestätigt hat. Ein KI-Server mit `https` hat im Heimnetz fast immer ein selbst
+  signiertes Zertifikat; ohne Pin lehnt das Gateway es ab (`tls_untrusted`) – die
+  Prüfung wird **nie** abgeschaltet. Mit Pin ersetzt der Fingerabdruck die
+  Ketten- und Namensprüfung (derselbe Mechanismus wie `backend_tls_fingerprint` der
+  HTTPS-Routen, `src/proxy/tlsPin.js`): jede Verbindung – Zustand, Modell-Liste,
+  Chat – gibt es nur mit **genau diesem** Zertifikat, vorher geht kein Byte der
+  Anfrage hinaus (auch kein API-Schlüssel); keine wiederverwendeten Verbindungen,
+  keine TLS-Sitzungen. Zeigt der Server ein anderes Zertifikat →
+  `tls_pin_mismatch`, Zustand `unreachable`, bis der Admin das neue bestätigt. Ein
+  unlesbarer Pin passt auf kein Zertifikat (lieber keine Verbindung). Ohne
+  `lan.pin` (älterer Server, öffentlich gültiges Zertifikat) bleibt die normale
+  Prüfung.
 * Fehlt `features.ai` (älterer Server) → aus.
 
 Capability `ai`. Server-Setting „welches Gateway, welches Modell, welcher
@@ -136,7 +152,7 @@ Hinweise, nie ein Verbot.
 | `POST /api/ai/pull/cancel {}` | 202; 409 `no_pull` |
 | `POST /api/ai/delete { model }` | 200 `{ deleted: true }`; 400; 404 `not_found`; 409 `not_running` |
 | `POST /api/ai/chat { … }` | 200 NDJSON-Strom (unten); vorher 400 `invalid_request`, 409 `not_running` \| `model_missing`, 429 `busy`, 503 |
-| `POST /api/ai/probe { url, api?, key? }` (ab 1.31.0) | 200 `{ probe: { reachable, url, api, version, models, auth, error } }` – „Verbindung testen“ in der Einrichtung: einen KI-Server im LAN fragen, **ohne** etwas zu speichern (geht auch, solange die lokale KI aus ist). Gleiche Prüfung wie `lan.url` (nur private Ziele, Namen nur zu privaten Adressen); `key` nur für diesen Test, nie gespeichert. 400 `invalid_url` \| `invalid`; 429 `busy` (ein Test zugleich) |
+| `POST /api/ai/probe { url, api?, key?, pin? }` (ab 1.31.0; `pin`, `pinned`, `certificate` mit `supports: lanPin`) | 200 `{ probe: { reachable, url, api, version, models, auth, pinned, certificate, error } }` – „Verbindung testen“ in der Einrichtung: einen KI-Server im LAN fragen, **ohne** etwas zu speichern (geht auch, solange die lokale KI aus ist). Gleiche Prüfung wie `lan.url` (nur private Ziele, Namen nur zu privaten Adressen); `key` nur für diesen Test, nie gespeichert. `https`: `pin` heftet das Zertifikat für diesen Test an (`pinned`). Besteht das Zertifikat die Prüfung nicht (`error.code: tls_untrusted`) oder ist es nicht das angeheftete (`tls_pin_mismatch`), trägt `certificate` das gezeigte Zertifikat `{ sha256, subject, issuer, validTo, selfSigned }` – gelesen nur mit einem TLS-Handshake (keine Anfrage, kein Schlüssel), damit der Admin den Fingerabdruck vergleichen und bestätigen kann. 400 `invalid_url` \| `invalid`; 429 `busy` (ein Test zugleich) |
 
 `model`: Ollama-Name `^[a-z0-9][a-z0-9._-]{0,63}(/[a-z0-9][a-z0-9._-]{0,63})?(:[A-Za-z0-9._-]{1,64})?$`.
 
@@ -175,7 +191,12 @@ Gateway die Anfrage an Ollama ab.
   es einen gibt. Antworten ≤ 8 MB, Liste ≤ 1 MB.
 * Fehlercodes: `unreachable`, `not_private` (Name zeigt nicht ins Heimnetz),
   `unauthorized` (401/403: Schlüssel fehlt oder falsch), `timeout`, `redirect`,
-  `bad_response`, `http_<n>`.
+  `bad_response`, `http_<n>`; bei `https` dazu `tls_untrusted` (das Zertifikat
+  besteht die Prüfung nicht – selbst signiert, unbekannter Aussteller, abgelaufen,
+  falscher Name) und `tls_pin_mismatch` (nicht das angeheftete Zertifikat).
+* `https`: ohne `lan.pin` die normale Zertifikatsprüfung, mit `lan.pin` nur genau
+  dieses Zertifikat (§1). `rejectUnauthorized: false` gibt es nur im Pin-Agenten,
+  der den Socket erst nach bestandenem Fingerabdruck herausgibt.
 * Kein Download und kein Löschen von Modellen auf fremden Servern.
 
 ## 4. Telemetrie `features.ai` (klein, Heartbeat ≤ 16 KB)
@@ -190,15 +211,16 @@ Gateway die Anfrage an Ollama ab.
             "nvidiaDriver": "550.54.14", "kfd": false, "render": true },
   "gpu": { "mode": "nvidia", "devices": ["nvidia"], "access": true,
            "cards": [{ "name": "NVIDIA GeForce RTX 3060", "vramMb": 12288, "driver": "550.54.14" }], "used": true },
-  "lan": null, "supports": ["gpu", "lanKey", "lanHost", "probe"], "error": null }
+  "lan": null, "supports": ["gpu", "lanKey", "lanHost", "probe", "lanPin"], "error": null }
 ```
 
 `state`: `off` | `service_missing` | `starting` | `running` | `unreachable` (LAN-Server) | `error`.
 `models` ≤ 12, `loaded` ≤ 2; `host.gpu` und `gpu` siehe §2.1 (bis 1.30.0 stand in
 `host.gpu` nur der Hersteller, und der Dienst nutzte keine Grafikkarte). `lan` bei
-`source: lan`: `{ url, api, reachable, auth }` (`auth`: ein Schlüssel ist da – nie der
-Schlüssel). `supports` (ab 1.31.0): was dieses Gateway über 1.26.0 hinaus kann – der
-Server schaltet danach frei (GPU-Wahl, API-Schlüssel, Namen/IPv6, „Verbindung testen“).
+`source: lan`: `{ url, api, reachable, auth, pinned }` (`auth`: ein Schlüssel ist da – nie der
+Schlüssel; `pinned`: das Zertifikat ist angeheftet). `supports` (ab 1.31.0): was dieses Gateway über 1.26.0 hinaus kann – der
+Server schaltet danach frei (GPU-Wahl, API-Schlüssel, Namen/IPv6, „Verbindung testen“,
+`lanPin`: angeheftetes Zertifikat für `https`).
 
 ## 5. Server (GateControl)
 
