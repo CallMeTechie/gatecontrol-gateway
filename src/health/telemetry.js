@@ -11,7 +11,7 @@ const path = require('node:path');
 const dns = require('node:dns');
 const { execFileSync } = require('node:child_process');
 const logger = require('../logger');
-const { lanSubnets, primaryLanIp } = require('../discovery/lanInterfaces');
+const { lanSubnets, primaryLanIp, lanSubnets6, primaryLanIp6 } = require('../discovery/lanInterfaces');
 const { catalogue } = require('../discovery/categories');
 const { collectStorage } = require('./storage');
 
@@ -38,6 +38,16 @@ const WG_TOOLS_VERSION = (() => {
     return null;
   }
 })();
+
+// How the gateway runs: 'container' (Docker/Podman — compose file, edge and
+// mqtt services possible) or 'native' (the Proxmox LXC installer: systemd, no
+// Docker — so no edge container). The server shows a note instead of asking
+// for a compose file that does not exist there.
+function runtimeKind(exists = fs.existsSync) {
+  try { return exists('/.dockerenv') || exists('/run/.containerenv') ? 'container' : 'native'; }
+  catch { return null; }
+}
+const RUNTIME = runtimeKind();
 
 // ─── Update-state helpers ────────────────────────────────────────────────
 
@@ -194,6 +204,7 @@ function collectTelemetry() {
     os_platform: process.platform,
     os_release: os.release(),
     arch: process.arch,
+    runtime: RUNTIME,
 
     // Resources
     cpu_cores: os.cpus().length,
@@ -215,6 +226,10 @@ function collectTelemetry() {
     // private LAN address; the server then keeps lan_ip NULL and degrades
     // safely (HTTP 502 / no L4 listener instead of mis-forwarding).
     lan_ip: primaryLanIp(_gwIp),
+    // IPv6 home network: the unique local address (fc00::/7) and the ULA
+    // subnets of the LAN — null / [] without ULA; an older server ignores both.
+    lan_ip6: primaryLanIp6(),
+    lan_subnets6: lanSubnets6(),
 
     // LAN discovery (Phase 2: capability flag now set — /api/lan-scan exists).
     lan_discovery: true,
@@ -234,4 +249,4 @@ function collectTelemetry() {
   };
 }
 
-module.exports = { collectTelemetry, defaultGatewayIp, hardwareProfile };
+module.exports = { collectTelemetry, defaultGatewayIp, hardwareProfile, runtimeKind };

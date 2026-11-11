@@ -4,7 +4,10 @@
 // öffentliche Ziele und Server messen, 5-Min.-Werte bilden, Ausfälle mit
 // Ursache erkennen, Speedtests nach Plan oder auf Zuruf. Alles, was noch
 // nicht beim Server angekommen ist, liegt in /state/inetq-buffer.json und
-// übersteht damit Ausfall und Neustart (bis 7 Tage).
+// übersteht damit Ausfall und Neustart (bis 7 Tage). Das Tagesbudget der
+// Speedtests (Volumen der letzten 24 Stunden) liegt in /state/inetq-budget.json
+// (budget.js): ist es aufgebraucht, startet kein Test mehr, und ein Test nimmt
+// sich nie mehr als den Rest.
 
 const logger = require('../logger');
 const { FeatureStatus, loop } = require('../features/status');
@@ -13,6 +16,7 @@ const { nextSpeedtest } = require('../features/schedule');
 const { Aggregator, OutageDetector } = require('./aggregate');
 const { createPinger, measure: measureReal } = require('./probe');
 const { runSpeedtest: runSpeedtestReal } = require('./speedtest');
+const { SpeedBudget, DEFAULT_DAY_BYTES, MIN_TEST_BYTES } = require('./budget');
 
 const STATE_FILE = 'inetq-buffer.json';
 const INTERVAL_MS = 60_000;
@@ -39,12 +43,13 @@ class InetQuality {
   constructor({
     reporter, serverUrl, apiToken, stateDir, routerIp = () => null,
     measure = measureReal, pinger = createPinger(), speedtest = runSpeedtestReal,
-    now = Date.now, rand = Math.random, intervalMs = INTERVAL_MS, fastMs = FAST_MS,
+    now = Date.now, rand = Math.random, intervalMs = INTERVAL_MS, fastMs = FAST_MS, budget = null,
   }) {
     Object.assign(this, { reporter, serverUrl, apiToken, stateDir, routerIp, measure, pinger, speedtest, now, rand });
     this.server = serverTarget(serverUrl);
     this.status = new FeatureStatus(now);
-    this.cfg = { enabled: false, speedtest: 'off', targets: [] };
+    this.budget = budget || new SpeedBudget({ stateDir, now });
+    this.cfg = { enabled: false, speedtest: 'off', targets: [], speedVolume: { dayBytes: null, downBytes: null, upBytes: null } };
     this.agg = new Aggregator();
     this.samples = [];
     this.outages = new Map(); // start → { start, end, cause } (noch nicht bestätigt)
@@ -98,10 +103,14 @@ class InetQuality {
     });
   }
 
-  apply({ enabled, speedtest = 'off', targets = [] }) {
+  apply({ enabled, speedtest = 'off', targets = [], speedVolume = null }) {
     const was = this.cfg.enabled;
     const planChanged = speedtest !== this.cfg.speedtest;
-    this.cfg = { enabled: !!enabled, speedtest, targets: targets.slice() };
+    const lim = speedVolume || {};
+    this.cfg = {
+      enabled: !!enabled, speedtest, targets: targets.slice(),
+      speedVolume: { dayBytes: lim.dayBytes || null, downBytes: lim.downBytes || null, upBytes: lim.upBytes || null },
+    };
     this.status.setEnabled(this.cfg.enabled);
     if (this.cfg.enabled && (planChanged || !was)) this.nextSpeedtestAt = nextSpeedtest(speedtest, this.now(), this.rand);
     if (this.cfg.enabled && !was) {
@@ -188,14 +197,47 @@ class InetQuality {
     return 'accepted';
   }
 
+  /** Tageslimit: das des Servers (features.inetq.speedVolume.dayBytes), sonst der Standard. */
+  _dayLimit() {
+    return this.cfg.speedVolume.dayBytes || DEFAULT_DAY_BYTES;
+  }
+
+  /**
+   * Volumen-Deckel des nächsten Tests: je Richtung der vom Server gewünschte
+   * (features.inetq.speedVolume), zusammen höchstens der Rest des Tagesbudgets.
+   * null = Budget aufgebraucht, kein Test.
+   */
+  _speedCaps() {
+    const now = this.now();
+    const limit = this._dayLimit();
+    if (this.budget.blockedUntil(limit, now) !== null) return null;
+    const rest = this.budget.remaining(limit, now);
+    if (rest < MIN_TEST_BYTES) return null;
+    return { maxDownBytes: this.cfg.speedVolume.downBytes, maxUpBytes: this.cfg.speedVolume.upBytes, maxTotalBytes: rest };
+  }
+
   _startSpeedtest(reason) {
     this.speedtestRunning = true;
     const run = async () => {
       let r;
-      try {
-        r = await this.speedtest({ serverUrl: this.serverUrl, apiToken: this.apiToken, now: this.now });
-      } catch (err) {
-        r = { at: this.now(), downMbps: null, upMbps: null, bytes: 0, error: String(err.message || err).slice(0, 40) };
+      const caps = this._speedCaps();
+      if (!caps) {
+        // Tagesbudget aufgebraucht: nichts senden, dem Server als abgelehnten Test melden
+        r = { at: this.now(), downMbps: null, upMbps: null, bytes: 0, error: 'budget' };
+      } else {
+        try {
+          r = await this.speedtest({
+            serverUrl: this.serverUrl, apiToken: this.apiToken, now: this.now,
+            ...caps,
+          });
+        } catch (err) {
+          r = { at: this.now(), downMbps: null, upMbps: null, bytes: 0, error: String(err.message || err).slice(0, 40) };
+        }
+        this.budget.record(Number.isFinite(r.bytes) ? r.bytes : 0, this.now());
+        if (r.refused || r.error === 'budget') {
+          const s = r.refused && r.refused.retryAfterS;
+          this.budget.refused(s ? this.now() + s * 1000 : null, this.now());
+        }
       }
       this.lastSpeedtest = r;
       this.speedtests.push(r);
@@ -260,6 +302,8 @@ class InetQuality {
       speedtestRunning: this.speedtestRunning,
       nextSpeedtestAt: this.cfg.enabled ? this.nextSpeedtestAt : null,
       lastSpeedtest: this.lastSpeedtest,
+      // Tagesbudget der Speedtests (budget.js): Verbrauch der letzten 24 h, Limit, gesperrt bis
+      speedBudget: this.loaded ? this.budget.snapshot(this._dayLimit(), this.now()) : null,
       probeMode: this.pinger && this.pinger.mode ? this.pinger.mode() : null,
     });
   }

@@ -14,8 +14,14 @@
 # Layout inside the container:
 #   /opt/gatecontrol-gateway/         Source tree (npm-installed)
 #   /opt/gatecontrol-gateway.previous Backup of last version (created by update)
-#   /etc/gatecontrol-gateway/gateway.env  Env file from dashboard download
+#   /etc/gatecontrol-gateway/gateway.env  Env file (pairing code or downloaded gateway.env)
 #   /etc/systemd/system/gatecontrol-gateway.service  systemd unit
+#
+# The gateway runs natively in the container (systemd, no Docker). Everything
+# that needs a second container is therefore not part of this installation:
+# the edge container (edge plugins) and the MQTT broker. GateControl says so
+# on the gateway's page; who needs them installs the gateway with Docker in a
+# VM instead (GateControl → Gateways → "Add gateway" → "Other Linux machine").
 #
 
 set -euo pipefail
@@ -162,7 +168,7 @@ redeem_pairing_token() {
     err=$(jq -r '.error // "unknown"' <"$body_file" 2>/dev/null || echo "unknown")
     rm -f "$body_file" "$tmp"
     case "$http_code" in
-      400) die "Pairing failed: ${err} (token already used, expired, or never existed). Generate a new one in the dashboard." ;;
+      400) die "Pairing failed: ${err} (code already used, expired, or never existed). Generate a new one in GateControl (Gateways → Add gateway → Proxmox)." ;;
       429) die "Pairing rate-limited: too many attempts from this IP — wait a few minutes and retry." ;;
       000) die "Pairing failed: could not reach https://${host} (DNS / connectivity / TLS — verify the hostname)." ;;
       *)   die "Pairing failed with HTTP $http_code: $err" ;;
@@ -192,12 +198,12 @@ prompt_env_file() {
 
 Two ways to provision this gateway:
 
-  Option A (one-shot, recommended): paste the bash command from the
-    GateControl Dashboard's Gateway-Peer modal — it includes the
-    pairing token via --token and skips all prompts.
+  Option A (one-shot, recommended): in GateControl open Gateways →
+    "Add gateway" → Proxmox and paste the command shown there — it
+    includes the pairing code via --token and skips all prompts.
 
-  Option B: download gateway.env from the dashboard, copy it to this
-    host (e.g. via scp), and provide its path below.
+  Option B: copy a gateway.env of this gateway to this host (e.g. via
+    scp) and provide its path below.
 
 EOF
 
@@ -452,11 +458,15 @@ print_summary() {
   Hostname:      $(pct exec "$ctid" -- hostname 2>/dev/null || echo "?")
 
   Next steps:
-    1. Open the GateControl Dashboard → Peers → your Gateway
-       and confirm it shows 'online' within ~30s.
+    1. Open GateControl → Gateways → your gateway and confirm it
+       shows 'online' within ~30s.
     2. Logs:    pct exec $ctid -- journalctl -u gatecontrol-gateway -f
     3. Update:  $self_invocation -- update $ctid
     4. Remove:  $self_invocation -- remove $ctid
+
+  Note: this gateway runs without Docker — edge plugins and the
+  MQTT broker (edge container) are not available here. For those,
+  install the gateway with Docker in a VM ("Other Linux machine").
 ──────────────────────────────────────────────────────────
 EOF
 }
@@ -616,8 +626,8 @@ Usage:
 Install options:
   --ctid <id>        LXC container ID (default: next free)
   --hostname <h>     Container hostname (default: $DEFAULT_HOSTNAME)
-  --token <t>        Pairing token (XXXX-XXXX-XXXX-XXXX@host) — fetched
-                     from the dashboard's Gateway-Peer modal (LXC tab)
+  --token <t>        Pairing code (XXXX-XXXX-XXXX-XXXX@host) — shown by
+                     GateControl: Gateways → "Add gateway" → Proxmox
   --env-file <p>     Path to gateway.env on this host (alternative to --token)
   --bridge <b>       Network bridge (default: $DEFAULT_BRIDGE)
   --storage <s>      Storage for rootfs (default: first active rootdir storage)
@@ -626,18 +636,25 @@ Install options:
   --disk <gb>        Rootfs size in GB (default: $DEFAULT_DISK)
   -y, --yes          Skip the final confirmation prompt
 
-Recommended provisioning (one-shot via dashboard):
-  1. In the GateControl Dashboard, create or open a Gateway-Peer.
-  2. The modal that pops up has an 'LXC' tab — copy the bash command.
+Recommended provisioning (one-shot, from GateControl):
+  1. In GateControl open Gateways → "Add gateway" and choose "Proxmox".
+  2. Copy the command the assistant shows (it carries a one-time pairing
+     code, valid for 10 minutes).
   3. Paste it on the Proxmox host shell. Done.
 
 Alternative provisioning (manual env-file transfer):
-  1. In the dashboard, switch to the 'Docker' tab and download gateway.env.
-  2. scp gateway.env to this Proxmox host (e.g. /root/gateway.env).
-  3. Run: $(basename "$0") install --env-file /root/gateway.env
+  1. Copy a gateway.env of this gateway to this Proxmox host
+     (e.g. /root/gateway.env).
+  2. Run: $(basename "$0") install --env-file /root/gateway.env
 
 The container is unprivileged with TUN passthrough, so WireGuard kernel
 module on the host is reused without granting host-root capabilities.
+
+Without Docker: the gateway runs natively (systemd) in the container.
+Edge plugins and the MQTT broker need the edge container and are not
+available in this installation — GateControl shows a note on the
+gateway's page. For those, run the gateway with Docker in a VM
+(Gateways → "Add gateway" → "Other Linux machine").
 EOF
 }
 
