@@ -1,0 +1,73 @@
+# VPN-Gerät automatisch bereitstellen (Test, wählbar) – Zusatz zu docker-compose.yml
+# (docs/deployment/synology.md „VPN-Gerät automatisch bereitstellen“):
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.tun-loader.yml
+# Auf der Synology (Container Manager kennt nur eine Datei) liefert GateControl die
+# fertige Datei: Gateway hinzufügen › Synology NAS › „VPN-Gerät automatisch
+# bereitstellen (Test)“. Wer von Hand arbeitet, fügt den Dienst tun-loader und die
+# Zeilen depends_on des Dienstes gateway in die eigene docker-compose.yml ein.
+#
+# Wozu: DSM stellt /dev/net/tun erst bereit, wenn das Kernel-Modul geladen ist
+# (insmod /lib/modules/tun.ko) – bisher eine Aufgabe im DSM-Aufgabenplaner. Fehlt das
+# Gerät, startet der Dienst gateway nicht. tun-loader läuft VOR dem Gateway, lädt das
+# Modul, wenn das Gerät fehlt, und beendet sich nach wenigen Sekunden.
+#
+# Rechte: darf Kernel-Module laden (SYS_MODULE) – sonst nichts: alle anderen
+# Capabilities entzogen, kein Netz, Dateisystem nur lesbar, /lib/modules und /dev des
+# Rechners nur lesend eingebunden, kein privileged. Der Dienst gateway bleibt
+# unverändert (devices: /dev/net/tun, keine zusätzlichen Rechte).
+#
+# Grenze: Nach einem Neustart des Rechners startet Docker die Container selbst, ohne
+# Compose und damit ohne tun-loader. Fehlt das Gerät dann, startet das Gateway nicht;
+# deploy/update.sh (Auto-Update-Aufgabe, jede Minute) erkennt das und startet das
+# Projekt neu – erst tun-loader, dann das Gateway. Ohne die Auto-Update-Aufgabe das
+# Projekt nach einem Neustart von Hand starten oder beim Aufgabenplaner bleiben.
+#
+# Auf Rechnern mit /dev/net/tun (übliches Linux, Raspberry Pi) meldet tun-loader nur
+# „ist da“ und beendet sich; dort ist die Datei unnötig.
+services:
+  tun-loader:
+    image: ghcr.io/callmetechie/gatecontrol-gateway:latest
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        DEV="$${GC_TUN_DEV:-/host/dev/net/tun}"; KO="$${GC_TUN_KO:-/lib/modules/tun.ko}"; W="$${GC_TUN_WAIT:-10}"
+        say() { echo "tun-loader: $$*"; }
+        if [ -c "$$DEV" ]; then say "/dev/net/tun ist da, nichts zu laden / is present, nothing to load"; exit 0; fi
+        if [ -f "$$KO" ]; then
+          say "/dev/net/tun fehlt, lade $$KO / is missing, loading $$KO"
+          out="$$(insmod "$$KO" 2>&1)" || say "insmod: $${out:-fehlgeschlagen / failed}"
+        else
+          say "/dev/net/tun fehlt, lade das Modul tun (modprobe) / is missing, loading the module tun (modprobe)"
+          out="$$(modprobe tun 2>&1)" || say "modprobe: $${out:-fehlgeschlagen / failed}"
+        fi
+        i=0; while [ ! -c "$$DEV" ] && [ "$$i" -lt "$$W" ]; do sleep 1; i=$$((i + 1)); done
+        if [ -c "$$DEV" ]; then say "/dev/net/tun ist bereit / is ready"; exit 0; fi
+        say "FEHLER: /dev/net/tun ließ sich nicht bereitstellen, das Gateway startet nicht. Bisheriger Weg: DSM › Systemsteuerung › Aufgabenplaner › Ausgelöste Aufgabe (root, Hochfahren): insmod /lib/modules/tun.ko – einmal ausführen, dann das Projekt starten."
+        say "ERROR: /dev/net/tun could not be provided, the gateway will not start. The way so far: DSM › Control Panel › Task Scheduler › Triggered Task (root, boot-up): insmod /lib/modules/tun.ko – run it once, then start the project."
+        exit 1
+    restart: "no"
+    network_mode: none        # kein Netz
+    user: "0:0"               # Modul laden braucht root; nur die eine Capability unten
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_MODULE            # Kernel-Modul tun laden – sonst nichts
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    volumes:
+      - /lib/modules:/lib/modules:ro   # tun.ko des Rechners (Synology: /lib/modules/tun.ko)
+      - /dev:/host/dev:ro              # nur um zu sehen, ob /dev/net/tun da ist
+    healthcheck:
+      disable: true
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "2"
+
+  gateway:
+    depends_on:
+      tun-loader:
+        condition: service_completed_successfully

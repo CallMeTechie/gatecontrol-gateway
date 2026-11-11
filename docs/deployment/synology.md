@@ -60,7 +60,8 @@
    Systemsteuerung › Aufgabenplaner › Erstellen › Ausgelöste Aufgabe ›
    Benutzerdefiniertes Skript, Benutzer `root`, Ereignis „Hochfahren“, Befehl
    `insmod /lib/modules/tun.ko`; Aufgabe markieren, „Ausführen“, Projekt
-   starten.
+   starten. Wahlweise übernimmt das ein kleiner Hilfsdienst in der
+   Compose-Datei – siehe [VPN-Gerät automatisch bereitstellen](#vpn-gerät-automatisch-bereitstellen-test).
 
    **Bisheriger Weg:** Im Assistenten „Lieber die Datei gateway.env
    herunterladen“ – das Paket enthält dann zusätzlich `config/gateway.env`;
@@ -82,6 +83,60 @@
    Container Manager → Container → Protokoll. In GateControl meldet sich das
    Gateway im Assistenten (Schritt 4); `http://<Adresse der Synology>:8642`
    zeigt „Verbunden“.
+
+## VPN-Gerät automatisch bereitstellen (Test)
+
+Wählbar, Standard aus. Statt der Aufgabe im Aufgabenplaner lädt ein
+Einmal-Dienst `tun-loader` in der Compose-Datei das Kernel-Modul, bevor das
+Gateway startet. Der Dienst `gateway` bleibt dabei unverändert (`devices:
+/dev/net/tun`, keine zusätzlichen Rechte); er wartet nur per `depends_on` auf
+den Hilfsdienst.
+
+**Einschalten:** in GateControl unter Gateways › „Gateway hinzufügen“ ›
+Synology NAS den Schalter **„VPN-Gerät automatisch bereitstellen (Test)“**
+setzen – Compose-Datei und Paket enthalten dann den Dienst. Von Hand: den
+Dienst `tun-loader` und die Zeilen `depends_on` aus
+[`docker-compose.tun-loader.yml`](../../docker-compose.tun-loader.yml) in die
+eigene `docker-compose.yml` übernehmen (auf einem Linux-Rechner genügt
+`COMPOSE_FILE=docker-compose.yml:docker-compose.tun-loader.yml`).
+
+**Was der Dienst tut:**
+
+1. Gibt es `/dev/net/tun` schon, meldet er „ist da“ und beendet sich – nichts
+   wird geladen.
+2. Sonst `insmod /lib/modules/tun.ko` (so liegt das Modul auf der Synology;
+   `modprobe` findet es dort meist nicht). Gibt es die Datei nicht (übliches
+   Linux), `modprobe tun`.
+3. Er wartet bis zu 10 Sekunden auf das Gerät. Ist es da: Ende mit Erfolg, das
+   Gateway startet. Sonst steht im Protokoll des Containers `…-tun-loader-1`
+   eine Meldung (Deutsch/Englisch) mit dem Weg über den Aufgabenplaner, und
+   das Gateway startet nicht – wie ohne den Dienst.
+
+Im Container Manager steht `…-tun-loader-1` danach als **beendet** (Exit-Code
+0) – das ist richtig so, er läuft nur Sekunden. Das Projekt zeigt deshalb
+unter Umständen einen gelben Status, obwohl alles läuft.
+
+**Rechte:** Der Dienst darf Kernel-Module laden (`cap_add: SYS_MODULE`) – das
+ist ein weitreichendes Recht, deshalb ist alles andere zu: `cap_drop: ALL`,
+kein `privileged`, kein Netz (`network_mode: none`), Dateisystem nur lesbar,
+`no-new-privileges`, `/lib/modules` und `/dev` der NAS nur lesend eingebunden
+(`/dev` nur, um zu sehen, ob das Gerät da ist). Er nutzt das Gateway-Image
+(kein fremdes Image) mit einem festen Befehl, der in der Compose-Datei steht.
+
+**Nach einem Neustart der NAS:** Docker startet die Container dann selbst –
+ohne Compose und damit ohne `tun-loader`. Das Modul ist nach dem Neustart
+nicht mehr geladen, das Gateway bleibt mit einem Startfehler liegen. Die
+Aufgabe für das [Auto-Update](../auto-update.md) (`update.sh`, jede Minute)
+erkennt genau diesen Fall und startet das Gateway neu – erst `tun-loader`,
+dann das Gateway; nach ein bis zwei Minuten ist es wieder da
+(`gateway-state/update.log`: `tun: gateway started`). Ohne diese Aufgabe das
+Projekt nach einem Neustart im Container Manager von Hand starten – oder beim
+Aufgabenplaner bleiben.
+
+**Zurück:** in GateControl die Compose-Datei ohne den Schalter holen (oder
+den Dienst `tun-loader` und `depends_on` aus der Datei löschen), Projekt
+stoppen, YAML ersetzen, neu erstellen – und die Aufgabe im Aufgabenplaner
+anlegen (Schritt 3 oben). Das geladene Modul bleibt bis zum nächsten Neustart.
 
 ## Ältere Projekte (`./config:/config:ro`)
 

@@ -67,6 +67,29 @@ repo_digest() {
 exec 9>"$LOCK"
 if ! flock -n 9; then log "another update running, exit"; exit 0; fi
 
+# Nur mit dem wählbaren Dienst tun-loader (docker-compose.tun-loader.yml, „VPN-Gerät automatisch
+# bereitstellen“): Nach einem Neustart des Rechners startet Docker die Container selbst, ohne
+# Compose – tun-loader läuft dann nicht, und fehlt /dev/net/tun, bleibt das Gateway mit einem
+# Startfehler liegen (Docker versucht es nicht erneut). Genau diesen Fall erkennen und das Projekt
+# starten: erst tun-loader, dann das Gateway. Ein von Hand gestopptes Gateway hat keinen solchen
+# Startfehler und bleibt gestoppt. Höchstens alle 10 Minuten ein Versuch.
+heal_tun() {
+  local cid running err mark
+  grep -Eq '^[[:space:]]+tun-loader:' "$COMPOSE_DIR/docker-compose.yml" 2>/dev/null || return 0
+  cid="$(dc ps -a -q "$SERVICE" 2>/dev/null | head -1)"
+  [ -n "$cid" ] || return 0
+  running="$(docker inspect --format '{{.State.Running}}' "$cid" 2>/dev/null || echo true)"
+  [ "$running" = false ] || return 0
+  err="$(docker inspect --format '{{.State.Error}}' "$cid" 2>/dev/null || true)"
+  case "$err" in *"/dev/net/tun"*) ;; *) return 0 ;; esac
+  mark="$STATE_DIR/tun-heal"
+  if [ -f "$mark" ] && [ -z "$(find "$mark" -mmin +10 2>/dev/null)" ]; then return 0; fi
+  : >"$mark" 2>/dev/null || true
+  log "tun: gateway did not start for lack of /dev/net/tun — starting it again (tun-loader first)"
+  if dc up -d --no-recreate "$SERVICE" >>"$LOG" 2>&1; then log "tun: gateway started"; else log "tun: start failed — see the log of the container tun-loader"; fi
+}
+heal_tun || true
+
 # Nothing to do unless a flag is present. DSM polls this script on a timer, so
 # without this guard every poll would pull+recreate the container.
 if [ ! -f "$FLAG" ]; then exit 0; fi
