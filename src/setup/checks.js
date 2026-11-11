@@ -121,10 +121,11 @@ function checkConfigWritable(dir, { fsImpl = fs } = {}) {
 }
 
 /**
- * Alle Prüfungen mit Zwischenspeicher: höchstens alle `ttlMs` neu, und nur
- * wenn jemand die Seite ansieht (kein Hintergrundverkehr).
+ * Alle Prüfungen mit Zwischenspeicher: höchstens alle `ttlMs` neu (knapp unter
+ * den 10 s, in denen die Seite nachfragt – so ist jede Abfrage frisch), und
+ * nur wenn jemand die Seite ansieht (kein Hintergrundverkehr).
  */
-function createChecks({ configDir, ttlMs = 10_000, minForceMs = 2_000, deps = {}, now = Date.now } = {}) {
+function createChecks({ configDir, ttlMs = 8_000, minForceMs = 2_000, deps = {}, now = Date.now } = {}) {
   let last = null;
   let at = 0;
   let running = null;

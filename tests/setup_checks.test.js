@@ -77,7 +77,7 @@ describe('setup page: self checks', () => {
     fs.rmSync(dir, { recursive: true });
   });
 
-  it('caches for 10 s, "check again" at most every 2 s', async () => {
+  it('caches between two polls of the page (10 s), "check again" at most every 2 s', async () => {
     let t = 0;
     let runs = 0;
     const deps = {
@@ -87,10 +87,10 @@ describe('setup page: self checks', () => {
     };
     const checks = createChecks({ configDir: '/x', deps, now: () => t });
     assert.deepEqual(await checks.get(), { internet: true, clock: true, tun: true, config: true });
-    t = 9_000; await checks.get();
+    t = 7_000; await checks.get();
     assert.equal(runs, 1);
-    t = 10_500; await checks.get();
-    assert.equal(runs, 2);
+    t = 10_000; await checks.get();
+    assert.equal(runs, 2, 'the next poll of the page (10 s later) is fresh');
     t = 11_000; await checks.get({ force: true });
     assert.equal(runs, 2);
     t = 13_000; await checks.get({ force: true });
