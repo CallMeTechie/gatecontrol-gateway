@@ -4,7 +4,8 @@
 # Diese Datei gehört zum Image; gestartet wird sie von
 # gatecontrol-gateway.service (/usr/local/sbin/gatecontrol-start).
 #
-#   ./config/gateway.env   ← kommt beim Start von der Boot-Partition
+#   ./config/gateway.env   ← kommt beim Start von der Boot-Partition oder von der
+#                            Einrichtungsseite (http://gatecontrol.local, docs/setup-page.md)
 #   ./gateway-state/       ← Auto-Update-Flag, last-pull, hardware.json
 #   ./gateway-cache/       ← Zwischenspeicher (oder CACHE_DIR aus settings.txt
 #                            → GC_CACHE_DIR in .env, z. B. eine USB-Platte)
@@ -45,18 +46,19 @@ services:
       - NET_RAW           # keepalived VRRP + GARP
       - SETGID            # keepalived enable_script_security
       - SETUID            # keepalived enable_script_security
+      - MKNOD             # /dev/net/tun im Container anlegen (device_cgroup_rules)
     # security_opt.no-new-privileges bewusst NICHT gesetzt — siehe
     # docker-compose.example.yml (wg-quick braucht ambient NET_ADMIN).
     read_only: true
     user: "0:0"
-    devices:
-      - /dev/net/tun:/dev/net/tun
+    device_cgroup_rules:
+      - 'c 10:200 rwm'    # /dev/net/tun (wie docker-compose.example.yml)
     tmpfs:
       - /tmp
       - /run
       - /etc/wireguard
     volumes:
-      - ./config:/config:ro
+      - ./config:/config
       - ./gateway-state:/state
       - ${GC_CACHE_DIR:-./gateway-cache}:/cache
       - type: volume
@@ -96,6 +98,10 @@ services:
     environment:
       - LOG_LEVEL=info
       - GATEWAY_ENV_PATH=/config/gateway.env
+      # Einrichtungs-/Statusseite (docs/setup-page.md): Port 8642 und – nur im
+      # Pi-Image – zusätzlich Port 80, also http://<hostname>.local
+      - GC_SETUP_PORT=${GC_SETUP_PORT:-8642}
+      - GC_SETUP_ALT_PORT=80
       - WG_QUICK_USERSPACE_IMPLEMENTATION=wireguard-go
       # Ortszeit (Rückfall – die Zeitzone vom Server hat Vorrang); .env schreibt gatecontrol-start
       - TZ=${TZ:-Etc/UTC}

@@ -133,6 +133,19 @@ anderes Schreibprogramm). Dann gibt es **keine** Imager-Einstellungen:
 `gateway.env`, WLAN-Passwort und SSH-Schlüssel werden beim Start übernommen und sofort
 von der SD-Karte gelöscht; bis dahin die Karte nicht herumliegen lassen.
 
+### Ohne `gateway.env`: Einrichtungsseite
+
+Startet der Pi ohne `gateway.env` (z. B. nur mit `settings.txt` für das WLAN oder
+ganz ohne Dateien am LAN-Kabel), startet nur der Dienst `gateway` und zeigt seine
+[Einrichtungsseite](../setup-page.md): im Browser im Heimnetz
+**`http://gatecontrol.local`** öffnen (bzw. `http://<ip-des-pi>` oder Port 8642) und
+**Serveradresse** und **Einrichtungscode** aus GateControl eingeben
+(Gateways › Gateway hinzufügen). Der Pi heißt dafür `gatecontrol`, solange im Imager
+oder in `settings.txt` kein anderer Name gesetzt ist – sonst gilt
+`http://<name>.local`. Nach dem Verbinden starten die übrigen Dienste von selbst
+(`gatecontrol-setup.path`); seinen Namen `gc-<Name des Gateways>` bekommt der Pi beim
+nächsten Start. Die Adresse steht auch in `STATUS.txt` und am Bildschirm.
+
 ---
 
 ## settings.txt (WLAN, Zeitzone, SSH)

@@ -6,6 +6,10 @@ gatecontrol-setup.zip herunterladen und ihren Inhalt direkt auf das Laufwerk
 "bootfs" entpacken (Ordner "gatecontrol" mit gateway.env und settings.txt;
 vorhandene Dateien ersetzen). SD-Karte in den Pi, Strom an – fertig.
 
+Ohne Dateien: Pi mit LAN-Kabel starten, im Browser im Heimnetz
+http://gatecontrol.local öffnen und Serveradresse und Einrichtungscode aus
+GateControl eingeben (Gateways > Gateway hinzufügen).
+
 Von Hand:
 1. In GateControl das Gateway anlegen und die Datei gateway.env
    (bzw. gateway-<Nummer>.env) herunterladen.

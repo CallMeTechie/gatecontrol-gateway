@@ -9,8 +9,13 @@
 #     geprüft, nach /opt/gatecontrol-gateway/config/gateway.env übernommen
 #     (0600 root) und von der FAT-Partition gelöscht. So funktioniert auch
 #     eine Neu-Einrichtung: neue Datei auf die SD-Karte, Pi starten.
-#  2. Ohne gateway.env: Hinweis in Journal, Konsole, Login und STATUS.txt —
-#     es startet nichts.
+#  2. Ohne gateway.env: nur der Dienst gateway startet und zeigt seine
+#     Einrichtungsseite (docs/setup-page.md) unter http://<hostname>.local
+#     (Port 80) und http://<adresse>:8642 — dort Serveradresse und
+#     Einrichtungscode aus GateControl eingeben. Der Pi heißt dafür
+#     „gatecontrol“, solange kein anderer Name gesetzt ist. Hinweis in Journal,
+#     Konsole, Login und STATUS.txt. Hat die Seite die gateway.env geschrieben,
+#     startet gatecontrol-setup.path dieses Skript erneut (übrige Dienste).
 #  3. Hostname setzen (settings.txt HOSTNAME → GC_HOSTNAME in der env →
 #     Name aus dem Raspberry Pi Imager bleibt → gc-<Peer-Name>).
 #  4. Dienste wählen: gateway, edge + mqtt (settings.txt EDGE=on|off, Standard on),
@@ -93,7 +98,11 @@ apply_hostname() {
   cur="$(hostname)"
   if [ "$explicit" = 0 ]; then
     # Im Imager gesetzter Name hat Vorrang vor dem Automatik-Namen.
-    [ "$cur" = "raspberrypi" ] || [ "$cur" = "localhost" ] || return 0
+    # ("gatecontrol" = Name der Einrichtungsseite, gilt wie kein Name.)
+    [ "$cur" = "raspberrypi" ] || [ "$cur" = "localhost" ] || [ "$cur" = "$SETUP_HOSTNAME" ] || return 0
+    # Direkt nach dem Verbinden über die Einrichtungsseite bleibt der Name
+    # (der Browser steht noch auf http://gatecontrol.local); umbenannt wird beim nächsten Start.
+    [ "${GC_SETUP_RUN:-0}" = 1 ] && return 0
     peer="$(sed -n 's/^# Peer: \(.*\) (ID: [0-9]*)$/\1/p' "$ENV_FILE" | head -n1)"
     peer="$(sanitize_hostname "$peer")"
     if [ -n "$peer" ]; then want="gc-$peer"; else want="gatecontrol-gw"; fi
@@ -153,6 +162,24 @@ write_compose_env() {
   ZIGBEE_TYPE="$type"
 }
 
+# Einrichtungsseite: ohne eigenen Namen ist der Pi unter gatecontrol.local erreichbar.
+setup_hostname() {
+  local cur
+  [ -n "$(gc_setting HOSTNAME)" ] && return 0
+  cur="$(hostname)"
+  [ "$cur" = "raspberrypi" ] || [ "$cur" = "localhost" ] || return 0
+  if ! hostnamectl set-hostname "$SETUP_HOSTNAME" 2>/dev/null; then
+    printf '%s\n' "$SETUP_HOSTNAME" >"$GC_ETC/hostname"
+    hostname "$SETUP_HOSTNAME"
+  fi
+  if grep -q '^127\.0\.1\.1' "$GC_ETC/hosts"; then
+    sed -i "s/^127\.0\.1\.1.*/127.0.1.1\t$SETUP_HOSTNAME/" "$GC_ETC/hosts"
+  else
+    printf '127.0.1.1\t%s\n' "$SETUP_HOSTNAME" >>"$GC_ETC/hosts"
+  fi
+  systemctl try-restart avahi-daemon.service >/dev/null 2>&1 || true
+}
+
 # Zigbee gewünscht? gateway-state/radio.json (vom Gateway, {"zigbee":…,"want":…})
 # entscheidet; ohne Datei (erster Start, älteres Gateway) zählt die Erkennung.
 zigbee_wanted() {
@@ -207,10 +234,17 @@ main() {
   [ "$rc" = 0 ] && imported=1
 
   if [ ! -s "$ENV_FILE" ]; then
+    # Einrichtungsseite des Gateways (docs/setup-page.md): nur der Dienst
+    # gateway, er wartet auf Serveradresse und Einrichtungscode.
+    setup_hostname
+    write_compose_env
+    compose up -d gateway
+    local url
+    url="http://$(hostname).local"
     if [ "$rc" = 2 ]; then
-      gc_status "FEHLER" "Die gateway.env auf der SD-Karte war ungültig. Bitte in GateControl neu herunterladen, nach 'bootfs/gatecontrol/' kopieren und den Pi neu starten."
+      gc_status "FEHLER" "Die gateway.env auf der SD-Karte war ungültig. Im Browser im Heimnetz $url öffnen und Serveradresse und Einrichtungscode aus GateControl eingeben – oder die Datei in GateControl neu herunterladen, nach 'bootfs/gatecontrol/' kopieren und den Pi neu starten."
     else
-      gc_status "WARTET AUF EINRICHTUNG" "Keine gateway.env gefunden. In GateControl die Gateway-Konfiguration herunterladen, auf die SD-Karte (Laufwerk 'bootfs', Ordner 'gatecontrol') kopieren und den Pi neu starten — oder danach 'sudo gatecontrol-start' ausführen."
+      gc_status "WARTET AUF EINRICHTUNG" "Im Browser im Heimnetz $url öffnen und Serveradresse und Einrichtungscode aus GateControl eingeben (Gateways > Gateway hinzufügen). Wie bisher geht auch: gateway.env aus GateControl auf die SD-Karte (Laufwerk 'bootfs', Ordner 'gatecontrol') kopieren und den Pi neu starten."
     fi
     exit 0
   fi
@@ -294,5 +328,6 @@ main() {
 
 ZIGBEE_DEVICE=""
 ZIGBEE_TYPE=""
+SETUP_HOSTNAME="gatecontrol"
 EDGE_SERVICES=(edge mqtt)
 main "$@"

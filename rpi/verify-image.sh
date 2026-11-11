@@ -106,7 +106,7 @@ grep -E '^(docker-ce|containerd\.io|docker-compose-plugin|cloud-init|unattended-
 
 echo "== systemd-Units aktiviert"
 for u in docker.service containerd.service gatecontrol-settings.service gatecontrol-hwdetect.service gatecontrol-gateway.service \
-         gatecontrol-gateway-update.path gatecontrol-gateway-update.timer gatecontrol-radio.path gatecontrol-ai.path gatecontrol-cameras.path apt-daily-upgrade.timer; do
+         gatecontrol-gateway-update.path gatecontrol-gateway-update.timer gatecontrol-radio.path gatecontrol-ai.path gatecontrol-cameras.path gatecontrol-setup.path apt-daily-upgrade.timer; do
   check "$u" enabled "$u"
 done
 check "ssh NICHT aktiviert (nur über Imager oder SSH_AUTHORIZED_KEY)" not enabled ssh.service

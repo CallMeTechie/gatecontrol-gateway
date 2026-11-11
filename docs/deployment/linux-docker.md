@@ -19,35 +19,45 @@
    ([docs/edge.md](../edge.md)) und DNS-Filter/Zwischenspeicher
    ([docs/dns-cache.md](../dns-cache.md)).
 
-2. **Dateien herunterladen**
+2. **Ordner und Compose-Datei**
 
-   Im Assistenten `docker-compose.yml`, `gateway.env` und `update.sh`
-   herunterladen. Ein erneuter Download der `gateway.env` erzeugt einen neuen
-   Zugangsschlüssel (die alte Datei gilt dann nicht mehr).
-
-3. **Compose-Setup**
+   Die Compose-Datei aus dem Assistenten enthält keine Zugangsdaten (kopieren
+   oder herunterladen):
 
    ```bash
-   sudo mkdir -p /opt/gatecontrol-gateway/config /opt/gatecontrol-gateway/gateway-state /opt/gatecontrol-gateway/gateway-cache
-   cd /opt/gatecontrol-gateway
-   sudo mv ~/docker-compose.yml ~/update.sh .
-   sudo mv ~/gateway.env config/
-   sudo chmod 600 config/gateway.env
-   sudo chmod +x update.sh
+   sudo mkdir -p /opt/gatecontrol-gateway && cd /opt/gatecontrol-gateway
+   sudo nano docker-compose.yml        # Inhalt aus dem Assistenten einfügen
+   sudo docker compose up -d
    ```
 
+   Docker legt `config/`, `gateway-state/` und `gateway-cache/` selbst an.
    Alternativ zur Compose-Datei des Assistenten:
    [`docker-compose.example.yml`](../../docker-compose.example.yml) (zusätzlich
    mit den Capabilities für keepalived/Scan-Egress, siehe [scan-egress.md](scan-egress.md)).
 
-4. **Starten**
+3. **Einrichtungsseite öffnen und verbinden**
+
+   Im Browser im Heimnetz `http://<Adresse des Rechners>:8642` öffnen,
+   **Serveradresse** und **Einrichtungscode** aus dem Assistenten eingeben
+   (der Code gilt 10 Minuten und einmal), „Verbinden“. Das Gateway holt seine
+   Zugangsdaten selbst und speichert sie als `config/gateway.env` (0600).
+   Einzelheiten und Fehlersuche: [Einrichtungsseite](../setup-page.md).
+
+   Im **Bridge-Modus** den Port freigeben – die Compose-Datei des Assistenten
+   enthält `ports: - "8642:8642"` bereits.
+
+   **Bisheriger Weg:** im Assistenten „Lieber die Datei gateway.env
+   herunterladen“, die Datei nach `config/gateway.env` legen
+   (`chmod 600`), dann `docker compose up -d`. Ein erneuter Download erzeugt
+   einen neuen Zugangsschlüssel.
+
+4. **Prüfen**
 
    ```bash
-   sudo docker compose up -d
    sudo docker compose logs -f gateway
    ```
 
-   Erwartet: Logs zeigen WireGuard up, Config-Poll erfolgreich, HTTP-Proxy/API-Server binden auf Tunnel-IP.
+   Erwartet: Logs zeigen WireGuard up, Config-Poll erfolgreich, HTTP-Proxy/API-Server binden auf Tunnel-IP. Die Einrichtungsseite zeigt „Verbunden“.
 
 5. **Auto-Update** (einmalig): `sudo crontab -e`, Zeile aus dem Assistenten:
 

@@ -18,7 +18,7 @@ The `docker-compose.example.yml` includes the bind mount:
 
 ```yaml
 volumes:
-  - ./config:/config:ro
+  - ./config:/config
   - ./gateway-state:/state          # rw: self-update flag + last-pull marker (#2b)
 ```
 

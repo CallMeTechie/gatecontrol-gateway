@@ -1,0 +1,16 @@
+[Unit]
+Description=GateControl Gateway: übrige Dienste starten (über die Einrichtungsseite verbunden)
+Documentation=https://github.com/CallMeTechie/gatecontrol-gateway/blob/main/docs/setup-page.md
+Requires=docker.service
+After=docker.service gatecontrol-gateway.service
+
+[Service]
+Type=oneshot
+# zuerst verbrauchen: das Gateway legt das Flag bei jedem Verbinden neu an
+ExecStartPre=/bin/rm -f /opt/gatecontrol-gateway/gateway-state/setup-done
+# GC_SETUP_RUN=1: der Hostname bleibt bis zum nächsten Start (die Seite ist noch offen)
+Environment=GC_SETUP_RUN=1
+ExecStart=/usr/local/sbin/gatecontrol-start
+TimeoutStartSec=30min
+StandardOutput=journal
+StandardError=journal

@@ -95,7 +95,7 @@ mkdir -p "$CDIR/config"
 (cd "$CDIR" && docker compose config -q) && echo ok || die "docker compose config"
 # Gleiche Sicherheits-Optionen wie docker-compose.example.yml
 cp docker-compose.example.yml "$CDIR/example.yml"
-pick='.services.gateway | {network_mode, cap_drop, cap_add, read_only, user, devices, tmpfs, volumes: [.volumes[] | {target, read_only}]}'
+pick='.services.gateway | {network_mode, cap_drop, cap_add, read_only, user, devices, device_cgroup_rules, tmpfs, volumes: [.volumes[] | {target, read_only}]}'
 a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$pick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
 if [ "$a" = "$b" ]; then echo "ok: Gateway-Dienst hat dieselben Sicherheits-Optionen wie docker-compose.example.yml"; else

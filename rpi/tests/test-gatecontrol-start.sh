@@ -77,9 +77,35 @@ echo "== ohne gateway.env"
 setup
 expect "Exit 0" run_start
 expect "Status WARTET" grep -q '^WARTET AUF EINRICHTUNG' "$T/run/status"
-expect "kein docker-Aufruf" test ! -s "$T/docker.log"
+# Einrichtungsseite (docs/setup-page.md): nur der Dienst gateway startet und wartet auf den Code
+expect "nur der Dienst gateway gestartet" test "$(grep -c . "$T/docker.log")" = 1
+expect "docker compose up -d gateway" grep -qx 'docker compose -f docker-compose.yml up -d gateway' "$T/docker.log"
+expect "Hostname gatecontrol (für http://gatecontrol.local)" grep -qx 'gatecontrol' "$T/hostname"
+expect "Status nennt die Einrichtungsseite" grep -q 'http://gatecontrol.local' "$T/run/status"
 expect "STATUS.txt auf der Boot-Partition" grep -q 'WARTET' "$T/boot/gatecontrol/STATUS.txt"
 expect "Login-Hinweis (issue.d)" grep -q 'gateway.env' "$T/issue/50-gatecontrol.issue"
+expect ".env geschrieben (der Container wird später nicht neu erstellt)" grep -q '^TZ=Europe/Berlin$' "$T/opt/.env"
+
+echo "== über die Einrichtungsseite verbunden (gatecontrol-setup.service, GC_SETUP_RUN=1)"
+install -d -m 0700 "$T/opt/config"
+valid_env >"$T/opt/config/gateway.env"
+: >"$T/docker.log"
+expect "Exit 0" env GC_SETUP_RUN=1 PATH="$T/bin:$PATH" GC_LIB="$ROOTFS/usr/local/lib/gatecontrol" GC_DIR="$T/opt" GC_BOOT="$T/boot" \
+  GC_RUN="$T/run" GC_ETC="$T/etc" GC_ISSUE_DIR="$T/issue" bash "$START"
+expect "Status OK" grep -q '^OK' "$T/run/status"
+expect "Hostname bleibt gatecontrol (Seite ist noch offen)" grep -qx 'gatecontrol' "$T/hostname"
+expect "Gateway + Edge + MQTT gestartet" grep -q 'compose -f docker-compose.yml up -d --remove-orphans gateway edge mqtt$' "$T/docker.log"
+expect "Gateway nicht neu erstellt" not grep -q 'force-recreate' "$T/docker.log"
+expect "nächster Start: Exit 0" run_start
+expect "nächster Start: Hostname gc-keller-pi-3" grep -qx 'gc-keller-pi-3' "$T/hostname"
+rm -rf "$T"
+
+echo "== ohne gateway.env, Hostname aus dem Imager bleibt"
+setup
+echo mein-pi >"$T/hostname"
+expect "Exit 0" run_start
+expect "Hostname bleibt" grep -qx 'mein-pi' "$T/hostname"
+expect "Status nennt http://mein-pi.local" grep -q 'http://mein-pi.local' "$T/run/status"
 rm -rf "$T"
 
 echo "== Erststart mit gateway-42.env (Windows-Zeilenenden, BOM)"
@@ -131,7 +157,8 @@ setup
 echo "irgendwas" >"$T/boot/gateway.env"
 expect "Exit 0" run_start
 expect "Status FEHLER" grep -q '^FEHLER' "$T/run/status"
-expect "kein docker-Aufruf" test ! -s "$T/docker.log"
+expect "Einrichtungsseite als Ausweg: nur der Dienst gateway gestartet" grep -qx 'docker compose -f docker-compose.yml up -d gateway' "$T/docker.log"
+expect "Status nennt die Einrichtungsseite" grep -q 'http://gatecontrol.local' "$T/run/status"
 rm -rf "$T"
 
 echo "== RaspBee erkannt + Hostname aus settings.txt"
