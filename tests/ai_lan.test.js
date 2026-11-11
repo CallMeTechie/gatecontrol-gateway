@@ -12,10 +12,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const https = require('node:https');
 const { spawn } = require('node:child_process');
 const { createApiServer } = require('../src/api/server');
 const { createFeaturesRouter } = require('../src/api/routes/features');
-const { isLanAddress, isHostname, validKey } = require('../src/ai/config');
+const { isLanAddress, isHostname, validKey, normalizeAi, parsePin, PIN_INVALID } = require('../src/ai/config');
+const { makeSelfSigned } = require('../src/cache/selfsigned');
 const { AiService, SUPPORTS } = require('../src/ai/ai');
 const { createResolver, mdnsQuery } = require('../src/ai/resolve');
 const { AiKeyStore, FILE: KEY_FILE } = require('../src/ai/creds');
@@ -146,7 +148,7 @@ describe('ai lan: addresses and names', () => {
     assert.deepEqual(svc.models.map((m) => m.name), ['qwen2.5:14b']);
     assert.equal(stub.seen[0].host, `ki-pc.local:${stub.port}`);
     const t = svc.featureTelemetry();
-    assert.deepEqual(t.lan, { url: `http://ki-pc.local:${stub.port}`, api: 'ollama', reachable: true, auth: false });
+    assert.deepEqual(t.lan, { url: `http://ki-pc.local:${stub.port}`, api: 'ollama', reachable: true, auth: false, pinned: false });
     assert.deepEqual(t.supports, SUPPORTS);
     svc.stop();
   });
@@ -252,7 +254,7 @@ describe('ai lan: POST /api/ai/probe', () => {
       let r = await post(srv, '/api/ai/probe', { url, api: 'openai', key: 'sk-probe' });
       assert.equal(r.status, 200);
       assert.deepEqual(r.body.probe, { reachable: true, url: `http://lmstudio.lan:${stub.port}`, api: 'openai', version: null,
-        models: [{ name: 'llama-3.2-3b-instruct', size: 0, family: null, params: null, quant: null, modified: null }], auth: true, error: null });
+        models: [{ name: 'llama-3.2-3b-instruct', size: 0, family: null, params: null, quant: null, modified: null }], auth: true, pinned: false, certificate: null, error: null });
       r = await post(srv, '/api/ai/probe', { url, api: 'openai' });
       assert.equal(r.body.probe.reachable, false);
       assert.equal(r.body.probe.error.code, 'unauthorized');
@@ -268,6 +270,127 @@ describe('ai lan: POST /api/ai/probe', () => {
     const svc = new AiService({ ctlDir: '/nonexistent-gc-ai' });
     svc.probing = true;
     assert.deepEqual(await svc.probe({ url: 'http://192.168.1.2:11434' }), { error: 'busy' });
+  });
+});
+
+// ─── https mit angeheftetem Zertifikat ───────────────────────────────────
+
+// KI-Server mit selbst signiertem Zertifikat (wie Ollama hinter einem eigenen Proxy)
+async function startTls({ key = null, cert = makeSelfSigned({ commonName: 'ki-pc', altNames: [{ dns: 'ki-pc.lan' }] }) } = {}) {
+  const seen = [];
+  const srv = https.createServer({ cert: cert.cert, key: cert.key }, (req, res) => {
+    seen.push({ url: req.url, auth: req.headers.authorization || null });
+    const json = (code, o) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(o)); };
+    if (key && req.headers.authorization !== `Bearer ${key}`) return json(401, { error: 'unauthorized' });
+    if (req.url === '/api/version') return json(200, { version: '0.40.8' });
+    if (req.url === '/api/tags') return json(200, { models: [{ name: 'qwen2.5:14b', size: 9e9 }] });
+    if (req.url === '/api/ps') return json(200, { models: [] });
+    if (req.url === '/api/chat') {
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+      res.write(JSON.stringify({ message: { content: 'Hallo' }, done: false }) + '\n');
+      return res.end(JSON.stringify({ message: { content: '' }, done: true, done_reason: 'stop', prompt_eval_count: 3, eval_count: 1 }) + '\n');
+    }
+    return json(404, { error: 'not found' });
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  return { srv, port: srv.address().port, seen, sha256: cert.sha256, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
+}
+
+describe('ai lan: https with a self-signed certificate (pinned, never unchecked)', () => {
+  it('config: lan.pin only with https; an unreadable pin matches no certificate', () => {
+    const fp = 'ab'.repeat(32);
+    const lan = (o) => normalizeAi({ enabled: true, source: 'lan', lan: o }).lan;
+    assert.equal(lan({ url: 'https://192.168.1.20:11434', pin: fp }).pin, fp);
+    // was Browser, OpenSSL und Node anzeigen, meint dasselbe Zertifikat
+    assert.equal(lan({ url: 'https://192.168.1.20:11434', pin: 'SHA256:' + fp.toUpperCase().match(/../g).join(':') }).pin, fp);
+    assert.equal(lan({ url: 'https://192.168.1.20:11434' }).pin, null);
+    assert.equal(lan({ url: 'http://192.168.1.20:11434', pin: fp }).pin, null, 'no TLS, no pin');
+    assert.equal(lan({ url: 'https://192.168.1.20:11434', pin: 'abc' }).pin, PIN_INVALID, 'fail closed');
+    assert.equal(parsePin(fp, 'https:'), fp);
+    assert.ok(SUPPORTS.includes('lanPin'));
+  });
+
+  it('without a pin a self-signed certificate is refused (tls_untrusted) and the test shows the certificate', async () => {
+    stub = await startTls({ key: 'sk-tls' });
+    const svc = new AiService({ ctlDir: '/nonexistent-gc-ai', resolver: fakeResolver({ 'ki-pc.lan': '127.0.0.1' }) });
+    const srv = await serve(svc);
+    try {
+      const url = `https://ki-pc.lan:${stub.port}`;
+      let r = await post(srv, '/api/ai/probe', { url, api: 'ollama', key: 'sk-tls' });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.probe.reachable, false);
+      assert.equal(r.body.probe.error.code, 'tls_untrusted');
+      assert.equal(r.body.probe.pinned, false);
+      const c = r.body.probe.certificate;
+      assert.equal(c.sha256, stub.sha256, 'the fingerprint the admin compares');
+      assert.equal(typeof c.selfSigned, 'boolean');
+      assert.match(c.subject, /CN=ki-pc/);
+      assert.ok(Date.parse(c.validTo) > Date.now());
+      assert.equal(stub.seen.length, 0, 'not a single request (and no API key) reached the unverified server');
+
+      // der Admin bestätigt den Fingerabdruck → der Test geht mit dem Pin
+      r = await post(srv, '/api/ai/probe', { url, api: 'ollama', key: 'sk-tls', pin: stub.sha256 });
+      assert.equal(r.body.probe.reachable, true);
+      assert.equal(r.body.probe.pinned, true);
+      assert.equal(r.body.probe.certificate, null);
+      assert.deepEqual(r.body.probe.models.map((m) => m.name), ['qwen2.5:14b']);
+      assert.ok(stub.seen.length >= 2 && stub.seen.every((x) => x.auth === 'Bearer sk-tls'));
+
+      // ein anderer Fingerabdruck: keine Verbindung, das gezeigte Zertifikat kommt mit
+      const n = stub.seen.length;
+      r = await post(srv, '/api/ai/probe', { url, api: 'ollama', key: 'sk-tls', pin: 'cd'.repeat(32) });
+      assert.equal(r.body.probe.reachable, false);
+      assert.equal(r.body.probe.error.code, 'tls_pin_mismatch');
+      assert.equal(r.body.probe.certificate.sha256, stub.sha256);
+      assert.equal(stub.seen.length, n, 'nothing sent to a server with another certificate');
+
+      assert.equal((await post(srv, '/api/ai/probe', { url, pin: 'kein-fingerabdruck' })).status, 400);
+    } finally { srv.close(); svc.stop(); }
+  });
+
+  it('with lan.pin every connection is checked: status, chat; a changed certificate stops it', async () => {
+    stub = await startTls();
+    const svc = new AiService({ ctlDir: '/nonexistent-gc-ai', resolver: fakeResolver({ 'ki-pc.lan': '127.0.0.1' }) });
+    const port = stub.port;
+    try {
+      await svc.apply({ enabled: true, source: 'lan', lan: { url: `https://ki-pc.lan:${port}`, api: 'ollama', pin: stub.sha256 } });
+      await svc.tick();
+      assert.equal(svc.state(), 'running');
+      assert.equal(svc.featureTelemetry().lan.pinned, true);
+      let text = '';
+      const out = await svc.chat({ model: 'qwen2.5:14b', system: '', messages: [{ role: 'user', content: 'Hi' }], maxTokens: 16, numCtx: 2048, timeoutMs: 5000 },
+        { onDelta: (d) => { text += d; }, signal: new AbortController().signal });
+      assert.equal(text, 'Hallo');
+      assert.equal(out.outputTokens, 1);
+
+      // der Server zeigt plötzlich ein anderes Zertifikat (neu erzeugt – oder jemand anderes antwortet)
+      await stub.close();
+      stub = null;
+      const other = https.createServer((() => { const c = makeSelfSigned({ commonName: 'ki-pc' }); return { cert: c.cert, key: c.key }; })(), (req, res) => { hits++; res.end('{}'); });
+      let hits = 0;
+      await new Promise((r) => other.listen(port, '127.0.0.1', r));
+      try {
+        await svc.tick();
+        assert.equal(svc.state(), 'unreachable');
+        assert.equal(svc.lastError.code, 'tls_pin_mismatch');
+        await assert.rejects(svc.chat({ model: 'qwen2.5:14b', system: '', messages: [{ role: 'user', content: 'geheim' }], maxTokens: 16, numCtx: 2048, timeoutMs: 5000 },
+          { onDelta() {}, signal: new AbortController().signal }), (e) => e.code === 'tls_pin_mismatch');
+        assert.equal(hits, 0, 'no request reaches the server with the other certificate');
+      } finally { other.closeAllConnections(); await new Promise((r) => other.close(r)); }
+    } finally { svc.stop(); }
+  });
+
+  it('no pin from the server (older GateControl): https keeps the normal check', async () => {
+    stub = await startTls();
+    const svc = new AiService({ ctlDir: '/nonexistent-gc-ai', resolver: fakeResolver({ 'ki-pc.lan': '127.0.0.1' }) });
+    try {
+      await svc.apply({ enabled: true, source: 'lan', lan: { url: `https://ki-pc.lan:${stub.port}`, api: 'ollama' } });
+      await svc.tick();
+      assert.equal(svc.state(), 'unreachable');
+      assert.equal(svc.lastError.code, 'tls_untrusted');
+      assert.equal(svc.featureTelemetry().lan.pinned, false);
+      assert.equal(stub.seen.length, 0);
+    } finally { svc.stop(); }
   });
 });
 

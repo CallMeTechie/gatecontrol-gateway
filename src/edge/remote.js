@@ -38,7 +38,7 @@ class GatewayRpc extends EventEmitter {
     this.retryTimer = null;
     this.pending = new Map(); // id → { resolve, reject, timer }
     this.nextId = 0;
-    this.info = null; // { mqtt: { available }, mqttStatus }
+    this.info = null; // { mqtt: { available, tlsCert }, mqttStatus }
     this.sessions = 0;
   }
 
@@ -117,7 +117,8 @@ class GatewayRpc extends EventEmitter {
         if (typeof m.plugin === 'string' && m.msg && typeof m.msg === 'object' && PUSH_TYPES.has(m.msg.t)) this.emit('push', m.plugin, m.msg);
         return;
       case 'info':
-        this.info = { mqtt: { available: !!(m.mqtt && m.mqtt.available === true) }, mqttStatus: m.mqttStatus && typeof m.mqttStatus === 'object' ? m.mqttStatus : null };
+        this.info = { mqtt: { available: !!(m.mqtt && m.mqtt.available === true), tlsCert: !!(m.mqtt && m.mqtt.tlsCert === true) },
+          mqttStatus: m.mqttStatus && typeof m.mqttStatus === 'object' ? m.mqttStatus : null };
         this.emit('info', this.info);
         return;
       default:
@@ -182,6 +183,9 @@ class RemoteMqtt {
   }
 
   available() { return !!(this.rpc.info && this.rpc.info.mqtt.available); }
+
+  /** Erzeugt das Gateway das Zertifikat für den TLS-Listener selbst? (ältere Gateway-Container: nein) */
+  tlsCert() { return !!(this.rpc.info && this.rpc.info.mqtt.tlsCert); }
 
   apply() { /* den Sollzustand liest das Gateway selbst mit (Relay) */ }
 

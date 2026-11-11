@@ -4,14 +4,23 @@
 // im LAN (docs/local-ai.md §3). Nur die eine Basis (Host + Port fest), eigene
 // Pfade, keine Weiterleitungen (3xx = Fehler), Größen- und Zeitgrenzen. Alles
 // asynchron und gestreamt – nichts blockiert die Ereignisschleife.
-// Fehler tragen `code`: unreachable | not_private | timeout | redirect | too_large | bad_response | http_<n> | aborted.
+// Fehler tragen `code`: unreachable | not_private | timeout | redirect | too_large | bad_response | http_<n> | aborted,
+// bei https dazu tls_untrusted (das Zertifikat besteht die Prüfung nicht, z. B. selbst signiert) und
+// tls_pin_mismatch (nicht das angeheftete Zertifikat).
 //
 // base: { protocol, host, port } – dazu optional `lookup` (Namen nur an private
-// Adressen, resolve.js) und `auth()` (API-Schlüssel des LAN-Servers → Bearer;
-// nie geloggt, nie in einer Fehlermeldung).
+// Adressen, resolve.js), `auth()` (API-Schlüssel des LAN-Servers → Bearer;
+// nie geloggt, nie in einer Fehlermeldung) und `pin` (https: SHA-256-
+// Fingerabdruck des Server-Zertifikats, src/proxy/tlsPin.js).
+//
+// https ohne `pin`: die normale Prüfung (Kette und Name). Mit `pin` ersetzt der
+// Fingerabdruck sie – die Verbindung gibt es nur mit genau diesem Zertifikat,
+// vorher geht kein Byte der Anfrage (auch kein API-Schlüssel) hinaus. Die
+// Prüfung wird nie ohne Pin abgeschaltet.
 
 const http = require('node:http');
 const https = require('node:https');
+const { PinnedHttpsAgent, PIN_MISMATCH_CODE } = require('../proxy/tlsPin');
 
 const MAX_LINE = 1024 * 1024;
 
@@ -31,13 +40,29 @@ function connectGuard(req, onFail) {
 
 function transport(base) { return base.protocol === 'https:' ? https : http; }
 
+// Ein Agent je (Host, Port, Pin): ohne Keep-Alive, jede Verbindung prüft das Zertifikat neu.
+// Der Handshake hat dieselbe Frist wie sonst der Verbindungsaufbau (connectGuard sieht den
+// Socket hier erst nach der Prüfung).
+const MAX_PINNED = 8;
+const pinned = new Map();
+function pinnedAgent(base) {
+  const k = `${base.host}|${base.port}|${base.pin}`;
+  let a = pinned.get(k);
+  if (!a) {
+    if (pinned.size >= MAX_PINNED) pinned.delete(pinned.keys().next().value);
+    a = new PinnedHttpsAgent({ host: base.host, port: base.port, fingerprint: base.pin, handshakeTimeoutMs: CONNECT_MS });
+    pinned.set(k, a);
+  }
+  return a;
+}
+
 function opts(base, method, path, data, extraHeaders) {
   const key = typeof base.auth === 'function' ? base.auth() : null;
   return {
     host: base.host, port: base.port, method, path,
     ...(typeof base.lookup === 'function' ? { lookup: base.lookup } : {}),
     // kein Agent mit Keep-Alive: jede Anfrage eine eigene Verbindung, nichts bleibt hängen
-    agent: false,
+    agent: base.protocol === 'https:' && base.pin ? pinnedAgent(base) : false,
     headers: {
       Accept: 'application/json', 'User-Agent': 'GateControl-Gateway',
       ...(data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {}),
@@ -47,8 +72,18 @@ function opts(base, method, path, data, extraHeaders) {
   };
 }
 
-// Fehler der Verbindung: `not_private` (resolve.js) bleibt, alles andere heißt unreachable
-const netErr = (e) => (e && e.code === 'not_private' ? e : err('unreachable', e && e.message));
+// Node/OpenSSL: das Zertifikat besteht die Prüfung nicht (selbst signiert, unbekannter Aussteller, abgelaufen, falscher Name)
+const TLS_UNTRUSTED = new Set(['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_UNTRUSTED', 'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID',
+  'CERT_SIGNATURE_FAILURE', 'CERT_CHAIN_TOO_LONG', 'INVALID_CA', 'INVALID_PURPOSE', 'CERT_REJECTED', 'HOSTNAME_MISMATCH', 'ERR_TLS_CERT_ALTNAME_INVALID']);
+
+// Fehler der Verbindung: `not_private` (resolve.js) bleibt, TLS bekommt eigene Codes, alles andere heißt unreachable
+function netErr(e) {
+  if (e && e.code === 'not_private') return e;
+  if (e && e.code === PIN_MISMATCH_CODE) return err('tls_pin_mismatch', 'the AI server presented another certificate than the pinned one');
+  if (e && TLS_UNTRUSTED.has(e.code)) return err('tls_untrusted', `the certificate of the AI server is not trusted (${e.code})`);
+  return err('unreachable', e && e.message);
+}
 
 /**
  * Eine JSON-Anfrage → { status, json }. 3xx wirft `redirect`, mehr als

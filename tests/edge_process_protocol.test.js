@@ -184,7 +184,14 @@ test('Betriebsart: steht nach der ersten Prüfung fest, ein Wechsel sperrt; hell
     const hello = host.hello();
     assert.deepStrictEqual(hello.gw.isolation, { mode: 'isolated', active: true });
     assert.deepStrictEqual(hello.gw.fence, { active: true, backend: 'isolated' });
-    assert.deepStrictEqual(hello.gw.mqtt, { available: true }, 'MQTT liegt beim Gateway');
+    assert.deepStrictEqual(hello.gw.mqtt, { available: true, tlsCert: false }, 'MQTT liegt beim Gateway (dieses meldet kein eigenes TLS-Zertifikat)');
+    // ein Gateway-Container, der das Zertifikat für Port 8883 selbst erzeugt, meldet das nach – der Server bekommt ein neues hello
+    const before = sent.length;
+    rpc.info = { mqtt: { available: true, tlsCert: true }, mqttStatus: { running: true, clients: 2, accounts: [] } };
+    rpc.emit('info', rpc.info);
+    assert.deepStrictEqual(sent.slice(before).filter((m) => m.t === 'hello').map((m) => m.gw.mqtt), [{ available: true, tlsCert: true }]);
+    rpc.info = { mqtt: { available: true }, mqttStatus: { running: true, clients: 2, accounts: [] } };
+    rpc.emit('info', rpc.info);
     assert.deepStrictEqual(host.statusMessage().mqtt, { running: true, clients: 2, accounts: [] });
     const file = JSON.parse(fs.readFileSync(path.join(dir, 'status.json'), 'utf8'));
     assert.strictEqual(file.mode, 'isolated');

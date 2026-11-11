@@ -8,6 +8,9 @@
 //   acl              je Konto die Themen aus dem state; internes Konto nur pluginTopics
 //   reload           Zähler – ändert er sich, schickt der Wächter im mqtt-Container SIGHUP
 //   enabled          vorhanden = Broker soll laufen
+//   tls/server.crt   nur mit TLS (state.mqtt.tls): das selbst erzeugte Zertifikat des
+//   tls/server.key   Gateways (manager.js, src/cache/selfsigned.js) – Mosquitto liest
+//                    beide direkt aus dieser Ablage (certfile/keyfile zeigen hierher)
 // Der Wächter im mqtt-Container startet Mosquitto neu, wenn sich mosquitto.conf
 // ändert (Listener lassen sich per SIGHUP nicht ändern), sonst SIGHUP.
 //
@@ -67,6 +70,8 @@ function buildConf({ dir, listenAddrs, tls }) {
     lines.push(`listener ${PORT} ${ip}`);
   }
   if (tls && tls.certfile && tls.keyfile) {
+    // der Fingerabdruck steht in der Datei, damit ein neues Zertifikat sie ändert → der Wächter startet Mosquitto neu
+    if (tls.sha256) lines.push('', `# TLS: Zertifikat des Gateways, SHA-256 ${tls.sha256}`);
     for (const ip of listenAddrs) {
       if (!net.isIPv4(ip)) continue;
       lines.push(`listener ${TLS_PORT} ${ip}`, `certfile ${tls.certfile}`, `keyfile ${tls.keyfile}`);
@@ -118,11 +123,32 @@ class BrokerFiles {
     return fs.existsSync(certfile) && fs.existsSync(keyfile) ? { certfile, keyfile } : null;
   }
 
-  /** Alles schreiben; liefert { confChanged, authChanged }. */
-  write({ accounts, internalHash, internalTopics, listenAddrs, tls }) {
+  /** Zertifikat und Schlüssel (PEM) für den TLS-Listener ablegen; → true, wenn sich etwas geändert hat. */
+  writeTls({ cert, key }) {
+    // Gateway-Ablage: Ordner 0750, die Gruppe 61001 kommt über setgid der Ablage (der Broker liest)
+    fs.mkdirSync(path.join(this.dir, 'tls'), { recursive: true, mode: this.fileMode === 0o600 ? 0o700 : 0o750 });
+    const a = writeIfChanged(path.join(this.dir, 'tls', 'server.crt'), cert, this.fileMode);
+    const b = writeIfChanged(path.join(this.dir, 'tls', 'server.key'), key, this.fileMode);
+    return a || b;
+  }
+
+  /** TLS aus: der Schlüssel bleibt nicht in der Ablage des Brokers liegen. */
+  removeTls() {
+    try { fs.rmSync(path.join(this.dir, 'tls'), { recursive: true, force: true }); } catch { /* weg */ }
+  }
+
+  /**
+   * Alles schreiben; liefert { confChanged, authChanged, tls }.
+   * `cert` ({ cert, key, sha256 }, PEM): das Zertifikat des Gateways für den TLS-Listener –
+   * zuerst abgelegt, dann erst die mosquitto.conf, die darauf zeigt.
+   */
+  write({ accounts, internalHash, internalTopics, listenAddrs, tls, cert = null }) {
     // data/ legt im neuen Weg der Wächter im eigenen Volume an
     if (this.brokerDir === this.dir) fs.mkdirSync(path.join(this.dir, 'data'), { recursive: true, mode: 0o700 });
-    const tlsFiles = tls ? this.tlsFiles() : null;
+    if (tls && cert) this.writeTls(cert);
+    else if (!tls) this.removeTls();
+    const found = tls ? this.tlsFiles() : null;
+    const tlsFiles = found ? { ...found, sha256: cert ? cert.sha256 : null } : null;
     const confChanged = writeIfChanged(path.join(this.dir, 'mosquitto.conf'), buildConf({ dir: this.brokerDir, listenAddrs, tls: tlsFiles }), this.fileMode);
     const a = writeIfChanged(path.join(this.dir, 'passwd'), buildPasswd(accounts, internalHash), this.fileMode);
     const b = writeIfChanged(path.join(this.dir, 'acl'), buildAcl(accounts, internalTopics), this.fileMode);
