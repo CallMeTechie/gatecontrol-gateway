@@ -38,7 +38,7 @@ const AI_ANSWER_MAX = 256 * 1024;
 //   POST /api/ai/pull/cancel    {}                – Download abbrechen
 //   POST /api/ai/delete         { model }         – Modell löschen
 //   POST /api/ai/chat           { model, system, messages, … } – Antwort als NDJSON-Strom (Body ≤ 2 MB)
-//   POST /api/ai/probe          { url, api, key? } – KI-Server im LAN testen (Modelle), nichts gespeichert
+//   POST /api/ai/probe          { url, api, key?, pin? } – KI-Server im LAN testen (Modelle, bei https das Zertifikat), nichts gespeichert
 // Aufträge antworten sofort (202); das Ergebnis kommt über die normalen Berichte.
 function reply(res, outcome, busyError) {
   if (outcome === 'accepted') return res.status(202).json({ accepted: true });

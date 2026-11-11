@@ -324,7 +324,8 @@ class EdgeBridge {
   sendInfo() {
     this.rpcSend(this.rpc, {
       t: 'info',
-      mqtt: { available: !!(this.mqtt && this.mqtt.available()) },
+      // tlsCert: dieses Gateway erzeugt das Zertifikat für den TLS-Listener (Port 8883) selbst
+      mqtt: { available: !!(this.mqtt && this.mqtt.available()), tlsCert: !!(this.mqtt && this.mqtt.tlsCert && this.mqtt.tlsCert()) },
       mqttStatus: this.mqtt ? this.mqtt.status() : null,
     });
   }

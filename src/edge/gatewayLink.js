@@ -74,7 +74,9 @@ class EdgeLink {
     const mdns = defaultMdns();
     // MQTT-Broker-Dateien schreibt das Gateway nur mit dem Volume edge-mqtt-conf (neue Compose-Datei);
     // sonst meldet der Manager „nicht verfügbar“ und der Edge-Host (alte Compose) macht es selbst.
-    const mqtt = new MqttManager({ dir: mqttConfDir, brokerDir: mqttBrokerDir, logger, mdns });
+    // das Zertifikat des TLS-Listeners liegt im State-Verzeichnis (die Ablage der Broker-Dateien ist ein tmpfs)
+    const tlsDir = this.config && this.config.stateDir ? path.join(this.config.stateDir, 'mqtt-tls') : undefined;
+    const mqtt = new MqttManager({ dir: mqttConfDir, brokerDir: mqttBrokerDir, tlsDir, logger, mdns });
     return new EdgeBridge({
       runDir: this.runDir,
       upstream: () => (this.config && this.config.serverUrl && this.config.apiToken

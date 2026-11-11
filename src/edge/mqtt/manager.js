@@ -8,10 +8,18 @@
 // verteilt Nachrichten an die Edge-Teile (gc.mqtt.*) und kündigt den Broker
 // per mDNS als _mqtt._tcp an. Das interne Konto darf nur die pluginTopics;
 // jedes Plugin zusätzlich nur seine genehmigten mqtt.topics.
+//
+// TLS (state.mqtt.tls, Standard aus): zusätzlich Port 8883 an den LAN-Adressen,
+// mit einem selbst erzeugten Zertifikat (src/cache/selfsigned.js). Es liegt in
+// `tlsDir` (Gateway: /state/mqtt-tls) und bleibt über Neustarts gleich; sein
+// Fingerabdruck (SHA-256) geht mit dem Status an den Server, damit man ihn in
+// Geräten hinterlegen kann. Port 1883 bleibt daneben offen.
 
 const crypto = require('node:crypto');
 const os = require('node:os');
+const path = require('node:path');
 const { BrokerFiles, hashPassword, INTERNAL_USER, PORT } = require('./broker');
+const { loadOrCreate } = require('../../cache/selfsigned');
 const { MqttClient } = require('./client');
 const topics = require('../topics');
 const { LIMITS } = require('../constants');
@@ -39,10 +47,20 @@ function lanAddresses(ifaces = os.networkInterfaces()) {
 const DISCONNECT_RE = /Client (\S+)(?: \[[^\]]*\])? (?:disconnected|closed its connection|has exceeded timeout)/;
 const CONNECT_RE = /New client connected from \S+ as (\S+) \(.*?u'([^']*)'\)/;
 
+const HOST_LABEL_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
 class MqttManager {
-  constructor({ dir, brokerDir, logger, mdns = null, hostname = os.hostname(), getLanAddrs = lanAddresses, clientFactory, retryMs = 5000, now = Date.now, onChange = () => {} } = {}) {
+  /**
+   * @param {string} [o.tlsDir]  wo das Zertifikat des TLS-Listeners bleibt (übersteht Neustarts);
+   *                             ohne Angabe ein Ordner in `dir` (alte Compose-Datei: eigenes Volume)
+   */
+  constructor({ dir, brokerDir, tlsDir, logger, mdns = null, hostname = os.hostname(), getLanAddrs = lanAddresses, clientFactory, retryMs = 5000, now = Date.now, onChange = () => {},
+    loadCert = loadOrCreate } = {}) {
     this.onChange = onChange;
     this.files = new BrokerFiles(dir, { brokerDir: brokerDir || dir });
+    this.tlsDir = tlsDir || (dir ? path.join(dir, 'tls-own') : null);
+    this.loadCert = loadCert;
+    this.cert = null; // { cert, key, sha256 } – erst erzeugt, wenn TLS eingeschaltet wird
     this.logger = logger || { info() {}, warn() {}, debug() {} };
     this.mdns = mdns;
     this.hostname = hostname.split('.')[0] || 'gatecontrol';
@@ -70,6 +88,29 @@ class MqttManager {
   }
 
   available() { return this.files.available(); }
+
+  /** Dieses Gateway erzeugt das Zertifikat für den TLS-Listener selbst (hello: mqtt.tlsCert). */
+  tlsCert() { return true; }
+
+  /**
+   * Das Zertifikat des TLS-Listeners: aus `tlsDir` geladen oder einmal erzeugt (10 Jahre).
+   * Geräte prüfen den Fingerabdruck; Name und Adressen stehen nur für Clients drin, die
+   * zusätzlich den Namen prüfen. null, wenn es sich nicht anlegen lässt (→ tls: missing_cert).
+   */
+  ensureCert(addrs = []) {
+    if (this.cert) return this.cert;
+    if (!this.tlsDir) return null;
+    try {
+      const names = HOST_LABEL_RE.test(this.hostname) ? [{ dns: this.hostname }, { dns: `${this.hostname}.local` }] : [];
+      const c = this.loadCert(this.tlsDir, { commonName: 'GateControl MQTT', altNames: [...names, ...addrs.map((ip) => ({ ip }))] });
+      this.cert = { cert: c.cert, key: c.key, sha256: c.sha256 };
+      if (c.created) this.logger.info({ sha256: c.sha256 }, 'edge: certificate for the MQTT TLS listener created');
+    } catch (e) {
+      this.logger.warn({ err: e.message }, 'edge: certificate for the MQTT TLS listener not available');
+      return null;
+    }
+    return this.cert;
+  }
 
   internalTopics(cfg = this.cfg) {
     return [...new Set(Object.values(cfg.pluginTopics || {}).flat().concat(this.local.topics))];
@@ -140,8 +181,8 @@ class MqttManager {
     if (!this.cfg.enabled || !this.available()) return;
     const addrs = this.getLanAddrs();
     const r = this.files.write({ accounts: this.allAccounts(), internalHash: this.internalHash, internalTopics: this.internalTopics(),
-      listenAddrs: addrs, tls: this.cfg.tls });
-    this.tls = r.tls;
+      listenAddrs: addrs, tls: this.cfg.tls, cert: this.cfg.tls ? this.ensureCert(addrs) : null });
+    if (r.tls !== this.tls) { this.tls = r.tls; this.onChange(); }
     if (r.confChanged) this.logger.info({ listen: addrs }, 'edge: MQTT broker configuration written');
     if (this.mdns && (r.confChanged || addrs.join() !== this.lastAddrs.join())) {
       this.mdns.announce(addrs.length ? { instance: `GateControl MQTT ${this.hostname}`, service: '_mqtt._tcp', host: this.hostname, port: PORT, addresses: addrs } : null);
@@ -283,6 +324,8 @@ class MqttManager {
       running: !!(this.client && this.client.connected),
       clients: Math.max(0, this.clients - (this.client && this.client.connected ? 1 : 0)), // ohne das interne Konto
       tls: this.tls,
+      // Fingerabdruck (SHA-256 über DER, hex) und Zertifikat (PEM, öffentlich) des TLS-Listeners
+      ...(this.tls === 'on' && this.cert ? { tlsSha256: this.cert.sha256, tlsCert: this.cert.cert } : {}),
       accounts: (this.cfg.accounts || []).map((a) => ({ user: a.user, connected: !!(this.accounts.get(a.user) || {}).connected,
         lastSeen: (this.accounts.get(a.user) || {}).lastSeen || null })),
     };

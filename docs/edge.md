@@ -340,12 +340,33 @@ Der Wächter im `mqtt`-Container startet Mosquitto, sobald `enabled` und
 schickt **SIGHUP**, wenn sich Konten oder ACL ändern (Datei `reload`).
 `state.mqtt.enabled: false` → Datei `enabled` weg → Mosquitto wird beendet.
 
-**TLS (vorbereitet):** mit `state.mqtt.tls: true` und den Dateien
-`tls/server.crt` + `server.key` in der Ablage der Broker-Dateien kommt je
-LAN-Adresse ein `listener 8883` dazu; fehlen sie, meldet der Status
-`tls: "missing_cert"`. Zertifikate liefert der Server in v1 noch nicht (mit
-der neuen Compose-Datei ist die Ablage ein tmpfs des Gateways, dort liegen
-also keine).
+**TLS (pro Gateway schaltbar, Standard aus):** mit `state.mqtt.tls: true` kommt je
+LAN-Adresse ein `listener 8883` dazu – **zusätzlich** zu Port 1883, der bleibt
+(viele Shelly- und Tasmota-Geräte können kein TLS oder nur mit Aufwand). Das
+Zertifikat erzeugt das Gateway selbst (`src/cache/selfsigned.js`: EC P-256,
+selbst signiert, 10 Jahre, CN „GateControl MQTT“, als Namen der Rechnername,
+`<name>.local` und die LAN-Adressen beim Erzeugen) – erst, wenn TLS eingeschaltet
+wird. Es liegt im State-Verzeichnis (`/state/mqtt-tls/cert.pem` + `key.pem`,
+`0600`; alte Compose-Datei: `/gc-mqtt/tls-own/`) und **bleibt über Neustarts und
+Updates gleich**; erneuert wird es nur, wenn es fehlt, kaputt ist oder in weniger
+als 30 Tagen abläuft. Für den Broker legt das Gateway Kopien nach
+`tls/server.crt` + `tls/server.key` in die Ablage der Broker-Dateien
+(`/gc-mqtt-conf/tls/`, `0640`, Gruppe 61001; Ordner `0750`): Mosquitto liest
+beide direkt von dort (`certfile`/`keyfile`), der Wächter kopiert weiter nur
+`mosquitto.conf`, `passwd` und `acl` – die Compose-Datei bleibt, wie sie ist.
+Der Fingerabdruck steht als Kommentar in `mosquitto.conf`: ein neues Zertifikat
+ändert die Datei, der Wächter startet Mosquitto neu. TLS aus → Listener und
+`tls/` weg (das Zertifikat im State-Verzeichnis bleibt, der Fingerabdruck ist
+nach dem Wiedereinschalten derselbe). Lässt sich das Zertifikat nicht anlegen
+(State-Verzeichnis nicht beschreibbar), meldet der Status `tls: "missing_cert"`
+und Port 1883 läuft weiter.
+
+Geräte prüfen den **Fingerabdruck** (SHA-256 über das DER-Zertifikat) oder
+bekommen das Zertifikat als „eigene CA“ hinterlegt; beides meldet der Status
+(`tlsSha256`, `tlsCert`), der Server zeigt es beim Gateway unter „MQTT“ an. Ob
+ein Gateway das kann, sagt `hello.gw.mqtt.tlsCert: true` – ältere Gateways
+melden mit `state.mqtt.tls` weiter `missing_cert`, der Server zeigt dann
+„Gateway-Update nötig“.
 
 **mDNS:** der Gateway-Container (alte Compose-Datei: der Edge-Host) kündigt den Broker als `_mqtt._tcp` (Instanz
 „GateControl MQTT <hostname>“, Port 1883, A-Record der LAN-Adressen) auf der
@@ -361,10 +382,16 @@ die Fähigkeit `mqtt.topics` des Plugins (Manifest ∩ Genehmigung) **und**
 als ein genehmigter Filter. QoS 0/1, höchstens 64 Abos je Plugin, Nutzlast ≤
 256 KB. Endet ein Edge-Prozess, werden seine Abos aufgeräumt.
 
-**Status:** `mqtt: { running, clients, tls, accounts: [{ user, connected,
-lastSeen }] }` – `running` = internes Konto verbunden, `clients` ohne das
-interne Konto (aus `$SYS`), `connected`/`lastSeen` aus den
-Verbindungsmeldungen des Brokers (`$SYS/broker/log/N`).
+**Status:** `mqtt: { running, clients, tls, tlsSha256?, tlsCert?, accounts:
+[{ user, connected, lastSeen }] }` – `running` = internes Konto verbunden,
+`clients` ohne das interne Konto (aus `$SYS`), `connected`/`lastSeen` aus den
+Verbindungsmeldungen des Brokers (`$SYS/broker/log/N`). `tls`: `off` | `on` |
+`missing_cert`; nur mit `on` dazu `tlsSha256` (64 Hex-Zeichen, klein) und
+`tlsCert` (das Zertifikat als PEM – öffentlich, nie der Schlüssel).
+
+Tests: `tests/edge_mqtt.test.js`, `tests/edge_mqtt_tls.test.js` (Zertifikat,
+Dateien, Status) und `tests/live/mqtt-tls-live.js` gegen einen echten Mosquitto
+als Benutzer 61001 mit den Rechten der Compose-Datei (CI-Job `mqtt-tls`).
 
 ## Edge-API für Plugin-Autoren
 

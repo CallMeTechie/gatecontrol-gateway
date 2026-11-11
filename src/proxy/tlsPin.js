@@ -214,12 +214,14 @@ class PinnedHttpsAgent extends https.Agent {
  * Resolves `{ sha256, subject, issuer, validTo, selfSigned }`; rejects with the
  * socket error (ECONNREFUSED, ETIMEDOUT, a TLS alert, …) otherwise.
  */
-function inspectLeafCertificate({ host, port, timeoutMs = 10000 }) {
+function inspectLeafCertificate({ host, port, timeoutMs = 10000, lookup }) {
   const agent = new PinnedHttpsAgent({ host, port, fingerprint: null, handshakeTimeoutMs: timeoutMs });
   return new Promise((resolve, reject) => {
     // A request object only to drive the agent: it never receives a socket
     // (the null pin always mismatches), so nothing of it is ever sent.
-    const req = https.request({ host, port, method: 'HEAD', path: '/', agent });
+    // `lookup` (optional): the caller's own name resolution, e.g. "private
+    // addresses only" — the handshake goes exactly where a later request goes.
+    const req = https.request({ host, port, method: 'HEAD', path: '/', agent, ...(typeof lookup === 'function' ? { lookup } : {}) });
     req.once('error', (err) => {
       if (err && err.code === PIN_MISMATCH_CODE && err.peerCertificate) {
         resolve(err.peerCertificate);
