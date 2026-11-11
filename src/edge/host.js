@@ -68,6 +68,7 @@ class EdgeHost extends EventEmitter {
     this.mode = null; // 'isolated' | 'fence' – fest ab der ersten Prüfung (das Netz eines Containers ändert sich nicht)
     this.fence = { active: false, backend: null, reason: 'not_checked' };
     this.mqttAvailable = false;
+    this.mqttTlsCert = false;
     this.reconciling = false;
     this.again = false;
     this.statusTimer = null;
@@ -104,6 +105,7 @@ class EdgeHost extends EventEmitter {
       });
     }
     this.mqttAvailable = !!(this.mqtt && this.mqtt.available());
+    this.mqttTlsCert = !!(this.mqtt && this.mqtt.tlsCert && this.mqtt.tlsCert());
     this.channel.on('open', () => this.onOpen());
     this.channel.on('close', () => { this.stateSeen = false; this.scheduleStatus(); });
     this.channel.on('message', (m) => this.onMessage(m));
@@ -131,8 +133,10 @@ class EdgeHost extends EventEmitter {
 
   onMqttChange() {
     const avail = !!(this.mqtt && this.mqtt.available());
-    if (avail !== this.mqttAvailable) {
+    const tlsCert = !!(this.mqtt && this.mqtt.tlsCert && this.mqtt.tlsCert());
+    if (avail !== this.mqttAvailable || tlsCert !== this.mqttTlsCert) {
       this.mqttAvailable = avail;
+      this.mqttTlsCert = tlsCert;
       if (this.channel.connected) this.channel.send(this.hello()); // der Server zeigt den Broker an
     }
     this.scheduleStatus();
@@ -213,7 +217,8 @@ class EdgeHost extends EventEmitter {
       gw: {
         version: this.gatewayVersion,
         edgeHost: EDGE_HOST_VERSION,
-        mqtt: { available: !!(this.mqtt && this.mqtt.available()) },
+        // tlsCert: TLS-Listener mit selbst erzeugtem Zertifikat (der Server schaltet den Schalter danach frei)
+        mqtt: { available: !!(this.mqtt && this.mqtt.available()), tlsCert: !!(this.mqtt && this.mqtt.tlsCert && this.mqtt.tlsCert()) },
         fence: this.fenceView(),
         isolation: { mode: this.mode, active: this.fence.active },
         hardware: this.hardware(),
