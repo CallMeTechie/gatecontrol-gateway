@@ -4,7 +4,7 @@
 // kürzen. Fehlt es oder ist es kaputt → aus. Alles ist Server-Eingabe.
 
 const { normalizeMac } = require('../features/macs');
-const { cleanDomain } = require('./domainSet');
+const { cleanDomain } = require('../dnsfilter-core/domainSet');
 
 const PROVIDERS = new Set(['quad9', 'cloudflare', 'dns0', 'custom']);
 const FORMATS = new Set(['domains', 'hosts', 'adblock']);

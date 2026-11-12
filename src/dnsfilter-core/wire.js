@@ -4,17 +4,106 @@
 // Anfragen kommen von beliebigen Geräten im LAN, Antworten vom Upstream –
 // beides wird begrenzt gelesen; Fehler liefern null statt zu werfen.
 
-const { readName } = require('../netwatch/dnsWire');
-
 const TYPE = Object.freeze({ A: 1, NS: 2, CNAME: 5, SOA: 6, PTR: 12, MX: 15, TXT: 16, AAAA: 28, OPT: 41, HTTPS: 65, ANY: 255 });
 const RCODE = Object.freeze({ NOERROR: 0, FORMERR: 1, SERVFAIL: 2, NXDOMAIN: 3, NOTIMP: 4, REFUSED: 5 });
 const CLASS_IN = 1;
 const EDNS_UDP = 1232;
 const EDE_BLOCKED = 15;
 const MAX_RR = 512;
+const MAX_JUMPS = 16;
+const OPT_ECS = 8; // EDNS Client Subnet (RFC 7871)
 
 const TYPE_NAMES = Object.fromEntries(Object.entries(TYPE).map(([k, v]) => [v, k]));
 const typeName = (t) => TYPE_NAMES[t] || `TYPE${t}`;
+
+/** Name ab `off` lesen (mit Kompression). → { name, next } oder wirft. */
+function readName(buf, off) {
+  const labels = [];
+  let pos = off;
+  let next = -1;
+  let jumps = 0;
+  for (;;) {
+    if (pos >= buf.length) throw new Error('name out of range');
+    const len = buf[pos];
+    if (len === 0) { pos += 1; break; }
+    if ((len & 0xc0) === 0xc0) {
+      if (pos + 1 >= buf.length) throw new Error('pointer out of range');
+      if (++jumps > MAX_JUMPS) throw new Error('too many pointers');
+      if (next === -1) next = pos + 2;
+      pos = ((len & 0x3f) << 8) | buf[pos + 1];
+      continue;
+    }
+    if ((len & 0xc0) !== 0) throw new Error('bad label');
+    if (pos + 1 + len > buf.length) throw new Error('label out of range');
+    labels.push(buf.toString('utf8', pos + 1, pos + 1 + len));
+    if (labels.length > 128) throw new Error('name too long');
+    pos += 1 + len;
+  }
+  return { name: labels.join('.'), next: next === -1 ? pos : next };
+}
+
+const ipv4Rdata = (ip) => Buffer.from(ip.split('.').map(Number));
+
+/** IPv6-Text (auch mit `::`, ohne Zonen-Anhang) → 16 Bytes. */
+function ipv6Bytes(ip) {
+  const [head, tail = null] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = tail ? tail.split(':') : [];
+  const groups = tail === null ? h : [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t];
+  if (groups.length !== 8) throw new Error('bad ipv6 address');
+  const b = Buffer.alloc(16);
+  groups.forEach((g, i) => b.writeUInt16BE(parseInt(g, 16) & 0xffff, i * 2));
+  return b;
+}
+
+/** 16 Bytes → IPv6-Text nach RFC 5952 (klein, längste Nullfolge als `::`). */
+function ipv6Text(b) {
+  const g = [];
+  for (let i = 0; i < 16; i += 2) g.push((b[i] << 8) | b[i + 1]);
+  let best = -1;
+  let bestLen = 1;
+  for (let i = 0; i < 8; i++) {
+    if (g[i] !== 0) continue;
+    let j = i;
+    while (j < 8 && g[j] === 0) j++;
+    if (j - i > bestLen) { best = i; bestLen = j - i; }
+    i = j;
+  }
+  const hex = (a) => a.map((x) => x.toString(16)).join(':');
+  if (best === -1) return hex(g);
+  return `${hex(g.slice(0, best))}::${hex(g.slice(best + bestLen))}`;
+}
+
+/**
+ * EDNS Client Subnet aus den OPT-Optionen `buf[off, end)` lesen →
+ * { family: 4|6, sourcePrefix, scopePrefix, address } oder null (fehlt oder
+ * nicht nach RFC 7871 §6: falsche Länge, Bits hinter dem Präfix gesetzt).
+ * `address` ist auf die volle Länge mit Nullen aufgefüllt.
+ */
+function readEcs(buf, off, end) {
+  let pos = off;
+  while (pos + 4 <= end) {
+    const code = buf.readUInt16BE(pos);
+    const len = buf.readUInt16BE(pos + 2);
+    pos += 4;
+    if (pos + len > end) return null;
+    if (code === OPT_ECS) {
+      if (len < 4) return null;
+      const fam = buf.readUInt16BE(pos);
+      const sourcePrefix = buf[pos + 2];
+      const scopePrefix = buf[pos + 3];
+      const size = fam === 1 ? 4 : fam === 2 ? 16 : 0;
+      const n = Math.ceil(sourcePrefix / 8);
+      if (!size || sourcePrefix > size * 8 || len !== 4 + n) return null;
+      const addr = Buffer.alloc(size);
+      buf.copy(addr, 0, pos + 4, pos + 4 + n);
+      if (sourcePrefix % 8 && (addr[n - 1] & (0xff >> (sourcePrefix % 8)))) return null;
+      return { family: fam === 1 ? 4 : 6, sourcePrefix, scopePrefix, address: fam === 1 ? Array.from(addr).join('.') : ipv6Text(addr) };
+    }
+    pos += len;
+  }
+  return null;
+}
 
 /** Labels eines (wire-)Namens ab `off` ohne Kompression lesen → { labels: [Buffer], end } */
 function readQuestionName(buf, off) {
@@ -60,7 +149,9 @@ function skipRR(buf, pos) {
  * Anfrage zerlegen → {
  *   id, opcode, rd, cd, qdcount, name (klein, ohne Punkt am Ende, '' = Wurzel),
  *   nameOk (false bei seltsamen Zeichen), qtype, qclass, question (Buffer),
- *   edns: { udpSize, do } | null
+ *   edns: { udpSize, do, version, ecs? } | null   (ecs nur, wenn die Anfrage
+ *   eine gültige Client-Subnet-Option trägt – siehe readEcs; es wird nur
+ *   gelesen, nie an den Upstream weitergegeben)
  * } oder null (kein sinnvolles DNS-Paket).
  */
 function parseQuery(buf) {
@@ -93,7 +184,11 @@ function parseQuery(buf) {
       if (n.next + 10 > buf.length) break;
       if (buf.readUInt16BE(n.next) === TYPE.OPT) {
         const ttl = buf.readUInt32BE(n.next + 4);
+        const rdlen = buf.readUInt16BE(n.next + 8);
+        const rd = n.next + 10;
         edns = { udpSize: Math.max(512, buf.readUInt16BE(n.next + 2)), do: !!(ttl & 0x8000), version: (ttl >>> 16) & 0xff };
+        const ecs = rd + rdlen <= buf.length ? readEcs(buf, rd, rd + rdlen) : null;
+        if (ecs) edns.ecs = ecs;
       }
       pos = skipRR(buf, pos);
     }
@@ -125,9 +220,27 @@ function questionFor(name, qtype, qclass = CLASS_IN) {
   return Buffer.concat([encodeName(name), t]);
 }
 
-/** OPT-RR (EDNS); optional Extended DNS Error. */
-function optRecord({ udpSize = EDNS_UDP, doBit = false, ede = null } = {}) {
+/** Client-Subnet-Option bauen (für Tests und Probe-Anfragen): { address, sourcePrefix?, scopePrefix? }. */
+function ecsOption({ address, sourcePrefix = null, scopePrefix = 0 }) {
+  const v4 = !address.includes(':');
+  const bytes = v4 ? ipv4Rdata(address) : ipv6Bytes(address);
+  const prefix = sourcePrefix === null ? bytes.length * 8 : sourcePrefix;
+  const n = Math.ceil(prefix / 8);
+  const o = Buffer.alloc(8 + n);
+  o.writeUInt16BE(OPT_ECS, 0);
+  o.writeUInt16BE(4 + n, 2);
+  o.writeUInt16BE(v4 ? 1 : 2, 4);
+  o[6] = prefix;
+  o[7] = scopePrefix;
+  bytes.copy(o, 8, 0, n);
+  if (prefix % 8) o[8 + n - 1] &= 0xff00 >> (prefix % 8);
+  return o;
+}
+
+/** OPT-RR (EDNS); optional Extended DNS Error und Client Subnet. */
+function optRecord({ udpSize = EDNS_UDP, doBit = false, ede = null, ecs = null } = {}) {
   const opts = [];
+  if (ecs) opts.push(ecsOption(ecs));
   if (ede !== null) {
     const o = Buffer.alloc(6);
     o.writeUInt16BE(15, 0); // OPTION-CODE EDE
@@ -145,7 +258,7 @@ function optRecord({ udpSize = EDNS_UDP, doBit = false, ede = null } = {}) {
   return Buffer.concat([h, rdata]);
 }
 
-/** Upstream-Anfrage bauen (immer RD; EDNS nur, wenn der Client EDNS sprach). */
+/** Upstream-Anfrage bauen (immer RD; EDNS nur, wenn der Client EDNS sprach; `edns.ecs` nur für Tests/Proben). */
 function buildQuery({ id = 0, name, qtype, qclass = CLASS_IN, edns = null, cd = false }) {
   const h = Buffer.alloc(12);
   h.writeUInt16BE(id & 0xffff, 0);
@@ -153,7 +266,7 @@ function buildQuery({ id = 0, name, qtype, qclass = CLASS_IN, edns = null, cd = 
   h.writeUInt16BE(1, 4);
   h.writeUInt16BE(edns ? 1 : 0, 10);
   const parts = [h, questionFor(name, qtype, qclass)];
-  if (edns) parts.push(optRecord({ doBit: !!edns.do }));
+  if (edns) parts.push(optRecord({ doBit: !!edns.do, ecs: edns.ecs || null }));
   return Buffer.concat(parts);
 }
 
@@ -269,9 +382,8 @@ function adaptResponse(buf, { id, question, ttlOffsets = [], ageSec = 0 }) {
   return out;
 }
 
-const ipv4Rdata = (ip) => Buffer.from(ip.split('.').map(Number));
 
 module.exports = {
   TYPE, RCODE, CLASS_IN, EDNS_UDP, EDE_BLOCKED, typeName,
-  parseQuery, buildQuery, buildResponse, parseResponse, adaptResponse, encodeName, questionFor, optRecord, ipv4Rdata,
+  readName, parseQuery, buildQuery, buildResponse, parseResponse, adaptResponse, encodeName, questionFor, optRecord, ecsOption, ipv4Rdata,
 };

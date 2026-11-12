@@ -3,8 +3,8 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const { Readable } = require('node:stream');
-const { parseListText, parseListStream, countLines, hashDomainBytes, ListTooLarge } = require('../src/dns/listParser');
-const { hash53, CompactList, PatternSet, HashBuilder, cleanDomain, suffixes } = require('../src/dns/domainSet');
+const { parseListText, parseListStream, countLines, hashDomainBytes, ListTooLarge } = require('../src/dnsfilter-core/listParser');
+const { hash53, CompactList, PatternSet, HashBuilder, cleanDomain, suffixes } = require('../src/dnsfilter-core/domainSet');
 
 describe('dns: domain sets', () => {
   it('hash53 is stable, 53-bit and matches the byte hasher', () => {

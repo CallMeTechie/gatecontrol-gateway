@@ -8,15 +8,9 @@ const fs = require('node:fs');
 const logger = require('../logger');
 const { FeatureStatus, loop } = require('../features/status');
 const { normalizeMac } = require('../features/macs');
-const { cleanDomain } = require('./domainSet');
-const { Policy } = require('./policy');
-const { Resolver, MAX_LOG } = require('./resolver');
-const { Upstream } = require('./upstream');
+const { cleanDomain, Policy, Resolver, MAX_LOG, Upstream, DnsStats, ListManager, ResponseCache } = require('../dnsfilter-core');
 const { NeighborCache } = require('./neighbors');
-const { DnsStats } = require('./stats');
 const { DnsListener, lanListenAddresses } = require('./server');
-const { ListManager } = require('./lists');
-const { ResponseCache } = require('./responseCache');
 
 const REPORT_PATH = '/api/v1/gateway/dns';
 const REPORT_MS = 5 * 60_000;
@@ -58,7 +52,7 @@ class DnsFilter {
     this.cfg = { enabled: false };
     this.stats = new DnsStats({ now });
     this.cache = new ResponseCache({ now });
-    this.lists = lists || new ListManager({ stateDir, now, onChange: () => this._rebuildPolicy() });
+    this.lists = lists || new ListManager({ stateDir, now, logger, onChange: () => this._rebuildPolicy() });
     if (lists) lists.onChange = () => this._rebuildPolicy();
     this.upstreamFactory = upstreamFactory || ((up) => new Upstream({ upstream: up, routerIp }));
     this.upstream = null;

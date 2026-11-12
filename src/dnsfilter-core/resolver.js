@@ -4,6 +4,18 @@
 // Antwort, sichere Suche oder Weiterleitung (mit Zwischenspeicher und
 // Bündelung gleicher Anfragen). Liefert die Antwort als Buffer oder null
 // (verwerfen).
+//
+// Wer der Client ist, wird eingesteckt:
+//   neighbors.macFor(ip)  – Gateway: MAC zur Absender-Adresse
+//   clientFor(ip)         – allgemein: Schlüssel zur Client-Adresse (oder null)
+//   ecsClient             – Client-Adresse aus EDNS Client Subnet statt vom
+//                           Absender (Standard aus). Für Resolver hinter einem
+//                           Weiterleiter, der die echte Adresse anhängt
+//                           (dnsmasq `add-subnet=32,128`). `true` = nur von
+//                           Loopback-Absendern annehmen, Funktion (ip) → bool
+//                           = selbst entscheiden. Gilt nur für volle Adressen
+//                           (/32 bzw. /128); sonst zählt der Absender.
+//                           Ohne `clientFor` ist die Adresse selbst der Schlüssel.
 
 const wire = require('./wire');
 const { ResponseCache } = require('./responseCache');
@@ -19,8 +31,11 @@ function isLoopback(ip) {
 }
 
 class Resolver {
-  constructor({ getPolicy, upstream, neighbors, stats, now = Date.now, cache = new ResponseCache({ now }), blockResponse = () => 'zero', logEnabled = () => false }) {
-    Object.assign(this, { getPolicy, upstream, neighbors, stats, now, cache, blockResponse, logEnabled });
+  constructor({
+    getPolicy, upstream, neighbors, stats, now = Date.now, cache = new ResponseCache({ now }), blockResponse = () => 'zero', logEnabled = () => false,
+    clientFor = null, ecsClient = false,
+  }) {
+    Object.assign(this, { getPolicy, upstream, neighbors, stats, now, cache, blockResponse, logEnabled, clientFor, ecsClient });
     this.inflight = new Map();
     this.log = [];
   }
@@ -33,6 +48,23 @@ class Resolver {
     if (this.log.length > MAX_LOG) this.log.splice(0, this.log.length - MAX_LOG);
   }
 
+  /** Client-Adresse einer Anfrage: aus ECS, wenn eingeschaltet und vom Absender angenommen, sonst der Absender. */
+  _clientIp(q, ip) {
+    if (!this.ecsClient) return ip;
+    const ecs = q.edns && q.edns.ecs;
+    if (!ecs || ecs.sourcePrefix !== (ecs.family === 4 ? 32 : 128)) return ip;
+    const trusted = typeof this.ecsClient === 'function' ? this.ecsClient(ip) : !!ip && isLoopback(ip);
+    return trusted ? ecs.address : ip;
+  }
+
+  /** Schlüssel des Clients (MAC, Peer-Kennung …) oder null. */
+  async _clientKey(ip) {
+    if (!ip || isLoopback(ip)) return null;
+    if (this.clientFor) return (await this.clientFor(ip)) || null;
+    if (this.neighbors) return this.neighbors.macFor(ip);
+    return this.ecsClient ? ip : null;
+  }
+
   /** Antwort an den Client (über UDP höchstens 512 Bytes bzw. EDNS-Größe, sonst TC). */
   async handle(msg, { ip = null, udp = false } = {}) {
     const t0 = process.hrtime.bigint();
@@ -42,7 +74,9 @@ class Resolver {
     if (!q.question) return wire.buildResponse({ ...q, question: null }, { rcode: RCODE.FORMERR });
     if (q.qclass !== wire.CLASS_IN || !q.nameOk || q.name === null) return wire.buildResponse(q, { rcode: RCODE.REFUSED });
 
-    const mac = ip && !isLoopback(ip) && this.neighbors ? await this.neighbors.macFor(ip) : null;
+    const from = ip; // Absender der Verbindung (Schleifenschutz der Weiterleitung)
+    ip = this._clientIp(q, ip);
+    const mac = await this._clientKey(ip);
     const now = this.now();
     const policy = this.getPolicy();
     const d = policy.decide(q.name, mac, now);
@@ -53,12 +87,12 @@ class Resolver {
       if (d.action === 'block') {
         out = this._blocked(q, d);
       } else if (d.safeSearch && (q.qtype === TYPE.A || q.qtype === TYPE.AAAA)) {
-        const r = await this._safeSearch(q, d.safeSearch, ip);
+        const r = await this._safeSearch(q, d.safeSearch, from);
         out = r.out; cached = r.cached; via = r.via;
       } else if (d.safeSearch) {
         out = wire.buildResponse(q, {}); // andere Typen (HTTPS, …) für Suchmaschinen: leer
       } else {
-        const r = await this._forward(q, { local: !!d.local, ip });
+        const r = await this._forward(q, { local: !!d.local, ip: from });
         out = wire.adaptResponse(r.wire, { id: q.id, question: q.question, ttlOffsets: r.ttlOffsets, ageSec: r.ageSec });
         cached = r.cached; via = r.via;
       }
@@ -131,4 +165,4 @@ class Resolver {
   }
 }
 
-module.exports = { Resolver, MAX_LOG };
+module.exports = { Resolver, MAX_LOG, isLoopback };

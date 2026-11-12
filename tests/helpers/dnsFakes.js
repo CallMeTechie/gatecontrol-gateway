@@ -7,7 +7,7 @@
 const http2 = require('node:http2');
 const dgram = require('node:dgram');
 const net = require('node:net');
-const wire = require('../../src/dns/wire');
+const wire = require('../../src/dnsfilter-core/wire');
 const { makeSelfSigned } = require('../../src/cache/selfsigned');
 
 /** Antwort auf eine Anfrage aus `table`: name → { A: [ip], AAAA: [...], CNAME: target, rcode, ttl } */

@@ -3,6 +3,10 @@
 // Entscheidung je Anfrage (Vertrag Phase 3b §1.1/§1.2): Profil per MAC,
 // Pausen, Ausnahmen, Zeiten, Listen, sichere Suche.
 //
+// „MAC“ ist hier nur ein Schlüssel für den Client: Das Gateway nimmt die
+// MAC-Adresse, andere Nutzer der Engine beliebige Texte (z. B. eine
+// Peer-Kennung). Neben `macs` wird deshalb gleichbedeutend `clients` gelesen.
+//
 // Reihenfolge:
 //   1. lokale Namen (fritz.box, *.local, Rückwärtszonen privater Netze …) → Router, nie gefiltert
 //   2. alwaysAllow (Server-Host u. ä.)                                     → erlaubt
@@ -37,9 +41,14 @@ function scheduleActive(s, date) {
   return (days.has(iso) && m >= s.from) || (days.has(prev) && m < s.to);
 }
 
+/** Client-Schlüssel eines Profils bzw. einer Pause/Verlängerung: `macs` und/oder `clients`. */
+function clientKeys(e) {
+  return e.clients ? [...(e.macs || []), ...e.clients] : e.macs;
+}
+
 function untilMap(entries) {
   const m = new Map();
-  for (const e of entries) for (const mac of e.macs) m.set(mac, Math.max(m.get(mac) || 0, e.until));
+  for (const e of entries) for (const mac of clientKeys(e)) m.set(mac, Math.max(m.get(mac) || 0, e.until));
   return m;
 }
 
@@ -68,7 +77,7 @@ class Policy {
         schedules: p.schedules.map((s) => ({ ...s, daySet: new Set(s.days), allowSet: new PatternSet(s.allowAlways) })),
       };
       this.profiles.set(p.id, prof);
-      for (const mac of p.macs) if (!this.byMac.has(mac)) this.byMac.set(mac, prof);
+      for (const mac of clientKeys(p)) if (!this.byMac.has(mac)) this.byMac.set(mac, prof);
     }
     this.defaultProfile = cfg.defaultProfile ? this.profiles.get(cfg.defaultProfile) || null : null;
     this.pauses = untilMap(cfg.pauses);

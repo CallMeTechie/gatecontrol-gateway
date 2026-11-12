@@ -3,9 +3,9 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { normalizeDns, cleanPattern, minutes } = require('../src/dns/config');
-const { Policy, scheduleActive } = require('../src/dns/policy');
-const { parseListText } = require('../src/dns/listParser');
-const { safeSearchTarget } = require('../src/dns/safeSearch');
+const { Policy, scheduleActive } = require('../src/dnsfilter-core/policy');
+const { parseListText } = require('../src/dnsfilter-core/listParser');
+const { safeSearchTarget } = require('../src/dnsfilter-core/safeSearch');
 
 const KID = 'aa:bb:cc:00:00:01';
 const KID2 = 'aa:bb:cc:00:00:02';
