@@ -6,14 +6,14 @@
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const dgram = require('node:dgram');
-const wire = require('../src/dns/wire');
+const wire = require('../src/dnsfilter-core/wire');
 const { DnsListener, lanListenAddresses } = require('../src/dns/server');
-const { Resolver } = require('../src/dns/resolver');
-const { Policy } = require('../src/dns/policy');
+const { Resolver } = require('../src/dnsfilter-core/resolver');
+const { Policy } = require('../src/dnsfilter-core/policy');
 const { normalizeDns } = require('../src/dns/config');
-const { DohClient, Upstream, udpQuery, tcpQuery, routerQuery } = require('../src/dns/upstream');
-const { DnsStats } = require('../src/dns/stats');
-const { parseListText } = require('../src/dns/listParser');
+const { DohClient, Upstream, udpQuery, tcpQuery, routerQuery } = require('../src/dnsfilter-core/upstream');
+const { DnsStats } = require('../src/dnsfilter-core/stats');
+const { parseListText } = require('../src/dnsfilter-core/listParser');
 const { startDoh, startRouter } = require('./helpers/dnsFakes');
 
 const TABLE = {

@@ -4,13 +4,13 @@
 // If-Modified-Since, nur HTTPS (auch bei Weiterleitungen), Größen- und
 // Formatgrenzen. Die letzte gute Fassung bleibt im State-Verzeichnis
 // (/state/dns-lists/<id>.txt) und wird nach einem Neustart sofort geladen.
+// State-Verzeichnis und Logger (info/warn/debug, pino-Aufruf) werden übergeben.
 
 const fs = require('node:fs');
 const path = require('node:path');
 const https = require('node:https');
 const crypto = require('node:crypto');
-const logger = require('../logger');
-const { readJson, writeJson } = require('../features/persist');
+const { readJson, writeJson } = require('./stateFile');
 const { parseListStream, countLines } = require('./listParser');
 
 const DIR = 'dns-lists';
@@ -22,6 +22,8 @@ const REFRESH_MS = 24 * 3600_000;
 const RETRY_MS = 3600_000;
 const TIMEOUT_MS = 120_000;
 const MAX_REDIRECTS = 3;
+const USER_AGENT = 'GateControl-Gateway';
+const NO_LOG = Object.freeze({ info() {}, warn() {}, debug() {} });
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 class FetchError extends Error {
@@ -31,12 +33,12 @@ class FetchError extends Error {
 /**
  * Liste nach `dest` laden. → { status: 304 } | { status: 200, bytes, sha256, etag, lastModified }
  */
-function fetchList(url, dest, { etag = null, lastModified = null, maxBytes = MAX_BYTES, timeoutMs = TIMEOUT_MS, agent, redirects = 0 } = {}) {
+function fetchList(url, dest, { etag = null, lastModified = null, maxBytes = MAX_BYTES, timeoutMs = TIMEOUT_MS, agent, redirects = 0, userAgent = USER_AGENT } = {}) {
   return new Promise((resolve, reject) => {
     let u;
     try { u = new URL(url); } catch (_e) { reject(new FetchError('bad_url')); return; }
     if (u.protocol !== 'https:') { reject(new FetchError('not_https')); return; }
-    const headers = { 'user-agent': 'GateControl-Gateway', accept: 'text/plain, */*' };
+    const headers = { 'user-agent': userAgent, accept: 'text/plain, */*' };
     if (etag) headers['if-none-match'] = etag;
     if (lastModified) headers['if-modified-since'] = lastModified;
     const req = https.get(u, { headers, agent, timeout: timeoutMs }, (res) => {
@@ -46,7 +48,7 @@ function fetchList(url, dest, { etag = null, lastModified = null, maxBytes = MAX
         if (redirects >= MAX_REDIRECTS) { reject(new FetchError('too_many_redirects')); return; }
         let next;
         try { next = new URL(res.headers.location, u).toString(); } catch (_e) { reject(new FetchError('bad_redirect')); return; }
-        resolve(fetchList(next, dest, { etag, lastModified, maxBytes, timeoutMs, agent, redirects: redirects + 1 }));
+        resolve(fetchList(next, dest, { etag, lastModified, maxBytes, timeoutMs, agent, redirects: redirects + 1, userAgent }));
         return;
       }
       if (code === 304) { res.resume(); resolve({ status: 304 }); return; }
@@ -92,9 +94,9 @@ async function parseFile(file, format, maxEntries) {
 }
 
 class ListManager {
-  constructor({ stateDir, fetch = fetchList, now = Date.now, rand = Math.random, onChange = () => {} }) {
+  constructor({ stateDir, fetch = fetchList, now = Date.now, rand = Math.random, onChange = () => {}, logger = NO_LOG }) {
     this.dir = path.join(stateDir, DIR);
-    Object.assign(this, { fetch, now, rand, onChange });
+    Object.assign(this, { fetch, now, rand, onChange, logger });
     this.catalog = {};
     this.used = new Set();
     this.lists = new Map();      // id → CompactList
@@ -125,7 +127,7 @@ class ListManager {
   }
 
   _saveMeta() {
-    if (this._ensureDir()) writeJson(this.dir, META, { v: 1, lists: this.meta });
+    if (this._ensureDir()) writeJson(this.dir, META, { v: 1, lists: this.meta }, this.logger);
   }
 
   totalEntries(except = null) {
@@ -217,7 +219,7 @@ class ListManager {
         bytes: r.bytes, updatedAt: this.now(), error: null, nextAt: this.now() + REFRESH_MS + jitter,
       });
       this._saveMeta();
-      logger.info({ list: id, entries: parsed.entries, bytes: r.bytes }, 'dns: list updated');
+      this.logger.info({ list: id, entries: parsed.entries, bytes: r.bytes }, 'dns: list updated');
       this.onChange();
     } catch (err) {
       fs.rm(part, { force: true }, () => {});
@@ -225,7 +227,7 @@ class ListManager {
       m.error = { at: this.now(), code: err.code || 'error' };
       m.nextAt = this.now() + RETRY_MS + jitter;
       this._saveMeta();
-      logger.warn({ list: id, err: err.code || err.message }, 'dns: list update failed (keeping last good version)');
+      this.logger.warn({ list: id, err: err.code || err.message }, 'dns: list update failed (keeping last good version)');
     }
   }
 

@@ -9,10 +9,10 @@ const https = require('node:https');
 const http = require('node:http');
 const crypto = require('node:crypto');
 const express = require('express');
-const { ListManager, fetchList } = require('../src/dns/lists');
+const { ListManager, fetchList } = require('../src/dnsfilter-core/lists');
 const { DnsFilter, searchDomains } = require('../src/dns/dns');
 const { normalizeDns } = require('../src/dns/config');
-const { DnsStats } = require('../src/dns/stats');
+const { DnsStats } = require('../src/dnsfilter-core/stats');
 const { makeSelfSigned } = require('../src/cache/selfsigned');
 const { createFeaturesRouter } = require('../src/api/routes/features');
 
@@ -131,7 +131,7 @@ describe('dns: DnsFilter', () => {
     assert.deepEqual(f.test('bad domain'), { error: 'invalid_domain' });
     assert.deepEqual(f.test('a.com', 'xx'), { error: 'invalid_mac' });
 
-    const wire = require('../src/dns/wire');
+    const wire = require('../src/dnsfilter-core/wire');
     await f.resolver.handle(wire.buildQuery({ id: 1, name: 'tiktok.com', qtype: 1 }), { ip: '192.168.1.9' });
     await f.resolver.handle(wire.buildQuery({ id: 2, name: 'example.com', qtype: 1 }), { ip: '192.168.1.9' });
     assert.equal(f.queryLog({ limit: 10 }).length, 2);

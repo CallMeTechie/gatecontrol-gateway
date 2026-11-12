@@ -21,7 +21,7 @@ Capabilities (Port 53 deckt das vorhandene `NET_BIND_SERVICE` ab).
    (`ip -j neigh`, IPv4 und IPv6; neu gelesen bei unbekannter IP höchstens alle
    5 s, sonst jede Minute). MAC in `profiles[].macs` → dieses Profil, sonst
    `defaultProfile`. Ohne Profile wird nichts gefiltert (Pausen gelten trotzdem).
-2. **Entscheidung** (`src/dns/policy.js`), in dieser Reihenfolge:
+2. **Entscheidung** (`src/dnsfilter-core/policy.js`), in dieser Reihenfolge:
    1. lokale Namen → direkt an den Router, nie gefiltert: Namen ohne Punkt,
       `local`, `lan`, `home`, `home.arpa`, `internal`, `localdomain`,
       `fritz.box`, `speedport.ip`, die Suchdomänen aus `/etc/resolv.conf` und
