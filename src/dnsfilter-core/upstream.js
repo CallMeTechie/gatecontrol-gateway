@@ -143,8 +143,13 @@ class DohClient {
   }
 }
 
-/** Klassisches DNS über UDP an `ip:port`; ID und Absender werden geprüft. */
-function udpQuery(ip, wire, { port = 53, timeoutMs = ROUTER_TIMEOUT_MS } = {}) {
+/**
+ * Klassisches DNS über UDP an `ip:port`; ID und Absender werden geprüft.
+ * `localAddress` (Standard: keine) bindet den Absender an eine eigene Adresse –
+ * gibt es sie nicht (mehr), scheitert die Anfrage sofort, statt über einen
+ * anderen Weg hinauszugehen.
+ */
+function udpQuery(ip, wire, { port = 53, timeoutMs = ROUTER_TIMEOUT_MS, localAddress = null } = {}) {
   return new Promise((resolve, reject) => {
     const sock = dgram.createSocket(net.isIPv6(ip) ? 'udp6' : 'udp4');
     const id = crypto.randomInt(0, 65536);
@@ -164,19 +169,20 @@ function udpQuery(ip, wire, { port = 53, timeoutMs = ROUTER_TIMEOUT_MS } = {}) {
       if (rinfo.address !== ip || rinfo.port !== port || msg.length < 12 || msg.readUInt16BE(0) !== id) return;
       finish(null, msg);
     });
-    sock.send(q, port, ip, (err) => { if (err) finish(new UpstreamError('udp', err.message)); });
+    const send = () => sock.send(q, port, ip, (err) => { if (err) finish(new UpstreamError('udp', err.message)); });
+    if (localAddress) sock.bind({ address: localAddress, exclusive: true }, send); else send();
   });
 }
 
-/** DNS über TCP (2-Byte-Längenpräfix). */
-function tcpQuery(ip, wire, { port = 53, timeoutMs = ROUTER_TIMEOUT_MS } = {}) {
+/** DNS über TCP (2-Byte-Längenpräfix); `localAddress` wie bei udpQuery. */
+function tcpQuery(ip, wire, { port = 53, timeoutMs = ROUTER_TIMEOUT_MS, localAddress = null } = {}) {
   return new Promise((resolve, reject) => {
     const id = crypto.randomInt(0, 65536);
     const q = Buffer.from(wire);
     q.writeUInt16BE(id, 0);
     const len = Buffer.alloc(2);
     len.writeUInt16BE(q.length, 0);
-    const sock = net.connect({ host: ip, port });
+    const sock = net.connect(localAddress ? { host: ip, port, localAddress } : { host: ip, port });
     let buf = Buffer.alloc(0);
     const timer = setTimeout(() => { sock.destroy(); reject(new UpstreamError('timeout')); }, timeoutMs);
     sock.on('connect', () => sock.write(Buffer.concat([len, q])));

@@ -21,7 +21,8 @@ Capabilities (Port 53 deckt das vorhandene `NET_BIND_SERVICE` ab).
    (`ip -j neigh`, IPv4 und IPv6; neu gelesen bei unbekannter IP höchstens alle
    5 s, sonst jede Minute). MAC in `profiles[].macs` → dieses Profil, sonst
    `defaultProfile`. Ohne Profile wird nichts gefiltert (Pausen gelten trotzdem).
-2. **Entscheidung** (`src/dnsfilter-core/policy.js`), in dieser Reihenfolge:
+2. **Entscheidung** (`src/dnsfilter-core/policy.js`), in dieser Reihenfolge –
+   davor stehen nur die Zonen der VPN-Gerätenamen, siehe „Namen im VPN“:
    1. lokale Namen → direkt an den Router, nie gefiltert: Namen ohne Punkt,
       `local`, `lan`, `home`, `home.arpa`, `internal`, `localdomain`,
       `fritz.box`, `speedport.ip`, die Suchdomänen aus `/etc/resolv.conf` und
@@ -67,6 +68,63 @@ Capabilities (Port 53 deckt das vorhandene `NET_BIND_SERVICE` ab).
 
 UDP-Antworten über 512 Bytes (bzw. der EDNS-Größe des Clients) gehen mit
 TC-Bit zurück; TCP (auch mehrere Anfragen je Verbindung) liefert alles.
+
+### Namen im VPN (`features.internal_dns`)
+
+Jedes VPN-Gerät hat einen Namen, z. B. `laptop-buero.vpn.example.com` (und
+dauerhaft zusätzlich `laptop-buero.gc.internal`). Der DNS des Servers
+beantwortet diese Zonen allein; im Heimnetz kennt sie sonst niemand. Der Server
+nennt sie dem Gateway im Config-Pull (alle Namen hier sind Beispiele):
+
+```js
+features.internal_dns = {
+  server: '10.8.0.1',                          // DNS des Servers im VPN
+  domains: ['vpn.example.com', 'gc.internal'], // alle Zonen, primäre zuerst
+  primary: 'vpn.example.com',
+  resolve: true,                               // Schalter dieses Gateways
+}                                              // null: der Server hat keinen Namensdienst
+```
+
+`features` ist Teil des Config-Hashes; eine neue Zone oder ein umgelegter
+Schalter kommt mit dem nächsten Config-Pull an, ohne Neustart.
+
+| | Frage nach `*.vpn.example.com` / `*.gc.internal` |
+|---|---|
+| `resolve: true` | geht durch den Tunnel an `server` (UDP 53, bei abgeschnittener Antwort TCP); die Antwort geht unverändert zurück, nichts wird zwischengespeichert |
+| `resolve: false` | das Gateway antwortet selbst mit NXDOMAIN |
+| `internal_dns` fehlt (älterer Server) | wie bisher: `*.gc.internal` an den Router, alles andere an DoH |
+
+In keinem Fall geht eine Frage nach diesen Zonen an DoH oder den Router:
+Gerätenamen bleiben im Haus, und für die eigene Domain käme von außen die
+Antwort der öffentlichen Zone. Die Zonen stehen deshalb **vor** allen anderen
+Regeln (lokale Namen, Profile, Pausen, Listen) und werden nie gefiltert.
+
+Abgesichert ist der Weg so (`src/dns/vpnNames.js`):
+
+- `server` muss eine Adresse sein, wie sie ein VPN vergibt (RFC 1918 oder
+  100.64.0.0/10), in einem Netz aus `WG_ALLOWED_IPS` liegen und nicht die
+  eigene Tunnel-Adresse sein. Sonst wird nicht gefragt (SERVFAIL).
+- Der Absender der Anfrage wird an `GC_TUNNEL_IP` gebunden. Gibt es die
+  Tunnel-Schnittstelle nicht, scheitert die Anfrage sofort, statt über die
+  Standardroute zum Router zu gehen.
+- Antwortet der Server nicht (Zeitlimit 1,5 s): SERVFAIL. Nach zwei Fehlern in
+  Folge kommt 30 s lang sofort SERVFAIL, danach wird wieder versucht.
+- Zonen sind Server-Eingabe: echte Domains mit Punkt, höchstens 8; eine Zone,
+  unter der die Adresse des Servers selbst (`GC_SERVER_URL`) liegt, wird
+  ausgelassen.
+
+**Was sich gegenüber früher ändert:** `gc.internal` fiel unter das lokale
+Suffix `internal` und ging an den Router. Kennt das Gateway die Zonen, antwortet
+es für `gc.internal` selbst (NXDOMAIN) oder fragt den Server. Andere Namen unter
+`internal` (`nas.internal`) gehen weiter an den Router.
+
+Voraussetzung ist der laufende DNS-Filter, und die Geräte müssen ihn fragen
+(der Router verteilt das Gateway als DNS-Server). Ohne DNS-Filter beantwortet
+das Gateway keine DNS-Fragen, der Schalter bleibt dann ohne Wirkung.
+
+`telemetry.dns.vpnNames` (null ohne Zonen): `{ zones, primary, forward, routed,
+lastOkAt, lastError: { at, code }|null, failures, down }` – `routed`: die
+Adresse des Servers liegt hinter dem Tunnel.
 
 ### Sichere Suche (`safeSearch`)
 
@@ -138,7 +196,7 @@ LAN-Adresse), wird nichts erzwungen: `telemetry.dns.state = 'port_busy'`,
 
 ### Neustart
 
-Die letzte DNS-Einstellung und die Zeitzone stehen in
+Die letzte DNS-Einstellung (mit den Zonen der VPN-Namen) und die Zeitzone stehen in
 `/state/features-boot.json`; der Filter startet damit **vor** dem ersten
 Config-Pull. Grund: Trägt der Router das Gateway als DNS-Server für alle
 Geräte ein, fragt auch der Gateway-Host selbst den Filter – ohne ihn käme der
@@ -161,7 +219,7 @@ Einzelne Anfragen (`logQueries`) bleiben nur im Speicher des Gateways (die
 letzten 2 000) und werden beim Ausschalten sofort gelöscht.
 
 `telemetry.dns` (null wenn aus):
-`{ state: 'starting'|'running'|'port_busy'|'no_address'|'error', port, listen: [ip], busy: [ip], upstream: { provider, fallbackRouter, lastOkAt, lastError: { at, code }|null, lastFallbackAt, fallbacks, dohDown }, lists: { <id>: { loaded, entries, updatedAt, checkedAt, error } }, listsBytes, cacheEntries, totals: { queries, blocked, cached, since }, logQueries, lastReportAt, reportError }`,
+`{ state: 'starting'|'running'|'port_busy'|'no_address'|'error', port, listen: [ip], busy: [ip], upstream: { provider, fallbackRouter, lastOkAt, lastError: { at, code }|null, lastFallbackAt, fallbacks, dohDown }, lists: { <id>: { loaded, entries, updatedAt, checkedAt, error } }, listsBytes, vpnNames, cacheEntries, totals: { queries, blocked, cached, since }, logQueries, lastReportAt, reportError }`,
 dazu `telemetry.features.dns` (an/aus, Lauf/Erfolg/Fehler der Listen, `state`, `listen`, `busy`, `lists`) – daraus liest der Server.
 
 ### Management-API (über den Tunnel, `X-Gateway-Token`)

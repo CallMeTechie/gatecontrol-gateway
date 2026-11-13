@@ -8,6 +8,8 @@
 // Peer-Kennung). Neben `macs` wird deshalb gleichbedeutend `clients` gelesen.
 //
 // Reihenfolge:
+//   0. eigene Zonen (`zones`, Standard: keine)                             → eigener Resolver oder „gibt es nicht“,
+//      nie Router, nie Upstream, nie gefiltert – auch wenn die Zone unter ein lokales Suffix fällt (gc.internal)
 //   1. lokale Namen (fritz.box, *.local, Rückwärtszonen privater Netze …) → Router, nie gefiltert
 //   2. alwaysAllow (Server-Host u. ä.)                                     → erlaubt
 //   3. Profil-allow                                                        → erlaubt (auch in Pause/Zeit)
@@ -18,7 +20,7 @@
 //   8. sonst erlaubt (ggf. mit sicherer Suche)
 // Ortszeit = Prozess-Zeitzone (TZ bzw. features.timezone).
 
-const { PatternSet, suffixes, hash53 } = require('./domainSet');
+const { PatternSet, suffixes, hash53, cleanDomain } = require('./domainSet');
 const { safeSearchTarget } = require('./safeSearch');
 
 const CANARY = 'use-application-dns.net'; // Firefox: kein eigenes DoH, wenn hier NXDOMAIN kommt
@@ -58,10 +60,15 @@ class Policy {
    * @param lists Map(listId → CompactList) (geladene Listen)
    * @param extraAllow zusätzliche immer erlaubte Muster (Server-Host)
    * @param localSuffixes zusätzliche lokale Suffixe (Suchdomänen aus resolv.conf)
+   * @param zones eigene Zonen { names: [zone], forward }: Namen darin gehen an den
+   *   eigenen Resolver des Aufrufers (`upstream.zone`, forward = true) oder bekommen
+   *   NXDOMAIN (forward = false). Ohne Angabe gibt es keine – alles wie zuvor.
    */
-  constructor(cfg, { lists = new Map(), extraAllow = [], localSuffixes = [] } = {}) {
+  constructor(cfg, { lists = new Map(), extraAllow = [], localSuffixes = [], zones = null } = {}) {
     this.cfg = cfg;
     this.lists = lists;
+    const zoneNames = zones && Array.isArray(zones.names) ? zones.names.map((z) => cleanDomain(z)).filter(Boolean) : [];
+    this.zones = zoneNames.length ? { set: new PatternSet(zoneNames), forward: zones.forward === true } : null;
     this.alwaysAllow = new PatternSet([...cfg.alwaysAllow, ...extraAllow]);
     this.local = new PatternSet([...LOCAL_SUFFIXES, ...PRIVATE_REVERSE, ...localSuffixes].filter(Boolean).map((s) => s.replace(/^\./, '')));
     // cleanDomain verlangt einen Punkt – einzelne Labels (local, lan …) direkt eintragen
@@ -88,6 +95,11 @@ class Policy {
     return (mac && this.byMac.get(mac)) || this.defaultProfile;
   }
 
+  /** Liegt der Name in einer eigenen Zone (die Zone selbst oder darunter)? */
+  inZone(name) {
+    return !!this.zones && this.zones.set.matches(name);
+  }
+
   isLocal(name) {
     return name === '' || !name.includes('.') || this.local.matches(name);
   }
@@ -103,13 +115,15 @@ class Policy {
   }
 
   /**
-   * → { profileId, action: 'allow'|'block', reason, list?, category?, safeSearch?, local?, nxdomain? }
+   * → { profileId, action: 'allow'|'block', reason, list?, category?, safeSearch?, local?, nxdomain?, zone? }
+   *   zone: 'forward' (eigener Resolver) | 'nxdomain' (selbst beantworten)
    */
   decide(name, mac, now = Date.now()) {
     const profile = this.profileFor(mac);
     const profileId = profile ? profile.id : null;
     const res = (action, reason, extra) => ({ profileId, action, reason, ...extra });
     if (name === CANARY) return res('block', 'canary', { nxdomain: true });
+    if (this.inZone(name)) return res('allow', 'zone', { zone: this.zones.forward ? 'forward' : 'nxdomain' });
     if (this.isLocal(name)) return res('allow', 'local', { local: true });
     if (this.alwaysAllow.matches(name)) return res('allow', 'always_allow');
     const safe = profile && profile.safeSearch ? safeSearchTarget(name) : null;

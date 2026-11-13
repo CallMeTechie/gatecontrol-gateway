@@ -5,6 +5,11 @@
 // Bündelung gleicher Anfragen). Liefert die Antwort als Buffer oder null
 // (verwerfen).
 //
+// Eigene Zonen (Policy `zones`): `upstream.zone(wire, { fromIp })` beantwortet
+// sie – nie `upstream.query`/`upstream.local`, ohne Zwischenspeicher (die Namen
+// ändern sich beim Aufrufer). Fehlt `upstream.zone` oder will die Policy es so:
+// NXDOMAIN. Scheitert der eigene Resolver: SERVFAIL, kein Ausweichen.
+//
 // Wer der Client ist, wird eingesteckt:
 //   neighbors.macFor(ip)  – Gateway: MAC zur Absender-Adresse
 //   clientFor(ip)         – allgemein: Schlüssel zur Client-Adresse (oder null)
@@ -86,6 +91,14 @@ class Resolver {
     try {
       if (d.action === 'block') {
         out = this._blocked(q, d);
+      } else if (d.zone) {
+        if (d.zone === 'forward' && typeof this.upstream.zone === 'function') {
+          const r = await this._zone(q, from);
+          out = wire.adaptResponse(r.wire, { id: q.id, question: q.question, ttlOffsets: r.ttlOffsets, ageSec: 0 });
+          via = r.via;
+        } else {
+          out = wire.buildResponse(q, { rcode: RCODE.NXDOMAIN });
+        }
       } else if (d.safeSearch && (q.qtype === TYPE.A || q.qtype === TYPE.AAAA)) {
         const r = await this._safeSearch(q, d.safeSearch, from);
         out = r.out; cached = r.cached; via = r.via;
@@ -138,6 +151,24 @@ class Resolver {
         if (!meta) throw new Error('bad upstream response');
         this.cache.set(key, r.wire, meta);
         return { wire: r.wire, ttlOffsets: meta.ttlOffsets, ageSec: 0, cached: false, via: r.via };
+      })();
+      this.inflight.set(key, p);
+      p.finally(() => this.inflight.delete(key)).catch(() => {});
+    }
+    return p;
+  }
+
+  /** Eigene Zone: nur der eigene Resolver, gleiche Anfragen gebündelt, nichts gespeichert. → { wire, ttlOffsets, via } */
+  async _zone({ name, qtype, qclass = wire.CLASS_IN, edns = null, cd = false }, ip) {
+    const key = `Z|${qtype}|${qclass}|${name}|${edns ? 1 : 0}${edns && edns.do ? 1 : 0}${cd ? 1 : 0}`;
+    let p = this.inflight.get(key);
+    if (!p) {
+      p = (async () => {
+        const query = wire.buildQuery({ name, qtype, qclass, edns: edns ? { do: edns.do } : null, cd });
+        const r = await this.upstream.zone(query, { fromIp: ip });
+        const meta = wire.parseResponse(r.wire);
+        if (!meta) throw new Error('bad zone response');
+        return { wire: r.wire, ttlOffsets: meta.ttlOffsets, via: r.via || 'zone' };
       })();
       this.inflight.set(key, p);
       p.finally(() => this.inflight.delete(key)).catch(() => {});
