@@ -31,6 +31,8 @@ function createSelfCheckRunner({ config, store, tcpMgr, wireguard }) {
     apiPort: config.apiPort,
     tcpPorts: tcpMgr.listListenerPorts(),
     l4RouteCount: store.l4Routes.length,
+    l4Issues: typeof tcpMgr.listListenerIssues === 'function' ? tcpMgr.listListenerIssues() : [],
+    l4Direct: typeof tcpMgr.listDirectRoutes === 'function' ? tcpMgr.listDirectRoutes() : [],
     bindIp: config.tunnelIp,
     wgStatus: () => wireguard.getStatus(),
     dnsResolveFn: () => dns.resolve4(serverHostname),
@@ -54,9 +56,11 @@ function createSelfCheckRunner({ config, store, tcpMgr, wireguard }) {
     // bind failed and — since the config hash is unchanged — will never be
     // retried via the 'change' event. setRoutes is idempotent (healthy
     // listeners untouched, missing ones rebound), so re-applying is safe.
+    // A route served directly by its target service on this host is not
+    // missing (selfCheck.js) — it triggers no re-apply.
     if (reconcile && result.l4_listeners_missing > 0) {
       logger.warn(
-        { missing: result.l4_listeners_missing, configured: result.l4_routes_configured },
+        { missing: result.l4_listeners_missing, configured: result.l4_routes_configured, issues: result.l4_listener_issues },
         'L4 listener deficit detected — re-applying route table to retry missing binds',
       );
       try {
