@@ -3,6 +3,8 @@
 // DNS-Filter fürs Heimnetz (Vertrag Phase 3b §1): eigener DNS-Server auf den
 // LAN-Adressen, Profile per MAC, Listen, Zeiten, Pausen, sichere Suche,
 // Weiterleitung per DoH mit Rückfall Router, Statistik alle 5 Min.
+// Die Zonen der VPN-Gerätenamen (cfg.vpnNames, ./vpnNames.js) gehen nie an
+// DoH oder Router: durch den Tunnel an den DNS des Servers oder NXDOMAIN.
 
 const fs = require('node:fs');
 const logger = require('../logger');
@@ -11,6 +13,7 @@ const { normalizeMac } = require('../features/macs');
 const { cleanDomain, Policy, Resolver, MAX_LOG, Upstream, DnsStats, ListManager, ResponseCache } = require('../dnsfilter-core');
 const { NeighborCache } = require('./neighbors');
 const { DnsListener, lanListenAddresses } = require('./server');
+const { VpnNamesForwarder } = require('./vpnNames');
 
 const REPORT_PATH = '/api/v1/gateway/dns';
 const REPORT_MS = 5 * 60_000;
@@ -41,7 +44,7 @@ function hostOf(url) {
 
 class DnsFilter {
   constructor({
-    reporter, stateDir, serverUrl = null, routerIp = () => null, tunnelIp = null,
+    reporter, stateDir, serverUrl = null, routerIp = () => null, tunnelIp = null, allowedIps = '', vpnForwarder = null,
     port = 53, addresses = null, neighbors = new NeighborCache(), lists = null, upstreamFactory = null,
     now = Date.now, localSuffixes = readSearchDomains(), reportMs = REPORT_MS, listenMs = LISTEN_MS, listsMs = LISTS_MS,
   }) {
@@ -57,10 +60,16 @@ class DnsFilter {
     this.upstreamFactory = upstreamFactory || ((up) => new Upstream({ upstream: up, routerIp }));
     this.upstream = null;
     this.upstreamKey = null;
+    this.vpnForwarder = vpnForwarder || new VpnNamesForwarder({ tunnelIp, allowedIps, now });
+    this.vpnZones = [];
+    this.vpnKey = '';
     this.policy = new Policy({ alwaysAllow: [], categories: {}, profiles: [], defaultProfile: null, pauses: [], extensions: [] });
     this.resolver = new Resolver({
       getPolicy: () => this.policy,
-      upstream: { query: (w, o) => this.upstream.query(w, o), local: (w, o) => this.upstream.local(w, o) },
+      upstream: {
+        query: (w, o) => this.upstream.query(w, o), local: (w, o) => this.upstream.local(w, o),
+        zone: (w) => this.vpnForwarder.query(w),
+      },
       neighbors,
       stats: this.stats,
       now,
@@ -82,12 +91,24 @@ class DnsFilter {
     this.reportLoop = loop(() => this.report(), () => reportMs);
   }
 
+  /** Zonen der VPN-Namen, ohne eine, unter der der Server selbst liegt (er muss erreichbar bleiben). */
+  _vpnZones() {
+    const v = this.cfg.vpnNames;
+    if (!v) return [];
+    const host = this.serverHost;
+    return v.domains.filter((z) => !(host && (host === z || host.endsWith(`.${z}`))));
+  }
+
   _rebuildPolicy() {
     if (!this.cfg.enabled) return;
+    const v = this.cfg.vpnNames;
+    this.vpnZones = this._vpnZones();
+    this.vpnForwarder.setServer(v ? v.server : null);
     this.policy = new Policy(this.cfg, {
       lists: this.lists.lists,
       extraAllow: this.serverHost ? [this.serverHost] : [],
       localSuffixes: this.localSuffixes,
+      zones: this.vpnZones.length ? { names: this.vpnZones, forward: v.forward } : null,
     });
   }
 
@@ -108,6 +129,11 @@ class DnsFilter {
       this.cache.clear();
     }
     this._rebuildPolicy();
+    const zk = cfg.vpnNames ? `${cfg.vpnNames.forward}|${cfg.vpnNames.server}|${this.vpnZones.join(',')}` : '';
+    if (zk !== this.vpnKey) {
+      this.vpnKey = zk;
+      logger.info({ zones: this.vpnZones, forward: !!(cfg.vpnNames && cfg.vpnNames.forward), routed: this.vpnForwarder.reachable(cfg.vpnNames ? cfg.vpnNames.server : null) }, 'dns: vpn names');
+    }
     const used = new Set(cfg.profiles.flatMap((p) => p.lists));
     try { await this.lists.setWanted(cfg.lists, used); } catch (err) { logger.warn({ err: err.message }, 'dns: lists'); }
     this._rebuildPolicy();
@@ -129,6 +155,7 @@ class DnsFilter {
     if (this.upstream) this.upstream.close();
     this.upstream = null;
     this.upstreamKey = null;
+    this.vpnKey = '';
     this.cache.clear();
     this.resolver.clearLog();
     this.listen = { state: 'off', listen: [], busy: [], failed: {}, port: this.listener.port };
@@ -228,6 +255,11 @@ class DnsFilter {
       } : null,
       lists: this.lists.telemetry(),
       listsBytes: this.lists.memoryBytes(),
+      // Namen im VPN: Zonen, ob weitergeleitet wird, ob der DNS des Servers hinter dem Tunnel liegt und antwortet
+      vpnNames: this.cfg.vpnNames ? {
+        zones: this.vpnZones.slice(), primary: this.cfg.vpnNames.primary, forward: this.cfg.vpnNames.forward,
+        routed: this.vpnForwarder.reachable(this.cfg.vpnNames.server), ...this.vpnForwarder.telemetry(),
+      } : null,
       cacheEntries: this.cache.size,
       totals: { ...this.stats.total },
       logQueries: this.cfg.logQueries === true,

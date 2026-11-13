@@ -10,6 +10,7 @@ const { normalizeFeatures } = require('./config');
 const { applyTimezone, timezoneTelemetry, validTimezone } = require('./timezone');
 const { readJson, writeJson } = require('./persist');
 const { normalizeDns } = require('../dns/config');
+const { normalizeInternalDns } = require('../dns/vpnNames');
 const { DnsFilter } = require('../dns/dns');
 const { HomeCache } = require('../cache/cache');
 const { PrintService } = require('../print/print');
@@ -32,8 +33,9 @@ const logger = require('../logger');
 // radio-stacks: Funk mit zigbee2mqtt, Thread Border Router und Schlüsseln verschlüsselter Sensoren (docs/radio.md)
 // radio-stick-assign: Funksticks von Hand Zigbee/Thread/„nicht verwenden“ zuordnen (features.radio.sticks, docs/radio.md)
 // ipv6-lan: Heimnetz ohne IPv4 – meldet lan_ip6/lan_subnets6 (ULA), USV-Server auch unter einer privaten IPv6-Adresse
+// dns-vpn-names: der DNS-Filter behandelt die Zonen der VPN-Gerätenamen gesondert (features.internal_dns, docs/dns-cache.md)
 // speed-volume: Speedtests halten features.inetq.speedVolume ein (Tagesbudget im State-Verzeichnis, Deckel je Richtung)
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume']);
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume', 'dns-vpn-names']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';
@@ -79,6 +81,7 @@ class FeatureManager {
     if (!b) return this.chain;
     this._timezone(validTimezone(b.timezone));
     const dns = normalizeDns(b.dns);
+    dns.vpnNames = normalizeInternalDns(b.internal_dns);
     if (!dns.enabled) return this.chain;
     logger.info('dns: starting with the last known configuration');
     return this._serial(() => this.dns.apply(dns));
@@ -94,12 +97,13 @@ class FeatureManager {
     this.presence.apply(f.presence);
     this.ups.apply(f.ups);
     if (this.stateDir) {
-      writeJson(this.stateDir, BOOT_FILE, { timezone: f.timezone, dns: f.dns.enabled && raw && raw.dns ? raw.dns : null });
+      const on = f.dns.enabled && raw && raw.dns;
+      writeJson(this.stateDir, BOOT_FILE, { timezone: f.timezone, dns: on ? raw.dns : null, internal_dns: on && f.dns.vpnNames ? raw.internal_dns : null });
     }
     logger.info({
       netwatch: f.netwatch.enabled, portscan: f.netwatch.portscan, inetq: f.inetq.enabled,
       speedtest: f.inetq.speedtest, presence: f.presence.enabled, presenceMacs: f.presence.macs.length, ups: f.ups.enabled,
-      dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, cache: f.cache.enabled, print: f.print.enabled,
+      dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, vpnNameZones: f.dns.vpnNames ? f.dns.vpnNames.domains.length : 0, vpnNamesForward: !!(f.dns.vpnNames && f.dns.vpnNames.forward), cache: f.cache.enabled, print: f.print.enabled,
       zigbee: f.radio.zigbee, zigbeeStack: f.radio.stack, radioSticks: f.radio.sticks.length, ble: f.radio.ble, thread: f.radio.thread, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
     }, 'features applied');
     return this._serial(async () => {
@@ -164,6 +168,7 @@ function createFeatureManager({ config, defaultGatewayIp }) {
   const ups = new UpsMonitor();
   const dns = new DnsFilter({
     reporter, stateDir: config.stateDir, serverUrl: config.serverUrl, routerIp: defaultGatewayIp, tunnelIp: config.tunnelIp,
+    allowedIps: config.wg ? config.wg.allowedIps : '',
   });
   const cache = new HomeCache({
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, tunnelIp: config.tunnelIp,

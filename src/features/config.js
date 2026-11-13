@@ -10,6 +10,7 @@ const { normalizeMac } = require('./macs');
 const { isUlaIpv6 } = require('../discovery/lanInterfaces');
 const { validTimezone } = require('./timezone');
 const { normalizeDns } = require('../dns/config');
+const { normalizeInternalDns } = require('../dns/vpnNames');
 const { normalizeCache } = require('../cache/config');
 const { normalizePrint } = require('../print/config');
 const { normalizeRadio } = require('../radio/config');
@@ -54,6 +55,8 @@ function normalizeFeatures(raw) {
   const up = isObj(f.ups) ? f.ups : {};
   const dns = normalizeDns(f.dns);
   dns.enabled = present && dns.enabled;
+  // Namen im VPN: die Zonen der Gerätenamen (fehlt es – älterer Server: keine, alles wie zuvor)
+  dns.vpnNames = present ? normalizeInternalDns(f.internal_dns) : null;
   const cache = normalizeCache(f.cache);
   if (!present) Object.assign(cache, { enabled: false, requested: false, problem: null });
   // Phase 3c: Drucken & Scannen

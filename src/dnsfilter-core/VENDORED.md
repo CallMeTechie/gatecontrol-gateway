@@ -41,7 +41,7 @@ Filter-Dienst braucht: `ListManager`, `Policy`, `Resolver`, `ResponseCache`,
 | `domainSet.js` | Domains prüfen, 53-Bit-Hashes, kompakte Listen, Muster |
 | `listParser.js` | Listenformate `domains`/`hosts`/`adblock`, gestreamt |
 | `lists.js`, `stateFile.js` | Listen laden (HTTPS, ETag), letzte gute Fassung auf Platte |
-| `policy.js`, `safeSearch.js` | Entscheidung je Anfrage |
+| `policy.js`, `safeSearch.js` | Entscheidung je Anfrage; eigene Zonen (`zones`) vor allen Regeln |
 | `resolver.js`, `responseCache.js` | Ablauf einer Anfrage, Zwischenspeicher, Protokoll-Ringpuffer |
 | `upstream.js` | DoH mit Rückfall auf einen Klartext-Resolver |
 | `listener.js` | UDP-/TCP-Listener auf übergebenen Adressen |
