@@ -11,7 +11,7 @@ const logger = require('../logger');
  * so the boilerplate around routes, dnsResolveFn and reachabilityFn stays
  * in one place — the call-sites just `await runHealthCheck()`.
  */
-function createSelfCheckRunner({ config, store, tcpMgr, wireguard }) {
+function createSelfCheckRunner({ config, store, tcpMgr, udpMgr = null, wireguard }) {
   const serverHostname = new URL(config.serverUrl).hostname;
 
   const buildRoutes = () => [
@@ -33,6 +33,13 @@ function createSelfCheckRunner({ config, store, tcpMgr, wireguard }) {
     l4RouteCount: store.l4Routes.length,
     l4Issues: typeof tcpMgr.listListenerIssues === 'function' ? tcpMgr.listListenerIssues() : [],
     l4Direct: typeof tcpMgr.listDirectRoutes === 'function' ? tcpMgr.listDirectRoutes() : [],
+    // UDP-Routen (docs/udp.md): zählen bei den Listenern der TCP/UDP-Routen mit;
+    // ihr Ziel wird nicht geprüft (eine TCP-Probe sagt über UDP nichts)
+    udpRouteCount: udpMgr ? (store.udpRoutes || []).length : 0,
+    udpListenerCount: udpMgr ? udpMgr.listListenerPorts().length : 0,
+    udpIssues: udpMgr ? udpMgr.listListenerIssues() : [],
+    udpDirect: udpMgr ? udpMgr.listDirectRoutes() : [],
+    udpStatus: udpMgr ? udpMgr.getStatus() : [],
     bindIp: config.tunnelIp,
     wgStatus: () => wireguard.getStatus(),
     dnsResolveFn: () => dns.resolve4(serverHostname),
@@ -65,6 +72,7 @@ function createSelfCheckRunner({ config, store, tcpMgr, wireguard }) {
       );
       try {
         await tcpMgr.setRoutes(store.l4Routes);
+        if (udpMgr) await udpMgr.setRoutes(store.udpRoutes || []);
         result = await doCheck();
         result.listener_reapply_triggered = true;
       } catch (err) {

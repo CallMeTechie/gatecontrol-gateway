@@ -35,7 +35,7 @@ const logger = require('../logger');
 // ipv6-lan: Heimnetz ohne IPv4 – meldet lan_ip6/lan_subnets6 (ULA), USV-Server auch unter einer privaten IPv6-Adresse
 // dns-vpn-names: der DNS-Filter behandelt die Zonen der VPN-Gerätenamen gesondert (features.internal_dns, docs/dns-cache.md)
 // speed-volume: Speedtests halten features.inetq.speedVolume ein (Tagesbudget im State-Verzeichnis, Deckel je Richtung)
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume', 'dns-vpn-names']);
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume', 'dns-vpn-names', 'udp-routes']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';

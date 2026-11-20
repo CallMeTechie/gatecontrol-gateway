@@ -8,6 +8,7 @@ const { fetchConfig, checkHash } = require('./sync/syncClient');
 const { Router } = require('./proxy/router');
 const { createHttpProxy } = require('./proxy/http');
 const { TcpProxyManager } = require('./proxy/tcp');
+const { UdpProxyManager, udpOptionsFromEnv } = require('./proxy/udp');
 const { EgressProxyManager } = require('./proxy/egress');
 const { createApiServer } = require('./api/server');
 const { createConfigChangedRouter } = require('./api/routes/configChanged');
@@ -81,6 +82,8 @@ async function bootstrap(opts = {}) {
   const store = new ConfigStore();
   const router = new Router();
   const tcpMgr = new TcpProxyManager({ bindIp: config.tunnelIp });
+  // UDP-Routen (docs/udp.md): Leerlauf GC_UDP_IDLE_TIMEOUT_S, Obergrenze GC_UDP_MAX_SESSIONS
+  const udpMgr = new UdpProxyManager({ bindIp: config.tunnelIp, ...udpOptionsFromEnv() });
   const egressMgr = new EgressProxyManager();
 
   const { NearManager } = require('./near/nearManager');
@@ -121,11 +124,12 @@ async function bootstrap(opts = {}) {
 
   // 3. On config change → apply
   store.on('change', async ({ cfg, hash }) => {
-    logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length }, 'Applying new config');
+    logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length, udpRoutes: store.udpRoutes.length }, 'Applying new config');
     try { featureMgr.apply(cfg.features); } catch (err) { logger.warn({ err: err.message }, 'features: apply failed'); }
     try { hooks.onConfig?.(cfg); } catch (err) { logger.warn({ err: err.message }, 'setup page: config not applied'); }
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
+    await udpMgr.setRoutes(store.udpRoutes);
     await egressMgr.setRoutes(cfg.egress_routes || []);
     await nearMgr.apply(cfg.egress_routes || []);
   });
@@ -168,7 +172,7 @@ async function bootstrap(opts = {}) {
   // Shared self-check runner — used by /api/status AND the heartbeat ticker.
   // Centralised so the route-list, DNS resolver and reachability probe are
   // wired up once instead of duplicated at each call-site.
-  const runHealthCheck = createSelfCheckRunner({ config, store, tcpMgr, wireguard });
+  const runHealthCheck = createSelfCheckRunner({ config, store, tcpMgr, udpMgr, wireguard });
 
   // 6. Management API
   const apiApp = createApiServer({
@@ -271,7 +275,7 @@ async function bootstrap(opts = {}) {
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, udpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr };
 }
 
 module.exports = { bootstrap };

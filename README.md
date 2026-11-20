@@ -1,11 +1,12 @@
 # GateControl Home Gateway
 
-Companion product for [GateControl](https://github.com/CallMeTechie/gatecontrol): an always-on Docker container in your home network that bridges a single WireGuard tunnel to multiple LAN devices via HTTP/TCP proxies.
+Companion product for [GateControl](https://github.com/CallMeTechie/gatecontrol): an always-on Docker container in your home network that bridges a single WireGuard tunnel to multiple LAN devices via HTTP/TCP/UDP proxies.
 
 ## Features
 
 - **HTTP reverse proxy** for L7 routes (NAS UI, Plex, Home Assistant, etc.)
 - **TCP port forwarder** for L4 routes (RDP, SSH, databases)
+- **UDP-Weiterleitung** für TCP/UDP-Routen mit Protokoll UDP (DNS, Spieleserver, VoIP, NTP): Zuordnung je Absender, Leerlauf 60 s, Obergrenze je Route, Zähler im Heartbeat, Capability `udp-routes`; Broadcast/Multicast bewusst nicht – siehe [docs/udp.md](docs/udp.md)
 - **Wake-on-LAN** triggered on backend-down (zero-config from GateControl UI)
 - **Auto-sync** with GateControl: no manual re-config when routes change
 - **Self-monitoring** with health reporting to server (sliding-window hysteresis, per-route reachability)
@@ -21,6 +22,7 @@ Internet -> GateControl (VPS) -WireGuard-> Home Gateway -LAN-> NAS / Desktop / I
                                                |
                                                +- HTTP Proxy (Tunnel-IP:8080)
                                                +- TCP Listeners (dynamic L4 ports)
+                                               +- UDP Listeners (dynamic L4 ports, docs/udp.md)
                                                +- WoL Endpoint
                                                +- Management API (Tunnel-IP:9876)
 ```
