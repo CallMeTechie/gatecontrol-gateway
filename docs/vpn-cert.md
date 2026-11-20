@@ -109,11 +109,12 @@ Welche TLS-Endpunkte hat das Gateway, und was davon nimmt das Zertifikat?
 | Management-API (Tunnel-IP:9876) | nein, HTTP | nein | nur der Server spricht sie, Token im Tunnel |
 | HTTP-Proxy (Tunnel-IP:8080) | nein | nein | TLS endet in Caddy auf dem Server |
 | Zwischenspeicher im Heimnetz (HTTPS) | ja, selbst erzeugt | nein | Apps pinnen den Fingerabdruck (`cache.tlsSha256`); ein Wechsel alle 60–90 Tage bräche das Pinning |
-| MQTT-TLS (8883, Edge) | ja, selbst erzeugt | nein | Geräte pinnen Fingerabdruck oder eigenes Zertifikat; dieselbe Folge |
+| MQTT-TLS (8883, Edge) | ja, selbst erzeugt | **schaltbar** (Standard aus) | Geräte pinnen Fingerabdruck oder eigenes Zertifikat – deshalb bleibt das selbst erzeugte der Standard; eingeschaltet `mqtt-<gateway>.<Bereich>:8883` mit dem Wildcard, siehe „MQTT mit dem Gerätezertifikat“ |
 | Edge-Plugins, Kameras, Drucken | nur als Client | – | prüfen fremde Zertifikate |
 
 Außer der Statusseite aus dem VPN (eingeschaltet, mit Anmeldung über GateControl)
-bietet das Gateway das Zertifikat deshalb an keinem eigenen Endpunkt an,
+und MQTT-TLS (eingeschaltet, unten) bietet das Gateway das Zertifikat an keinem
+eigenen Endpunkt an,
 sondern stellt die Dateien unter dem Pfad oben bereit. Ein eigener Dienst auf
 dem Gateway-Rechner bindet den Ordner **nur lesbar** ein, z. B. in einer
 eigenen Compose-Datei neben dem Gateway:
@@ -138,6 +139,62 @@ Namen der Zone löst der DNS des Servers auf (Gerätenamen, Routen); im
 Heimnetz beantwortet sie der DNS-Filter des Gateways über den Tunnel
 ([dns-cache.md](dns-cache.md) „Namen im VPN“).
 
+## MQTT mit dem Gerätezertifikat
+
+Standardmäßig hat der TLS-Listener des MQTT-Brokers (Port 8883,
+[edge.md](edge.md) „MQTT“) ein selbst erzeugtes Zertifikat, das Geräte über den
+Fingerabdruck pinnen. **Optional** (je Gateway, Standard aus) nimmt er statt
+dessen das weitergegebene Wildcard des Geräte-Bereichs. Der Broker ist dann
+unter einem öffentlich gültigen Namen erreichbar; Clients brauchen kein eigenes
+Vertrauen, sie prüfen Kette und Namen wie bei jeder Website.
+
+- **Schalter:** im Config-Pull `features.mqtt_tls: { vpn_cert: true, vpn_name }`
+  (Server: Gateway › Edge › MQTT › „Verschlüsselt verbinden (TLS)“ ›
+  „Gerätezertifikat verwenden“). Fehlt das Feld (Schalter aus, älterer Server),
+  bleibt alles wie bisher. Capability im Heartbeat: `mqtt-vpn-cert` – nur, wenn
+  der Gateway-Container die Broker-Dateien schreibt (neue Compose-Datei; mit der
+  alten schreibt sie der Edge-Host, der das Zertifikat nicht hat).
+- **Name:** `<vpn_name>.<Bereich des Wildcards>`; der Server schickt
+  `vpn_name = mqtt-<Name des Gateways>`, also z. B.
+  `mqtt-gw-keller.geraete.vpn.example.com`. Genau eine Ebene unter dem Bereich,
+  sonst deckte das Wildcard ihn nicht. `mqtt-` als Vorsilbe statt einer eigenen
+  Ebene (`mqtt.gw-keller.…`) oder eines festen Namens (`mqtt.…`): Es kann
+  mehrere Gateways geben, jedes braucht einen eigenen Namen.
+- **Nur mit gültigem Zertifikat:** gelesen werden `fullchain.pem` und
+  `privkey.pem` (oben), geprüft gegen den Fingerabdruck aus `vpn-cert.json`
+  und den Ablauf; passt etwas nicht (z. B. während eines Abrufs), bleibt das
+  zuletzt geprüfte, solange es gilt. Ohne Zertifikat, abgelaufen, entzogen
+  (Weitergabe aus) oder Schalter aus → wieder das **selbst erzeugte** (derselbe
+  Fingerabdruck wie vorher, gepinnte Geräte gehen wieder).
+- **Listener:** 8883 an den LAN-Adressen und zusätzlich an der Tunnel-Adresse
+  (Port 1883 nie am Tunnel). Fehlt die Tunnel-Adresse (WireGuard noch nicht
+  oben) oder hält eine TCP-Route Port 8883 an der Tunnel-Adresse, bleibt der
+  Tunnel-Listener weg (Mosquitto liefe sonst gar nicht); `tunnel` in der
+  Telemetrie sagt warum.
+- **Ablage:** Zertifikat und Schlüssel werden nach `/gc-mqtt-conf/tls/`
+  (`server.crt`, `server.key`) kopiert, wie das selbst erzeugte: in der Ablage
+  des Gateways `0640` mit Gruppe 61001 (Ordner `0750`) – nur Mosquitto liest
+  sie (der Edge-Container hat die Ablage nicht); in einer eigenen Ablage
+  (Edge-Host, alte Compose-Datei) `0600`. Schalter aus, TLS aus oder Broker aus
+  → der Schlüssel ist dort weg.
+- **Erneuerung:** neue Dateien unter denselben Pfaden, `mosquitto.conf` bleibt
+  gleich (kein Fingerabdruck darin), nur `reload` ändert sich → der Wächter
+  schickt **SIGHUP**, Mosquitto liest `certfile`/`keyfile` neu. Bestehende
+  Verbindungen bleiben, neue sehen das neue Zertifikat
+  (`tests/live/mqtt-tls-live.js`). Ein- und Ausschalten ändert die Listener →
+  einmal Neustart des Brokers, Clients verbinden sich neu.
+- **Status:** an den Server (Edge) `tlsSource: "vpn-cert"`, `tlsHost`,
+  `tlsSha256` (kein PEM – Clients prüfen den Namen); Heartbeat
+  `telemetry.mqtt_tls.vpn_cert: { enabled, state, host, tunnel }` mit `state`
+  `off` | `broker_off` (MQTT oder TLS aus) | `no_name` | `no_cert` | `active`
+  und `tunnel` `listening` | `no_address` | `port_in_use`.
+- **Auflösen:** der Name zeigt im DNS des Servers auf die Tunnel-Adresse des
+  Gateways (nur bei eingeschaltetem Schalter). Clients im VPN fragen den DNS
+  von GateControl; im Heimnetz muss der DNS des Routers den Namen auf die
+  LAN-Adresse des Gateways zeigen lassen. Fragt der Client den DNS-Filter des
+  Gateways, der Namen der Zone über den Tunnel auflöst ([dns-cache.md](dns-cache.md)
+  „Namen im VPN“), bekommt er die Tunnel-Adresse – wie bei den anderen Namen im VPN.
+
 ## Technik
 
 - `src/vpncert/vpnCert.js` – `VpnCertManager` (`apply(features.vpn_cert,
@@ -147,6 +204,10 @@ Heimnetz beantwortet sie der DNS-Filter des Gateways über den Tunnel
   `telemetry()` an den Heartbeat und `status()` an die Statusseite.
 - `src/setup/controller.js` (`hooks.attachVpnCert`, `vpnCert` in
   `snapshot`), `src/setup/ui/setup.js` (Zeilen in „Verbunden“).
+- `src/edge/mqtt/manager.js` (`attachVpnCert`, `applyVpnCert`, `vpnMaterial`,
+  `vpnTelemetry`), `src/edge/mqtt/broker.js` (Listener an der Tunnel-Adresse,
+  `reload` bei neuem Zertifikat); Tests `tests/edge_mqtt_vpn_cert.test.js`,
+  `tests/live/mqtt-tls-live.js` (echter Mosquitto, SIGHUP).
 - Tests: `tests/vpn_cert.test.js` (Prüfung, Ablage und Rechte, Löschen,
   Backoff, Neustart, Statusseite) und `tests/integration/vpn-cert-flow.test.js`
   (nachgebauter Server mit HTTPS: SNI/Host, Token, Quelladresse,

@@ -51,13 +51,13 @@ test('Dateien: 0600, reload nur bei geänderten Konten, enabled/disable', () => 
   try {
     const f = new broker.BrokerFiles(dir);
     const base = { accounts: [], internalHash: '$7$1$i$j', internalTopics: [], listenAddrs: ['192.168.1.10'], tls: false };
-    assert.deepStrictEqual(f.write(base), { confChanged: true, authChanged: true, tls: 'off' });
+    assert.deepStrictEqual(f.write(base), { confChanged: true, authChanged: true, tlsChanged: false, tls: 'off' });
     for (const n of ['mosquitto.conf', 'passwd', 'acl']) assert.strictEqual(fs.statSync(path.join(dir, n)).mode & 0o777, 0o600, n);
     const r1 = fs.readFileSync(path.join(dir, 'reload'), 'utf8');
-    assert.deepStrictEqual(f.write(base), { confChanged: false, authChanged: false, tls: 'off' });
+    assert.deepStrictEqual(f.write(base), { confChanged: false, authChanged: false, tlsChanged: false, tls: 'off' });
     assert.strictEqual(fs.readFileSync(path.join(dir, 'reload'), 'utf8'), r1, 'kein unnötiges SIGHUP');
     const r = f.write({ ...base, accounts: [{ user: 'a', hash: '$7$1$a$b', acl: [] }] });
-    assert.deepStrictEqual(r, { confChanged: false, authChanged: true, tls: 'off' });
+    assert.deepStrictEqual(r, { confChanged: false, authChanged: true, tlsChanged: false, tls: 'off' });
     assert.notStrictEqual(fs.readFileSync(path.join(dir, 'reload'), 'utf8'), r1);
     assert.strictEqual(f.write({ ...base, listenAddrs: ['192.168.1.11'] }).confChanged, true);
     assert.strictEqual(f.write({ ...base, tls: true }).tls, 'missing_cert');

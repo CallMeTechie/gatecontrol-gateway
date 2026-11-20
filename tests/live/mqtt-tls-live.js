@@ -15,7 +15,10 @@
 //   1. Port 8883 spricht TLS mit genau dem Zertifikat, dessen Fingerabdruck der Status meldet;
 //   2. ein Konto meldet sich über TLS an, ein falsches Passwort nicht;
 //   3. Port 1883 läuft daneben weiter;
-//   4. TLS aus → nach dem Neustart des Brokers ist 8883 zu, 1883 läuft.
+//   4. TLS aus → nach dem Neustart des Brokers ist 8883 zu, 1883 läuft;
+//   5. Gerätezertifikat (features.mqtt_tls.vpn_cert): 8883 auch an der Tunnel-Adresse, Kette
+//      und Name mqtt-<gateway>.<Bereich> gelten; Erneuerung nur per SIGHUP – eine bestehende
+//      Verbindung bleibt, neue sehen das neue Zertifikat; aus → wieder das selbst erzeugte.
 
 const assert = require('node:assert');
 const crypto = require('node:crypto');
@@ -27,9 +30,13 @@ const tls = require('node:tls');
 const { spawn, spawnSync } = require('node:child_process');
 const { MqttManager } = require('../../src/edge/mqtt/manager');
 const { hashPassword, PORT, TLS_PORT } = require('../../src/edge/mqtt/broker');
+const { makeSelfSigned } = require('../../src/cache/selfsigned');
 
 const UID = 61001;
 const LAN = '127.0.0.2'; // steht für die LAN-Adresse des Gateways
+const TUNNEL = '127.0.0.3'; // steht für die Tunnel-Adresse
+const AREA = 'geraete.vpn.example.test';
+const VPN_HOST = `mqtt-gw-live.${AREA}`;
 const MOSQUITTO = process.env.MOSQUITTO || 'mosquitto';
 const quiet = { info() {}, warn(...a) { console.log('warn:', ...a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x)))); }, debug() {} };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -64,6 +71,45 @@ function pinned(port, sha256) {
     } }, () => resolve(s));
     s.once('error', reject);
   });
+}
+
+/** TLS wie ein Client im VPN: Kette (hier: das Testzertifikat als CA) und Name werden voll geprüft. */
+function named(host, ca) {
+  return new Promise((resolve, reject) => {
+    const s = tls.connect({ host, port: TLS_PORT, ca: [ca], servername: VPN_HOST }, () => resolve(s));
+    s.once('error', reject);
+  });
+}
+/** Nimmt `host:port` eine Verbindung an? (sofort wieder zu) */
+function tcp(host, port) {
+  return new Promise((resolve, reject) => { const x = net.connect({ host, port }, () => { x.destroy(); resolve(); }); x.once('error', reject); });
+}
+const fpOf = (s) => s.getPeerCertificate().fingerprint256.replace(/:/g, '').toLowerCase();
+
+/** MQTT PINGREQ → PINGRESP: lebt die Verbindung noch? */
+function ping(socket) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('no PINGRESP')), 5000);
+    socket.once('data', (d) => { clearTimeout(t); resolve(d[0] === 0xd0); });
+    socket.once('error', (e) => { clearTimeout(t); reject(e); });
+    socket.write(Buffer.from([0xc0, 0]));
+  });
+}
+
+/** Das Gerätezertifikat (*.geraete.<zone>) wie es VpnCertManager ablegt. */
+function deviceCert(dir) {
+  const st = { cur: null };
+  return {
+    set() {
+      const c = makeSelfSigned({ commonName: `*.${AREA}`, days: 90, altNames: [{ dns: `*.${AREA}` }] });
+      st.cur = { ...c, notAfter: new Date(Date.now() + 90 * 86_400_000).toISOString() };
+      fs.writeFileSync(path.join(dir, 'fullchain.pem'), c.cert, { mode: 0o600 });
+      fs.writeFileSync(path.join(dir, 'privkey.pem'), c.key, { mode: 0o600 });
+      return st.cur;
+    },
+    status: () => (st.cur ? { state: 'ok', wildcard: `*.${AREA}`, fingerprint: st.cur.sha256, notAfter: st.cur.notAfter } : null),
+    files: () => (st.cur ? { dir, cert: path.join(dir, 'fullchain.pem'), key: path.join(dir, 'privkey.pem') } : null),
+  };
 }
 
 async function until(fn, what, ms = 10000) {
@@ -152,6 +198,61 @@ async function main() {
     // wieder an: dasselbe Zertifikat (State-Verzeichnis)
     await m.apply({ enabled: true, tls: true, accounts: [account], pluginTopics: {} });
     assert.strictEqual(m.status().tlsSha256, st.tlsSha256, 'the certificate stays the same');
+    await stop();
+    take();
+    start();
+    await until(() => pinned(TLS_PORT, pin).then((x) => x.destroy()), 'port 8883 after TLS on again');
+
+    // 5: Gerätezertifikat – Schalter an
+    const certDir = path.join(state, 'vpn-cert');
+    fs.mkdirSync(certDir, { mode: 0o700 });
+    const dev = deviceCert(certDir);
+    const c1 = dev.set();
+    m.attachVpnCert({ vpnCert: dev, tunnelIp: TUNNEL, hasAddr: (ip) => ip === TUNNEL });
+    const confSelf = fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8');
+    m.applyVpnCert({ vpn_cert: true, vpn_name: 'mqtt-gw-live' });
+    const confVpn = fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8');
+    assert.notStrictEqual(confVpn, confSelf, 'new listener at the tunnel address → the watcher restarts the broker');
+    assert.strictEqual(m.status().tlsSource, 'vpn-cert');
+    assert.strictEqual(m.status().tlsHost, VPN_HOST);
+    await stop();
+    take();
+    start();
+    s = await until(() => named(TUNNEL, c1.cert), 'port 8883 at the tunnel address');
+    assert.strictEqual(fpOf(s), c1.sha256);
+    assert.strictEqual(await connack(s, { username: 'shelly-kueche', password: 'geheim-123' }), 0, 'account accepted over the device certificate');
+    const kept = s; // bleibt über die Erneuerung offen
+    s = await named(LAN, c1.cert);
+    assert.strictEqual(fpOf(s), c1.sha256, 'the LAN listener has the device certificate as well');
+    s.destroy();
+    await assert.rejects(tcp(TUNNEL, PORT), /ECONNREFUSED/, 'port 1883 never at the tunnel address');
+    console.log('device certificate: 8883 at LAN and tunnel address, chain and name valid');
+
+    // Erneuerung: nur die Dateien und reload → der Wächter schickt SIGHUP
+    const r1 = fs.readFileSync(path.join(conf, 'reload'), 'utf8');
+    const c2 = dev.set();
+    m.refresh();
+    assert.strictEqual(fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'), confVpn, 'renewal: mosquitto.conf unchanged (no restart)');
+    assert.notStrictEqual(fs.readFileSync(path.join(conf, 'reload'), 'utf8'), r1, 'renewal: reload changed (SIGHUP)');
+    take();
+    proc.kill('SIGHUP');
+    await until(async () => { const x = await named(TUNNEL, c2.cert); const fp = fpOf(x); x.destroy(); assert.strictEqual(fp, c2.sha256); }, 'new certificate after SIGHUP');
+    assert.strictEqual(await ping(kept), true, 'the connection opened before the renewal is still up');
+    kept.destroy();
+    console.log('renewal: SIGHUP, new connections see the new certificate, the open one stays');
+
+    // Schalter aus → wieder das selbst erzeugte
+    m.applyVpnCert(undefined);
+    assert.strictEqual(m.status().tlsSource, 'self');
+    assert.strictEqual(m.status().tlsSha256, st.tlsSha256);
+    assert.strictEqual(fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'), confSelf);
+    await stop();
+    take();
+    start();
+    s = await until(() => pinned(TLS_PORT, pin), 'self-made certificate again');
+    s.destroy();
+    await assert.rejects(tcp(TUNNEL, TLS_PORT), /ECONNREFUSED/, 'no listener at the tunnel address without the device certificate');
+    console.log('switch off: self-made certificate again, tunnel listener gone');
     console.log('OK');
   } catch (e) {
     console.error('mosquitto output:\n' + out);

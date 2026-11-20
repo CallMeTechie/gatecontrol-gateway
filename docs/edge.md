@@ -376,6 +376,18 @@ ein Gateway das kann, sagt `hello.gw.mqtt.tlsCert: true` – ältere Gateways
 melden mit `state.mqtt.tls` weiter `missing_cert`, der Server zeigt dann
 „Gateway-Update nötig“.
 
+**Mit dem Gerätezertifikat (Standard aus):** schaltet der Server
+`features.mqtt_tls.vpn_cert` ein (Config-Pull, Capability `mqtt-vpn-cert`), nimmt
+Port 8883 statt des selbst erzeugten das weitergegebene Wildcard
+`*.geraete.<zone>` und lauscht zusätzlich an der Tunnel-Adresse – Name
+`mqtt-<gateway>.geraete.<zone>`, Clients brauchen kein eigenes Vertrauen. Eine
+Erneuerung ändert nur die Dateien und `reload` (SIGHUP, Mosquitto liest
+`certfile`/`keyfile` neu, Verbindungen bleiben). Fehlt das Zertifikat oder ist
+es abgelaufen, gilt wieder das selbst erzeugte (derselbe Fingerabdruck wie
+vorher). Einzelheiten: [vpn-cert.md](vpn-cert.md) „MQTT mit dem
+Gerätezertifikat“. Gilt nur, wo der Gateway-Container die Broker-Dateien
+schreibt (neue Compose-Datei); mit der alten (Edge-Host schreibt) bleibt es aus.
+
 **mDNS:** der Gateway-Container (alte Compose-Datei: der Edge-Host) kündigt den Broker als `_mqtt._tcp` (Instanz
 „GateControl MQTT <hostname>“, Port 1883, A-Record der LAN-Adressen) auf der
 primären LAN-Schnittstelle an (multicast-dns, verträgt sich mit Avahi auf dem
