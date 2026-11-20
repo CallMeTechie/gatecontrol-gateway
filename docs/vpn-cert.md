@@ -110,6 +110,7 @@ Welche TLS-Endpunkte hat das Gateway, und was davon nimmt das Zertifikat?
 | HTTP-Proxy (Tunnel-IP:8080) | nein | nein | TLS endet in Caddy auf dem Server |
 | Zwischenspeicher im Heimnetz (HTTPS) | ja, selbst erzeugt | nein | Apps pinnen den Fingerabdruck (`cache.tlsSha256`); ein Wechsel alle 60–90 Tage bräche das Pinning |
 | MQTT-TLS (8883, Edge) | ja, selbst erzeugt | **schaltbar** (Standard aus) | Geräte pinnen Fingerabdruck oder eigenes Zertifikat – deshalb bleibt das selbst erzeugte der Standard; eingeschaltet `mqtt-<gateway>.<Bereich>:8883` mit dem Wildcard, siehe „MQTT mit dem Gerätezertifikat“ |
+| MQTT-TLS (8884, Edge) | ja, selbst erzeugt | nein | nur neben dem Gerätezertifikat auf 8883 und mit Unterschalter (Standard aus): das selbst erzeugte mit festem Fingerabdruck, siehe „Zweiter Port für Geräte mit Fingerabdruck“ |
 | Edge-Plugins, Kameras, Drucken | nur als Client | – | prüfen fremde Zertifikate |
 
 Außer der Statusseite aus dem VPN (eingeschaltet, mit Anmeldung über GateControl)
@@ -195,6 +196,43 @@ Vertrauen, sie prüfen Kette und Namen wie bei jeder Website.
   Gateways, der Namen der Zone über den Tunnel auflöst ([dns-cache.md](dns-cache.md)
   „Namen im VPN“), bekommt er die Tunnel-Adresse – wie bei den anderen Namen im VPN.
 
+### Zweiter Port für Geräte mit Fingerabdruck
+
+Manche Geräte (kleine Smart-Home-Geräte) prüfen TLS nur über einen fest
+hinterlegten Fingerabdruck. Mit dem Gerätezertifikat auf 8883 gehen sie nicht –
+dessen Fingerabdruck wechselt bei jeder Erneuerung. Dafür gibt es einen
+**Unterschalter** (Standard aus, nur zusammen mit „Gerätezertifikat verwenden“):
+
+- **Schalter:** `features.mqtt_tls.fingerprint_port: true` neben `vpn_cert: true`
+  (Server: „Zweiter Port für Geräte mit Fingerabdruck (8884)“). Fehlt das Feld
+  oder ist `vpn_cert` aus, ist alles wie ohne Unterschalter. Capability
+  `mqtt-fingerprint-port` (dieselbe Bedingung wie `mqtt-vpn-cert`).
+- **Port 8884** (`TLS_FP_PORT` in `src/edge/mqtt/broker.js`) lauscht mit dem
+  **selbst erzeugten** Zertifikat – demselben, das 8883 ohne Gerätezertifikat
+  hat, derselbe Fingerabdruck. Geräte mit gepinntem Fingerabdruck laufen weiter,
+  wenn man bei ihnen nur den Port von 8883 auf 8884 ändert.
+- **Nur, solange 8883 das Gerätezertifikat hat.** Fällt 8883 auf das selbst
+  erzeugte zurück (Zertifikat fehlt, abgelaufen, entzogen), entfällt 8884 –
+  8883 hat dann ohnehin den alten Fingerabdruck. Kommt das Gerätezertifikat
+  wieder, kommt auch 8884 wieder.
+- **Listener:** dieselben Regeln wie bei 8883 – an den LAN-Adressen, an der
+  Tunnel-Adresse nur, wenn sie da ist und keine TCP-Route Port 8884 dort hält
+  (Mosquitto scheitert nie an einem belegten Port). Port 1883 bleibt unverändert.
+- **Ablage:** eigener Ordner `/gc-mqtt-conf/tls-self/` (`server.crt`,
+  `server.key`), getrennt von `tls/` des Gerätezertifikats, Rechte wie dort
+  (`0640`, Gruppe 61001, Ordner `0750`; eigene Ablage `0600`). Unterschalter
+  aus, Gerätezertifikat weg, TLS aus oder Broker aus → `tls-self/` ist weg.
+- **Erneuerung des Gerätezertifikats:** ändert nur `tls/` und `reload` (SIGHUP);
+  `mosquitto.conf` und `tls-self/` bleiben unberührt, Verbindungen auf 8884
+  bleiben offen (`tests/live/mqtt-tls-live.js`, Schritt 6). Ein- und Ausschalten
+  ändert die Listener → einmal Neustart des Brokers.
+- **Status:** an den Server (Edge) zusätzlich `tlsFp: { port: 8884, sha256, cert }`
+  (PEM öffentlich, zum Hinterlegen im Gerät); Heartbeat
+  `telemetry.mqtt_tls.fingerprint_port: { enabled, port, state, tunnel }` mit
+  `state` `off` | `broker_off` | `fallback` (8883 hat das selbst erzeugte, kein
+  zweiter Port nötig) | `no_cert` | `active` und `tunnel` `listening` |
+  `no_address` | `port_in_use`.
+
 ## Technik
 
 - `src/vpncert/vpnCert.js` – `VpnCertManager` (`apply(features.vpn_cert,
@@ -207,7 +245,9 @@ Vertrauen, sie prüfen Kette und Namen wie bei jeder Website.
 - `src/edge/mqtt/manager.js` (`attachVpnCert`, `applyVpnCert`, `vpnMaterial`,
   `vpnTelemetry`), `src/edge/mqtt/broker.js` (Listener an der Tunnel-Adresse,
   `reload` bei neuem Zertifikat); Tests `tests/edge_mqtt_vpn_cert.test.js`,
-  `tests/live/mqtt-tls-live.js` (echter Mosquitto, SIGHUP).
+  `tests/live/mqtt-tls-live.js` (echter Mosquitto, SIGHUP); Port 8884
+  (`fingerprintPortTelemetry`, `tunnelFor`, `tls-self/`) in
+  `tests/edge_mqtt_fingerprint_port.test.js`.
 - Tests: `tests/vpn_cert.test.js` (Prüfung, Ablage und Rechte, Löschen,
   Backoff, Neustart, Statusseite) und `tests/integration/vpn-cert-flow.test.js`
   (nachgebauter Server mit HTTPS: SNI/Host, Token, Quelladresse,

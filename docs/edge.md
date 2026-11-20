@@ -388,6 +388,16 @@ vorher). Einzelheiten: [vpn-cert.md](vpn-cert.md) „MQTT mit dem
 Gerätezertifikat“. Gilt nur, wo der Gateway-Container die Broker-Dateien
 schreibt (neue Compose-Datei); mit der alten (Edge-Host schreibt) bleibt es aus.
 
+**Zweiter Port 8884 für Geräte mit Fingerabdruck (Standard aus):** mit
+`features.mqtt_tls.fingerprint_port: true` (nur zusammen mit `vpn_cert`,
+Capability `mqtt-fingerprint-port`) lauscht neben dem Gerätezertifikat auf 8883
+zusätzlich Port 8884 mit dem selbst erzeugten Zertifikat (unveränderter
+Fingerabdruck, eigene Dateien unter `tls-self/`), an denselben Adressen wie
+8883. Geräte, die nur einen festen Fingerabdruck prüfen, stellt man nur von
+8883 auf 8884 um. Fällt 8883 auf das selbst erzeugte zurück, entfällt 8884.
+Einzelheiten: [vpn-cert.md](vpn-cert.md) „Zweiter Port für Geräte mit
+Fingerabdruck“.
+
 **mDNS:** der Gateway-Container (alte Compose-Datei: der Edge-Host) kündigt den Broker als `_mqtt._tcp` (Instanz
 „GateControl MQTT <hostname>“, Port 1883, A-Record der LAN-Adressen) auf der
 primären LAN-Schnittstelle an (multicast-dns, verträgt sich mit Avahi auf dem

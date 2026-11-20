@@ -19,6 +19,10 @@
 //   5. Gerätezertifikat (features.mqtt_tls.vpn_cert): 8883 auch an der Tunnel-Adresse, Kette
 //      und Name mqtt-<gateway>.<Bereich> gelten; Erneuerung nur per SIGHUP – eine bestehende
 //      Verbindung bleibt, neue sehen das neue Zertifikat; aus → wieder das selbst erzeugte.
+//   6. Zweiter Port (features.mqtt_tls.fingerprint_port): neben dem Gerätezertifikat auf 8883
+//      lauscht 8884 mit dem selbst erzeugten – derselbe Fingerabdruck wie vorher auf 8883, an
+//      LAN- und Tunnel-Adresse; eine Erneuerung auf 8883 (SIGHUP) lässt eine Verbindung auf
+//      8884 offen; Unterschalter aus → 8884 zu, tls-self/ entfernt.
 
 const assert = require('node:assert');
 const crypto = require('node:crypto');
@@ -29,7 +33,7 @@ const path = require('node:path');
 const tls = require('node:tls');
 const { spawn, spawnSync } = require('node:child_process');
 const { MqttManager } = require('../../src/edge/mqtt/manager');
-const { hashPassword, PORT, TLS_PORT } = require('../../src/edge/mqtt/broker');
+const { hashPassword, PORT, TLS_PORT, TLS_FP_PORT } = require('../../src/edge/mqtt/broker');
 const { makeSelfSigned } = require('../../src/cache/selfsigned');
 
 const UID = 61001;
@@ -61,11 +65,11 @@ function plain(port) {
 }
 
 /** TLS wie ein Gerät, das den Fingerabdruck hinterlegt hat: verbunden wird nur mit genau diesem Zertifikat. */
-function pinned(port, sha256) {
+function pinned(port, sha256, host = LAN) {
   return new Promise((resolve, reject) => {
     // die Kettenprüfung ersetzt hier der Fingerabdruck (checkServerIdentity läuft nur nach bestandener Kette,
     // deshalb das Zertifikat selbst als Vertrauensanker – wie „eigenes Zertifikat“ im Gerät)
-    const s = tls.connect({ host: LAN, port, ca: [sha256.cert], checkServerIdentity: (_h, cert) => {
+    const s = tls.connect({ host, port, ca: [sha256.cert], checkServerIdentity: (_h, cert) => {
       const seen = cert.fingerprint256.replace(/:/g, '').toLowerCase();
       return seen === sha256.hex ? undefined : new Error(`fingerprint ${seen} is not the reported ${sha256.hex}`);
     } }, () => resolve(s));
@@ -240,6 +244,56 @@ async function main() {
     assert.strictEqual(await ping(kept), true, 'the connection opened before the renewal is still up');
     kept.destroy();
     console.log('renewal: SIGHUP, new connections see the new certificate, the open one stays');
+
+    // 6: zweiter Port 8884 mit dem selbst erzeugten neben dem Gerätezertifikat
+    m.applyVpnCert({ vpn_cert: true, vpn_name: 'mqtt-gw-live', fingerprint_port: true });
+    const confFp = fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8');
+    assert.notStrictEqual(confFp, confVpn, 'new listener 8884 → the watcher restarts the broker');
+    assert.strictEqual(fs.statSync(path.join(conf, 'tls-self', 'server.key')).gid, UID, 'the key of 8884 belongs to the group of the broker');
+    assert.strictEqual(fs.statSync(path.join(conf, 'tls-self', 'server.key')).mode & 0o777, 0o640);
+    assert.deepStrictEqual(m.status().tlsFp, { port: TLS_FP_PORT, sha256: st.tlsSha256, cert: st.tlsCert }, '8884 reports the fingerprint 8883 had before');
+    await stop();
+    take();
+    start();
+    s = await until(() => pinned(TLS_FP_PORT, pin), 'port 8884 with the self-made certificate');
+    assert.strictEqual(fpOf(s), st.tlsSha256, '8884 serves the old fingerprint');
+    assert.strictEqual(await connack(s, { username: 'shelly-kueche', password: 'geheim-123' }), 0, 'account accepted on 8884');
+    const keptFp = s; // bleibt über die Erneuerung auf 8883 offen
+    s = await pinned(TLS_FP_PORT, pin, TUNNEL);
+    assert.strictEqual(fpOf(s), st.tlsSha256, '8884 at the tunnel address as well');
+    s.destroy();
+    s = await named(TUNNEL, c2.cert);
+    assert.strictEqual(fpOf(s), c2.sha256, '8883 keeps the device certificate');
+    s.destroy();
+    await assert.rejects(tcp(TUNNEL, PORT), /ECONNREFUSED/, 'port 1883 never at the tunnel address');
+    console.log('fingerprint port: 8883 device certificate, 8884 the self-made one with the old fingerprint');
+
+    // Erneuerung auf 8883: nur SIGHUP – die Verbindung auf 8884 bleibt, 8884 behält den Fingerabdruck
+    const r2 = fs.readFileSync(path.join(conf, 'reload'), 'utf8');
+    const c3 = dev.set();
+    m.refresh();
+    assert.strictEqual(fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'), confFp, 'renewal: mosquitto.conf unchanged');
+    assert.notStrictEqual(fs.readFileSync(path.join(conf, 'reload'), 'utf8'), r2);
+    take();
+    proc.kill('SIGHUP');
+    await until(async () => { const x = await named(TUNNEL, c3.cert); const fp = fpOf(x); x.destroy(); assert.strictEqual(fp, c3.sha256); }, 'renewed certificate on 8883');
+    assert.strictEqual(await ping(keptFp), true, 'the connection on 8884 stays open over the renewal on 8883');
+    keptFp.destroy();
+    s = await pinned(TLS_FP_PORT, pin);
+    assert.strictEqual(fpOf(s), st.tlsSha256, '8884 keeps its fingerprint over the renewal');
+    s.destroy();
+    console.log('renewal on 8883: connection on 8884 stays, fingerprint of 8884 unchanged');
+
+    // Unterschalter aus → 8884 zu, die Dateien gehen
+    m.applyVpnCert({ vpn_cert: true, vpn_name: 'mqtt-gw-live' });
+    assert.strictEqual(fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'), confVpn, 'without the sub-switch exactly as before');
+    assert.ok(!fs.existsSync(path.join(conf, 'tls-self')), 'the key of 8884 leaves the store');
+    await stop();
+    take();
+    start();
+    await until(() => named(TUNNEL, c3.cert).then((x) => x.destroy()), 'port 8883 after the restart');
+    await assert.rejects(tcp(LAN, TLS_FP_PORT), /ECONNREFUSED/, 'port 8884 closed without the sub-switch');
+    console.log('sub-switch off: 8884 closed');
 
     // Schalter aus → wieder das selbst erzeugte
     m.applyVpnCert(undefined);

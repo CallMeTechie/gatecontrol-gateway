@@ -23,12 +23,20 @@
 // ihn deckt). Nur mit gültigem Zertifikat – fehlt es, ist es abgelaufen oder
 // der Schalter aus, gilt wieder das selbst erzeugte. Eine Erneuerung ändert nur
 // die Dateien (SIGHUP, broker.js); Clients bleiben verbunden.
+//
+// Zweiter Port für Geräte mit Fingerabdruck (features.mqtt_tls.fingerprint_port,
+// Standard aus, nur zusammen mit dem Gerätezertifikat): solange Port 8883 das
+// Gerätezertifikat hat, lauscht zusätzlich Port 8884 mit dem selbst erzeugten
+// Zertifikat (derselbe Fingerabdruck wie bisher auf 8883) – an denselben Adressen
+// wie 8883 (am Tunnel nur, wenn dort 8884 frei ist). Fällt 8883 auf das selbst
+// erzeugte zurück, entfällt 8884. Eine Erneuerung des Gerätezertifikats berührt
+// die Dateien von 8884 nicht (eigener Ordner tls-self/), Verbindungen bleiben.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { BrokerFiles, hashPassword, INTERNAL_USER, PORT, TLS_PORT } = require('./broker');
+const { BrokerFiles, hashPassword, INTERNAL_USER, PORT, TLS_PORT, TLS_FP_PORT } = require('./broker');
 const { loadOrCreate } = require('../../cache/selfsigned');
 const { MqttClient } = require('./client');
 const topics = require('../topics');
@@ -111,12 +119,15 @@ class MqttManager {
     this.localSubs = new Map(); // filter → Set(handler)
     // Gerätezertifikat (attachVpnCert/applyVpnCert): nur im Gateway-Container, der es abholt
     this.vpn = null;            // { vpnCert, tunnelIp, hasAddr, portTaken, readFile }
-    this.vpnWant = { enabled: false, name: null };
+    this.vpnWant = { enabled: false, name: null, fpPort: false };
     this.vpnLoaded = null;      // { cert, key, sha256, notAfter, wildcard, host } – zuletzt gelesen und geprüft
     this.vpnState = 'off';      // off | no_name | no_cert | active
     this.vpnTunnel = null;      // listening | no_address | port_in_use (nur mit active)
     this.tlsSource = null;      // self | vpn-cert (das Zertifikat, das Port 8883 gerade hat)
     this.active = null;         // { sha256, cert?, host? } des Listeners
+    this.fpActive = null;       // { sha256, cert } von Port 8884 (nur neben dem Gerätezertifikat)
+    this.fpTunnel = null;       // listening | no_address | port_in_use (nur mit fpActive)
+    this.lastFpExtra = [];
   }
 
   /**
@@ -130,14 +141,19 @@ class MqttManager {
   /** Kann dieses Gateway Port 8883 mit dem Gerätezertifikat betreiben? (Capability mqtt-vpn-cert) */
   vpnCertSupported() { return !!(this.vpn && this.available()); }
 
-  /** Config-Pull: `features.mqtt_tls` ({ vpn_cert: true, vpn_name }) – fehlt es, ist der Schalter aus. */
+  /**
+   * Config-Pull: `features.mqtt_tls` ({ vpn_cert: true, vpn_name, fingerprint_port? }) – fehlt es,
+   * ist der Schalter aus. `fingerprint_port: true` (nur mit vpn_cert) öffnet Port 8884 mit dem
+   * selbst erzeugten Zertifikat; fehlt es, bleibt es wie bisher (nur 8883).
+   */
   applyVpnCert(f) {
     const on = !!(f && typeof f === 'object' && f.vpn_cert === true);
     const raw = on && typeof f.vpn_name === 'string' ? f.vpn_name.trim().toLowerCase() : '';
     const name = raw && DNS_LABEL_RE.test(raw) ? raw : null;
-    if (on === this.vpnWant.enabled && name === this.vpnWant.name) return;
-    this.vpnWant = { enabled: on, name };
-    this.logger.info({ enabled: on, name }, 'edge: MQTT TLS with the device certificate switched by the server');
+    const fpPort = on && f.fingerprint_port === true;
+    if (on === this.vpnWant.enabled && name === this.vpnWant.name && fpPort === this.vpnWant.fpPort) return;
+    this.vpnWant = { enabled: on, name, fpPort };
+    this.logger.info({ enabled: on, name, fingerprintPort: fpPort }, 'edge: MQTT TLS with the device certificate switched by the server');
     this.refresh();
     this.onChange();
   }
@@ -185,14 +201,22 @@ class MqttManager {
 
   /** Adressen nur für Port 8883 mit dem Gerätezertifikat: die Tunnel-Adresse, wenn sie da und der Port frei ist. */
   tunnelAddrs() {
+    const r = this.tunnelFor(TLS_PORT);
+    this.vpnTunnel = r.state;
+    return r.addrs;
+  }
+
+  /**
+   * Die Tunnel-Adresse für `port`, wenn sie da ist und keine TCP-Route den Port dort hält –
+   * sonst bekäme Mosquitto den Port nicht und liefe gar nicht. → { addrs, state }
+   */
+  tunnelFor(port) {
     const ip = this.vpn && this.vpn.tunnelIp;
-    if (!ip || !this.vpn.hasAddr(ip)) { this.vpnTunnel = 'no_address'; return []; }
+    if (!ip || !this.vpn.hasAddr(ip)) return { addrs: [], state: 'no_address' };
     let taken = false;
-    try { taken = !!this.vpn.portTaken(TLS_PORT); } catch { taken = false; }
-    // eine TCP-Route auf 8883 an der Tunnel-Adresse: Mosquitto bekäme den Port nicht und liefe gar nicht
-    if (taken) { this.vpnTunnel = 'port_in_use'; return []; }
-    this.vpnTunnel = 'listening';
-    return [ip];
+    try { taken = !!this.vpn.portTaken(port); } catch { taken = false; }
+    if (taken) return { addrs: [], state: 'port_in_use' };
+    return { addrs: [ip], state: 'listening' };
   }
 
   available() { return this.files.available(); }
@@ -280,6 +304,8 @@ class MqttManager {
       if (this.mdns) this.mdns.announce(null);
       this.active = null;
       this.tlsSource = null;
+      this.fpActive = null;
+      this.fpTunnel = null;
       return;
     }
     this.refresh();
@@ -296,16 +322,26 @@ class MqttManager {
     const own = this.cfg.tls && !vpn ? this.ensureCert(addrs) : null;
     const cert = vpn || (own ? { ...own, source: 'self' } : null);
     const extra = vpn ? this.tunnelAddrs() : [];
+    // Port 8884 (Unterschalter): nur neben dem Gerätezertifikat, mit dem selbst erzeugten Zertifikat
+    const fpOwn = vpn && this.vpnWant.fpPort ? this.ensureCert(addrs) : null;
+    const fpTun = fpOwn ? this.tunnelFor(TLS_FP_PORT) : null;
+    const fpExtra = fpTun ? fpTun.addrs : [];
     const r = this.files.write({ accounts: this.allAccounts(), internalHash: this.internalHash, internalTopics: this.internalTopics(),
-      listenAddrs: addrs, tls: this.cfg.tls, cert, tlsExtraAddrs: extra });
+      listenAddrs: addrs, tls: this.cfg.tls, cert, tlsExtraAddrs: extra, fpCert: fpOwn, fpExtraAddrs: fpExtra });
     const source = r.tls === 'on' && cert ? cert.source : null;
     const active = r.tls === 'on' && cert ? { sha256: cert.sha256, ...(source === 'self' ? { cert: cert.cert } : { host: cert.host }) } : null;
+    const fpActive = r.fp === 'on' && fpOwn ? { sha256: fpOwn.sha256, cert: fpOwn.cert } : null;
     const changed = r.tls !== this.tls || source !== this.tlsSource || (active && active.sha256) !== (this.active && this.active.sha256)
-      || (active && active.host) !== (this.active && this.active.host) || extra.join() !== (this.lastExtra || []).join();
+      || (active && active.host) !== (this.active && this.active.host) || extra.join() !== (this.lastExtra || []).join()
+      || (fpActive && fpActive.sha256) !== (this.fpActive && this.fpActive.sha256) || fpExtra.join() !== this.lastFpExtra.join()
+      || (fpActive ? fpTun.state : null) !== this.fpTunnel;
     this.tls = r.tls;
     this.tlsSource = source;
     this.active = active;
     this.lastExtra = extra;
+    this.fpActive = fpActive;
+    this.fpTunnel = fpActive ? fpTun.state : null;
+    this.lastFpExtra = fpExtra;
     if (r.tlsChanged && source === 'vpn-cert') this.logger.info({ fingerprint: cert.sha256 }, 'edge: MQTT TLS listener uses the device certificate (reload)');
     if (changed) this.onChange();
     if (r.confChanged) this.logger.info({ listen: addrs }, 'edge: MQTT broker configuration written');
@@ -455,6 +491,8 @@ class MqttManager {
         tlsSha256: this.active.sha256, tlsSource: this.tlsSource,
         ...(this.active.cert ? { tlsCert: this.active.cert } : {}), ...(this.active.host ? { tlsHost: this.active.host } : {}),
       } : {}),
+      // Port 8884 neben dem Gerätezertifikat: Fingerabdruck und PEM des selbst erzeugten (zum Hinterlegen im Gerät)
+      ...(this.tls === 'on' && this.fpActive ? { tlsFp: { port: TLS_FP_PORT, sha256: this.fpActive.sha256, cert: this.fpActive.cert } } : {}),
       accounts: (this.cfg.accounts || []).map((a) => ({ user: a.user, connected: !!(this.accounts.get(a.user) || {}).connected,
         lastSeen: (this.accounts.get(a.user) || {}).lastSeen || null })),
     };
@@ -472,6 +510,22 @@ class MqttManager {
     else if (!this.brokerEnabled() || !this.cfg.tls) state = 'broker_off';
     const on = state === 'active' && this.tlsSource === 'vpn-cert';
     return { enabled, state: state === 'active' && !on ? 'no_cert' : state, host: on && this.active ? this.active.host : null, tunnel: on ? this.vpnTunnel : null };
+  }
+
+  /**
+   * Heartbeat `telemetry.mqtt_tls.fingerprint_port`: { enabled, port, state, tunnel } – nie Schlüssel oder Pfad.
+   *   state  off | broker_off (MQTT/TLS aus) | fallback (8883 hat ohnehin das selbst erzeugte) | no_cert | active
+   *   tunnel listening | no_address | port_in_use (nur mit active)
+   */
+  fingerprintPortTelemetry() {
+    const enabled = !!(this.vpnWant.enabled && this.vpnWant.fpPort);
+    let state;
+    if (!enabled) state = 'off';
+    else if (!this.brokerEnabled() || !this.cfg.tls) state = 'broker_off';
+    else if (this.tlsSource !== 'vpn-cert') state = 'fallback';
+    else state = this.fpActive ? 'active' : 'no_cert';
+    const on = state === 'active';
+    return { enabled, port: TLS_FP_PORT, state, tunnel: on ? this.fpTunnel : null };
   }
 
   async stop() {
