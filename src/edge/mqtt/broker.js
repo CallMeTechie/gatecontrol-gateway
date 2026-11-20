@@ -13,6 +13,11 @@
 //                    features.mqtt_tls.vpn_cert – das Gerätezertifikat (*.geraete.<zone>,
 //                    src/vpncert/vpnCert.js). Mosquitto liest beide direkt aus dieser
 //                    Ablage (certfile/keyfile zeigen hierher)
+//   tls-self/server.crt  nur mit Gerätezertifikat und Unterschalter
+//   tls-self/server.key  features.mqtt_tls.fingerprint_port: das selbst erzeugte Zertifikat
+//                    für den zweiten TLS-Listener (Port 8884, fester Fingerabdruck) –
+//                    getrennt von tls/, damit eine Erneuerung des Gerätezertifikats es
+//                    nie berührt
 // Der Wächter im mqtt-Container startet Mosquitto neu, wenn sich mosquitto.conf
 // ändert (Listener lassen sich per SIGHUP nicht ändern), sonst SIGHUP. Ein neues
 // Zertifikat unter denselben Pfaden (Erneuerung des Gerätezertifikats) ändert nur
@@ -34,6 +39,9 @@ const net = require('node:net');
 const INTERNAL_USER = 'gc-edge';
 const PORT = 1883;
 const TLS_PORT = 8883;
+// zweiter TLS-Listener neben dem Gerätezertifikat: das selbst erzeugte Zertifikat (fester
+// Fingerabdruck) für Geräte, die nur den Fingerabdruck prüfen (features.mqtt_tls.fingerprint_port)
+const TLS_FP_PORT = 8884;
 const ITERATIONS = 1000; // wie mosquitto_passwd -H sha512-pbkdf2 (2.1)
 
 /** Hash im mosquitto_passwd-Format: $7$<iterationen>$<salz b64>$<pbkdf2-sha512 b64>. */
@@ -50,7 +58,7 @@ function verifyPassword(password, hash) {
   return got.length === want.length && crypto.timingSafeEqual(got, want);
 }
 
-function buildConf({ dir, listenAddrs, tls }) {
+function buildConf({ dir, listenAddrs, tls, fp = null }) {
   const lines = [
     '# Automatisch erzeugt vom GateControl-Edge-Host (docs/edge.md) – Änderungen gehen verloren.',
     'allow_anonymous false',
@@ -87,6 +95,15 @@ function buildConf({ dir, listenAddrs, tls }) {
     for (const ip of tlsAddrs) {
       if (!net.isIPv4(ip)) continue;
       lines.push(`listener ${TLS_PORT} ${ip}`, `certfile ${tls.certfile}`, `keyfile ${tls.keyfile}`);
+    }
+    // Port 8884: nur neben dem Gerätezertifikat, mit dem selbst erzeugten (eigene Dateien). Der
+    // Fingerabdruck steht drin: ein anderes selbst erzeugtes Zertifikat startet Mosquitto neu.
+    if (tls.source === 'vpn-cert' && fp && fp.certfile && fp.keyfile) {
+      lines.push('', fp.sha256 ? `# TLS ${TLS_FP_PORT}: Zertifikat des Gateways (fester Fingerabdruck), SHA-256 ${fp.sha256}` : `# TLS ${TLS_FP_PORT}: Zertifikat des Gateways (fester Fingerabdruck)`);
+      for (const ip of [...new Set([...listenAddrs, ...(fp.extraAddrs || [])])]) {
+        if (!net.isIPv4(ip)) continue;
+        lines.push(`listener ${TLS_FP_PORT} ${ip}`, `certfile ${fp.certfile}`, `keyfile ${fp.keyfile}`);
+      }
     }
   }
   return lines.join('\n') + '\n';
@@ -129,24 +146,33 @@ class BrokerFiles {
     try { fs.accessSync(this.dir, fs.constants.W_OK); return true; } catch { return false; }
   }
 
-  tlsFiles() {
-    const certfile = path.join(this.dir, 'tls', 'server.crt');
-    const keyfile = path.join(this.dir, 'tls', 'server.key');
+  tlsFiles(sub = 'tls') {
+    const certfile = path.join(this.dir, sub, 'server.crt');
+    const keyfile = path.join(this.dir, sub, 'server.key');
     return fs.existsSync(certfile) && fs.existsSync(keyfile) ? { certfile, keyfile } : null;
   }
 
-  /** Zertifikat und Schlüssel (PEM) für den TLS-Listener ablegen; → true, wenn sich etwas geändert hat. */
-  writeTls({ cert, key }) {
+  /**
+   * Zertifikat und Schlüssel (PEM) ablegen – `tls/` (Port 8883) oder `tls-self/` (Port 8884);
+   * → true, wenn sich etwas geändert hat.
+   */
+  writeTls({ cert, key }, sub = 'tls') {
     // Gateway-Ablage: Ordner 0750, die Gruppe 61001 kommt über setgid der Ablage (der Broker liest)
-    fs.mkdirSync(path.join(this.dir, 'tls'), { recursive: true, mode: this.fileMode === 0o600 ? 0o700 : 0o750 });
-    const a = writeIfChanged(path.join(this.dir, 'tls', 'server.crt'), cert, this.fileMode);
-    const b = writeIfChanged(path.join(this.dir, 'tls', 'server.key'), key, this.fileMode);
+    fs.mkdirSync(path.join(this.dir, sub), { recursive: true, mode: this.fileMode === 0o600 ? 0o700 : 0o750 });
+    const a = writeIfChanged(path.join(this.dir, sub, 'server.crt'), cert, this.fileMode);
+    const b = writeIfChanged(path.join(this.dir, sub, 'server.key'), key, this.fileMode);
     return a || b;
   }
 
-  /** TLS aus: der Schlüssel bleibt nicht in der Ablage des Brokers liegen. */
+  /** Port 8884 aus: das selbst erzeugte Zertifikat samt Schlüssel verlässt die Ablage des Brokers. */
+  removeFpTls() {
+    try { fs.rmSync(path.join(this.dir, 'tls-self'), { recursive: true, force: true }); } catch { /* weg */ }
+  }
+
+  /** TLS aus: der Schlüssel bleibt nicht in der Ablage des Brokers liegen (auch nicht der für 8884). */
   removeTls() {
     try { fs.rmSync(path.join(this.dir, 'tls'), { recursive: true, force: true }); } catch { /* weg */ }
+    this.removeFpTls();
   }
 
   /**
@@ -155,26 +181,36 @@ class BrokerFiles {
    * zuerst abgelegt, dann erst die mosquitto.conf, die darauf zeigt. `source` 'vpn-cert': das
    * Gerätezertifikat (eine Erneuerung ändert nur die Dateien → `reload`, SIGHUP).
    * `tlsExtraAddrs`: Adressen nur für Port 8883 (die Tunnel-Adresse beim Gerätezertifikat).
+   * `fpCert` ({ cert, key, sha256 }): nur neben dem Gerätezertifikat – das selbst erzeugte für
+   * Port 8884 (`tls-self/`), `fpExtraAddrs` wie `tlsExtraAddrs`. Ohne → `tls-self/` wird entfernt.
+   * Liefert zusätzlich `fp` ('on' | 'off').
    */
-  write({ accounts, internalHash, internalTopics, listenAddrs, tls, cert = null, tlsExtraAddrs = [] }) {
+  write({ accounts, internalHash, internalTopics, listenAddrs, tls, cert = null, tlsExtraAddrs = [], fpCert = null, fpExtraAddrs = [] }) {
     // data/ legt im neuen Weg der Wächter im eigenen Volume an
     if (this.brokerDir === this.dir) fs.mkdirSync(path.join(this.dir, 'data'), { recursive: true, mode: 0o700 });
     let tlsChanged = false;
     if (tls && cert) tlsChanged = this.writeTls(cert);
     else if (!tls) this.removeTls();
+    const vpnSource = !!(tls && cert && cert.source === 'vpn-cert');
+    // Port 8884 nur neben dem Gerätezertifikat; seine Dateien ändern sich bei dessen Erneuerung nie
+    let fpChanged = false;
+    if (vpnSource && fpCert) fpChanged = this.writeTls(fpCert, 'tls-self');
+    else this.removeFpTls();
+    const fpFound = vpnSource && fpCert ? this.tlsFiles('tls-self') : null;
+    const fp = fpFound ? { ...fpFound, sha256: fpCert.sha256 || null, extraAddrs: fpExtraAddrs } : null;
     const found = tls ? this.tlsFiles() : null;
     const tlsFiles = found ? {
       ...found, sha256: cert ? cert.sha256 : null, source: cert && cert.source === 'vpn-cert' ? 'vpn-cert' : 'self',
       wildcard: cert && cert.source === 'vpn-cert' ? cert.wildcard || null : null,
       extraAddrs: cert && cert.source === 'vpn-cert' ? tlsExtraAddrs : [],
     } : null;
-    const confChanged = writeIfChanged(path.join(this.dir, 'mosquitto.conf'), buildConf({ dir: this.brokerDir, listenAddrs, tls: tlsFiles }), this.fileMode);
+    const confChanged = writeIfChanged(path.join(this.dir, 'mosquitto.conf'), buildConf({ dir: this.brokerDir, listenAddrs, tls: tlsFiles, fp }), this.fileMode);
     const a = writeIfChanged(path.join(this.dir, 'passwd'), buildPasswd(accounts, internalHash), this.fileMode);
     const b = writeIfChanged(path.join(this.dir, 'acl'), buildAcl(accounts, internalTopics), this.fileMode);
     // neues Zertifikat unter denselben Pfaden: SIGHUP reicht (Mosquitto liest certfile/keyfile neu)
-    if (a || b || tlsChanged) writeIfChanged(path.join(this.dir, 'reload'), `${Date.now()}-${++this.reloadSeq}\n`, 0o644);
+    if (a || b || tlsChanged || fpChanged) writeIfChanged(path.join(this.dir, 'reload'), `${Date.now()}-${++this.reloadSeq}\n`, 0o644);
     writeIfChanged(path.join(this.dir, 'enabled'), '1\n', 0o644);
-    return { confChanged, authChanged: a || b, tlsChanged, tls: tls ? (tlsFiles ? 'on' : 'missing_cert') : 'off' };
+    return { confChanged, authChanged: a || b, tlsChanged, tls: tls ? (tlsFiles ? 'on' : 'missing_cert') : 'off', fp: fp && tlsFiles ? 'on' : 'off' };
   }
 
   /** Broker aus: auch kein Schlüssel bleibt in der Ablage liegen (beim Einschalten wieder geschrieben). */
@@ -184,4 +220,4 @@ class BrokerFiles {
   }
 }
 
-module.exports = { BrokerFiles, hashPassword, verifyPassword, buildConf, buildPasswd, buildAcl, INTERNAL_USER, PORT, TLS_PORT };
+module.exports = { BrokerFiles, hashPassword, verifyPassword, buildConf, buildPasswd, buildAcl, INTERNAL_USER, PORT, TLS_PORT, TLS_FP_PORT };

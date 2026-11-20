@@ -319,11 +319,13 @@ async function bootstrap(opts = {}) {
         // vpn-cert-devices: holt bei vpn_cert.server_host, nimmt das Wildcard des Geräte-Bereichs (*.geraete.<zone>)
         if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('vpn-cert', 'vpn-cert-devices');
       } catch (_e) { /* best-effort */ }
-      // MQTT-TLS mit dem Gerätezertifikat: { enabled, state, host, tunnel } – nur, wo dieser Container den Broker schreibt
+      // MQTT-TLS mit dem Gerätezertifikat: { enabled, state, host, tunnel } und Port 8884
+      // { enabled, port, state, tunnel } – nur, wo dieser Container den Broker schreibt
       try {
         if (brokerMqtt && brokerMqtt.vpnCertSupported()) {
-          health.telemetry.mqtt_tls = { vpn_cert: brokerMqtt.vpnTelemetry() };
-          if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('mqtt-vpn-cert');
+          // fingerprint_port: zweiter Port 8884 mit dem selbst erzeugten neben dem Gerätezertifikat
+          health.telemetry.mqtt_tls = { vpn_cert: brokerMqtt.vpnTelemetry(), fingerprint_port: brokerMqtt.fingerprintPortTelemetry() };
+          if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('mqtt-vpn-cert', 'mqtt-fingerprint-port');
         }
       } catch (_e) { /* best-effort */ }
       // Statusseite im Heimnetz (docs/setup-page.md): an/aus und Zustand
