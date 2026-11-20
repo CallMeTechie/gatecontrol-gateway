@@ -224,6 +224,10 @@ function createSetupController({
       s.startFailed = true;
       changed();
     },
+    /** Zustand für die Seite aus dem VPN (vpnHttps.js) – sie nimmt CSRF-Token und Einrichtungsteil heraus. */
+    snapshotForVpn() {
+      return snapshot({ recheck: false });
+    },
   };
 
   async function tunnelFresh() {

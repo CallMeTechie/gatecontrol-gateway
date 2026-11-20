@@ -91,13 +91,15 @@ Welche TLS-Endpunkte hat das Gateway, und was davon nimmt das Zertifikat?
 | Endpunkt | TLS heute | Wildcard | Warum |
 |---|---|---|---|
 | Statusseite/Einrichtung (Heimnetz, Port 8642, Pi-Image auch 80) | nein, HTTP | nein | spricht kein TLS; ein Name der Zone zeigt auf die Tunnel-Adresse des Gateways, und Anfragen aus dem Tunnel nimmt die Seite bewusst nicht an |
+| Statusseite aus dem VPN (Tunnel-IP:8643, Standard aus) | ja | **ja** | `https://<name>.<Bereich des Wildcards>:8643`, nur lesen, Anmeldung über GateControl (Einmal-Ticket) – [setup-page.md](setup-page.md) „Aus dem VPN per HTTPS“ |
 | Management-API (Tunnel-IP:9876) | nein, HTTP | nein | nur der Server spricht sie, Token im Tunnel |
 | HTTP-Proxy (Tunnel-IP:8080) | nein | nein | TLS endet in Caddy auf dem Server |
 | Zwischenspeicher im Heimnetz (HTTPS) | ja, selbst erzeugt | nein | Apps pinnen den Fingerabdruck (`cache.tlsSha256`); ein Wechsel alle 60–90 Tage bräche das Pinning |
 | MQTT-TLS (8883, Edge) | ja, selbst erzeugt | nein | Geräte pinnen Fingerabdruck oder eigenes Zertifikat; dieselbe Folge |
 | Edge-Plugins, Kameras, Drucken | nur als Client | – | prüfen fremde Zertifikate |
 
-Das Gateway selbst bietet das Zertifikat deshalb an keinem eigenen Endpunkt an,
+Außer der Statusseite aus dem VPN (eingeschaltet, mit Anmeldung über GateControl)
+bietet das Gateway das Zertifikat deshalb an keinem eigenen Endpunkt an,
 sondern stellt die Dateien unter dem Pfad oben bereit. Ein eigener Dienst auf
 dem Gateway-Rechner bindet den Ordner **nur lesbar** ein, z. B. in einer
 eigenen Compose-Datei neben dem Gateway:

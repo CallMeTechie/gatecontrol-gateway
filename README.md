@@ -91,7 +91,7 @@ for the exact `lxc.conf` patches applied.
 
 ## Security Hardening
 
-- Einrichtungs-/Statusseite (Port 8642): nur aus dem Heimnetz erreichbar, nie über den Tunnel, zeigt keine Geheimnisse – [docs/setup-page.md](docs/setup-page.md)
+- Einrichtungs-/Statusseite (Port 8642): nur aus dem Heimnetz erreichbar, nie über den Tunnel, zeigt keine Geheimnisse – [docs/setup-page.md](docs/setup-page.md); optional (Standard aus) zusätzlich nur lesend per HTTPS aus dem VPN unter `<name>.<Bereich des Wildcards>:8643` (z. B. `gw-keller.geraete.<zone>`), nur mit Anmeldung über GateControl
 - `network_mode: host` bleibt zwingend (dynamische L4-Port-Binding)
 - Container läuft als non-root `gateway` User
 - `cap_drop: ALL` + nur `NET_ADMIN` (wg-quick) + `NET_BIND_SERVICE` (ports <1024)

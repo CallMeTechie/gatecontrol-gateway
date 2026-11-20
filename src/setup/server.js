@@ -30,9 +30,15 @@ function sameToken(a, b) {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 }
 
+/** Die festen Dateien der Seite: Pfad → { body, type } (auch für die Seite aus dem VPN, vpnHttps.js). */
+function loadAssets() {
+  const out = {};
+  for (const [url, [file, type]] of Object.entries(FILES)) out[url] = { body: fs.readFileSync(path.join(UI_DIR, file)), type };
+  return out;
+}
+
 function createSetupServer({ controller, logger, port, altPort = null, allowedHosts = [], bind = null }) {
-  const assets = {};
-  for (const [url, [file, type]] of Object.entries(FILES)) assets[url] = { body: fs.readFileSync(path.join(UI_DIR, file)), type };
+  const assets = loadAssets();
 
   function head(res, status, type, extra = {}) {
     res.writeHead(status, {
@@ -196,4 +202,4 @@ function createSetupServer({ controller, logger, port, altPort = null, allowedHo
   };
 }
 
-module.exports = { createSetupServer, CSP };
+module.exports = { createSetupServer, CSP, assets: loadAssets };

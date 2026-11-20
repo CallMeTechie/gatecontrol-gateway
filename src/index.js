@@ -107,6 +107,7 @@ async function main() {
       await require('./shutdownNotice').notifyGoingDown(ctx?.config);
       await ctx?.edgeLink?.stop();
       ctx?.featureMgr?.stop();
+      await ctx?.vpnStatus?.stop();
       ctx?.poller?.stop();
       if (ctx?.apiServer) await new Promise(r => ctx.apiServer.close(r));
       if (ctx?.httpProxyServer) await new Promise(r => ctx.httpProxyServer.close(r));
