@@ -296,7 +296,7 @@ test('buildConf: Tunnel-Adresse nur mit dem Gerätezertifikat; hasLocalAddress',
   const tlsFiles = { certfile: '/x/tls/server.crt', keyfile: '/x/tls/server.key', sha256: 'ab', source: 'self', extraAddrs: [] };
   assert.ok(!broker.buildConf({ dir: '/x', listenAddrs: ['192.168.1.10'], tls: tlsFiles }).includes(TUNNEL));
   const conf = broker.buildConf({ dir: '/x', listenAddrs: ['192.168.1.10'], tls: { ...tlsFiles, source: 'vpn-cert', wildcard: WILDCARD, extraAddrs: [TUNNEL, 'kein-ip'] } });
-  assert.match(conf, new RegExp(`^listener 8883 ${TUNNEL.replace(/\./g, '\\.')}$`, 'm'));
+  assert.ok(conf.split('\n').includes(`listener 8883 ${TUNNEL}`), 'exakte Zeile, keine Musterprüfung');
   assert.ok(!conf.includes('kein-ip'));
   assert.ok(!/^listener 1883 10\.8/m.test(conf), '1883 nie am Tunnel');
   assert.strictEqual(hasLocalAddress('10.8.0.7', { wg0: [{ family: 'IPv4', address: '10.8.0.7' }] }), true);
