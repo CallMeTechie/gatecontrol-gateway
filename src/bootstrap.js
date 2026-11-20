@@ -38,6 +38,8 @@ const { createFeatureManager } = require('./features/manager');
 const { configHash } = require('./features/config');
 const { createFeaturesRouter } = require('./api/routes/features');
 const { createCamerasRouter } = require('./api/routes/cameras');
+const { VpnCertManager } = require('./vpncert/vpnCert');
+const path = require('node:path');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
 
@@ -122,10 +124,25 @@ async function bootstrap(opts = {}) {
   // Config-Pull läuft (der Gateway-Host kann selbst auf den Filter zeigen).
   try { await featureMgr.restoreBoot(); } catch (err) { logger.warn({ err: err.message }, 'features: boot restore failed'); }
 
+  // Zertifikat der VPN-Namen (docs/vpn-cert.md): nur, wenn der Server es diesem
+  // Gateway weitergibt (`features.vpn_cert`); Abruf über den Tunnel.
+  const vpnCert = new VpnCertManager({
+    dir: path.join(config.stateDir, 'vpn-cert'),
+    apiToken: config.apiToken,
+    tunnelIp: config.tunnelIp,
+    serverIp: HUB_TUNNEL_IP,
+    logger,
+  });
+  try { hooks.attachVpnCert?.(() => vpnCert.status()); } catch (err) { logger.warn({ err: err.message }, 'setup page: vpn cert status not attached'); }
+
   // 3. On config change → apply
   store.on('change', async ({ cfg, hash }) => {
     logger.info({ hash, httpRoutes: cfg.routes.length, l4Routes: cfg.l4_routes.length, udpRoutes: store.udpRoutes.length }, 'Applying new config');
     try { featureMgr.apply(cfg.features); } catch (err) { logger.warn({ err: err.message }, 'features: apply failed'); }
+    try {
+      const f = cfg.features || {};
+      vpnCert.apply(f.vpn_cert, { serverIp: f.internal_dns && f.internal_dns.server });
+    } catch (err) { logger.warn({ err: err.message }, 'vpn cert: apply failed'); }
     try { hooks.onConfig?.(cfg); } catch (err) { logger.warn({ err: err.message }, 'setup page: config not applied'); }
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
@@ -262,6 +279,11 @@ async function bootstrap(opts = {}) {
       health.telemetry.edge = edgeLink.telemetry();
       // Phase 3a: capabilities, Zustand je Funktion (Karte „Funktionen“), USV, RAM des Prozesses
       try { Object.assign(health.telemetry, featureMgr.telemetry()); } catch (_e) { /* best-effort */ }
+      // Zertifikat der VPN-Namen: nur Fingerabdruck und Ablauf (null = keins gespeichert), nie der Schlüssel
+      try {
+        health.telemetry.vpn_cert = vpnCert.telemetry();
+        if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('vpn-cert');
+      } catch (_e) { /* best-effort */ }
       // Statusseite im Heimnetz (docs/setup-page.md): an/aus und Zustand
       try {
         if (hooks.telemetry) {
@@ -275,7 +297,7 @@ async function bootstrap(opts = {}) {
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, udpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, udpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr, vpnCert };
 }
 
 module.exports = { bootstrap };

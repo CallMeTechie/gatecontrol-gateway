@@ -50,6 +50,12 @@
       ok_title: 'Verbunden mit {server}', ok_title_plain: 'Verbunden',
       last_contact: 'Letzter Kontakt {ago}', last_contact_none: 'Noch kein Kontakt',
       k_name: 'Name', k_tunnel: 'VPN-Tunnel', k_version: 'Version', k_lan: 'Adresse im Heimnetz',
+      k_cert: 'Zertifikat VPN-Namen', k_cert_fp: 'Fingerabdruck', k_cert_fetched: 'Zuletzt abgeholt', k_cert_error: 'Abruf',
+      cert_ok: '{name}, gültig bis {date}', cert_fetching: '{name} wird abgeholt …', cert_error: '{name} – Abruf fehlgeschlagen',
+      cert_retry: '{err}, neuer Versuch in {dur}',
+      cert_e_not_from_vpn: 'Abruf kam nicht über den Tunnel', cert_e_not_allowed: 'Gateway ist in GateControl nicht angehakt',
+      cert_e_not_shared: 'Weitergabe ist in GateControl aus', cert_e_no_certificate: 'GateControl hat gerade kein gültiges Zertifikat',
+      cert_e_fingerprint_mismatch: 'Fingerabdruck passte nicht – verworfen', cert_e_other: 'Fehler {code}',
       tunnel_since: 'steht seit {dur}', tunnel_up: 'steht', tunnel_down: 'wird aufgebaut …',
       open_gc: 'In GateControl öffnen',
       ok_note: 'Funktionen und Einstellungen verwaltest du in GateControl. Erneuerst du dort den Zugang, fragt diese Seite von selbst nach einem neuen Code.',
@@ -120,6 +126,12 @@
       ok_title: 'Connected to {server}', ok_title_plain: 'Connected',
       last_contact: 'Last contact {ago}', last_contact_none: 'No contact yet',
       k_name: 'Name', k_tunnel: 'VPN tunnel', k_version: 'Version', k_lan: 'Address in the home network',
+      k_cert: 'Certificate VPN names', k_cert_fp: 'Fingerprint', k_cert_fetched: 'Last fetched', k_cert_error: 'Fetch',
+      cert_ok: '{name}, valid until {date}', cert_fetching: 'Fetching {name} …', cert_error: '{name} – fetch failed',
+      cert_retry: '{err}, next try in {dur}',
+      cert_e_not_from_vpn: 'The request did not come through the tunnel', cert_e_not_allowed: 'Gateway is not ticked in GateControl',
+      cert_e_not_shared: 'Passing on is off in GateControl', cert_e_no_certificate: 'GateControl has no valid certificate right now',
+      cert_e_fingerprint_mismatch: 'Fingerprint did not match – discarded', cert_e_other: 'Error {code}',
       tunnel_since: 'up for {dur}', tunnel_up: 'up', tunnel_down: 'being set up …',
       open_gc: 'Open in GateControl',
       ok_note: 'Features and settings are managed in GateControl. If you renew the access there, this page asks for a new code by itself.',
@@ -402,6 +414,21 @@
     ]);
     return [top(state.name || state.device, 'busy', t('pill_connecting')), card, foot([t('conn_foot')].concat(baseFoot()))];
   }
+  // Zertifikat der VPN-Namen (docs/vpn-cert.md): nur, wenn GateControl es diesem Gateway weitergibt
+  function certRows(row, c) {
+    if (!c || !c.wildcard) return;
+    var date = '';
+    if (c.notAfter) { try { date = new Date(c.notAfter).toLocaleDateString(lang === 'de' ? 'de-DE' : 'en-GB'); } catch (e) { date = c.notAfter; } }
+    var name = c.wildcard;
+    row(t('k_cert'), c.fingerprint && date ? t('cert_ok', { name: name, date: date }) : (c.state === 'error' ? t('cert_error', { name: name }) : t('cert_fetching', { name: name })));
+    if (c.fingerprint) row(t('k_cert_fp'), c.fingerprint);
+    if (c.fetchedAgoS !== null && c.fetchedAgoS !== undefined) row(t('k_cert_fetched'), ago(c.fetchedAgoS));
+    if (c.state === 'error' && c.error) {
+      var key = 'cert_e_' + c.error;
+      var err = TEXT[lang][key] ? t(key) : t('cert_e_other', { code: c.error });
+      row(t('k_cert_error'), c.retryInS !== null && c.retryInS !== undefined ? t('cert_retry', { err: err, dur: dur(Math.max(1, c.retryInS)) }) : err);
+    }
+  }
   function viewConnected() {
     var kv = h('dl', { class: 'kv' }, []);
     function row(k, v) { if (v) { kv.appendChild(h('dt', { text: k })); kv.appendChild(h('dd', { text: v })); } }
@@ -409,6 +436,7 @@
     row(t('k_tunnel'), state.tunnelUp ? (state.tunnelSinceS !== null && state.tunnelSinceS !== undefined && state.tunnelSinceS >= 5 ? t('tunnel_since', { dur: dur(state.tunnelSinceS) }) : t('tunnel_up')) : t('tunnel_down'));
     row(t('k_version'), state.version);
     row(t('k_lan'), state.lanIp);
+    certRows(row, state.vpnCert);
     var last = state.lastContactS === null || state.lastContactS === undefined ? t('last_contact_none') : t('last_contact', { ago: ago(state.lastContactS) });
     var card = h('div', { class: 'card' }, [
       h('div', { class: 'big' }, [h('span', { class: 'ring' }, [icon('i-check')]),

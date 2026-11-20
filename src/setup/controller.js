@@ -64,6 +64,7 @@ function createSetupController({
   };
   let pairWaiter = null;
   let wgCache = { at: 0, fresh: false };
+  let vpnCertStatus = null; // () → VpnCertManager.status() (src/vpncert/vpnCert.js)
 
   function readPrefs() {
     try { const j = JSON.parse(fs.readFileSync(path.join(stateDir, PREFS_FILE), 'utf8')); return j && typeof j === 'object' ? j : {}; } catch { return {}; }
@@ -215,6 +216,10 @@ function createSetupController({
     telemetry() {
       return { status: s.statusPage, mode: s.mode };
     },
+    /** Zustand des Zertifikats der VPN-Namen für die Statusseite (docs/vpn-cert.md). */
+    attachVpnCert(fn) {
+      vpnCertStatus = typeof fn === 'function' ? fn : null;
+    },
     startFailed() {
       s.startFailed = true;
       changed();
@@ -273,6 +278,24 @@ function createSetupController({
       tunnelUp: up,
       tunnelSinceS: up && s.tunnelSince ? Math.max(0, Math.round((t - s.tunnelSince) / 1000)) : null,
       openUrl: s.server ? `${s.server.origin}/gateways` : null,
+      vpnCert: vpnCertView(t),
+    };
+  }
+
+  /** Zertifikat der VPN-Namen: Zustand, Name, Fingerabdruck, Ablauf, letzter Abruf, Fehler – nie der Schlüssel, nie ein Pfad. */
+  function vpnCertView(t) {
+    let v = null;
+    try { v = vpnCertStatus ? vpnCertStatus() : null; } catch { v = null; }
+    if (!v || typeof v !== 'object') return null;
+    const secs = (at) => (typeof at === 'number' && at > 0 ? Math.max(0, Math.round((t - at) / 1000)) : null);
+    return {
+      state: ['fetching', 'ok', 'error'].includes(v.state) ? v.state : 'off',
+      wildcard: typeof v.wildcard === 'string' ? v.wildcard : null,
+      fingerprint: typeof v.fingerprint === 'string' && /^[0-9a-f]{64}$/.test(v.fingerprint) ? v.fingerprint : null,
+      notAfter: typeof v.notAfter === 'string' ? v.notAfter : null,
+      fetchedAgoS: secs(v.fetchedAt),
+      error: typeof v.error === 'string' ? v.error : null,
+      retryInS: typeof v.nextRetryAt === 'number' ? Math.max(0, Math.round((v.nextRetryAt - t) / 1000)) : null,
     };
   }
 
