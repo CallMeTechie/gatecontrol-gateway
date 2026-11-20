@@ -3,10 +3,12 @@
 // Zertifikat der VPN-Namen (docs/vpn-cert.md): Hat der Admin in GateControl
 // „Zertifikat und Schlüssel an Geräte weitergeben“ eingeschaltet und dieses
 // Gateway angehakt, steht im Config-Pull `features.vpn_cert`
-// { wildcard, fingerprint, not_after }. Das Gateway holt dann Zertifikat und
-// privaten Schlüssel über den Tunnel (GET /api/v1/gateway/vpn-cert an
-// server.<zone> auf der VPN-Adresse des Servers, Quelle die eigene
-// Tunnel-Adresse) und legt beide im State-Verzeichnis ab:
+// { wildcard, server_host, fingerprint, not_after, … }. Seit dem Geräte-Bereich ist
+// `wildcard` das des Geräte-Bereichs (`*.geraete.<zone>`), nie das der Zone.
+// Das Gateway holt dann Zertifikat und privaten Schlüssel über den Tunnel
+// (GET /api/v1/gateway/vpn-cert an `server_host` – ältere Server ohne das
+// Feld: server.<zone aus wildcard> – auf der VPN-Adresse des Servers, Quelle
+// die eigene Tunnel-Adresse) und legt beide im State-Verzeichnis ab:
 //
 //   <stateDir>/vpn-cert/            0700
 //     fullchain.pem                 0600  Zertifikat + Zwischenzertifikate
@@ -35,14 +37,28 @@ const ZONE_RE = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([
 const HEX64 = /^[0-9a-f]{64}$/;
 const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
 
-/** `features.vpn_cert` prüfen → { wildcard, zone, fingerprint, notAfter } oder null. */
+/**
+ * `features.vpn_cert` prüfen → { wildcard, zone, serverHost, fingerprint, notAfter } oder null.
+ * `zone` ist der Bereich des Wildcards (`*.geraete.vpn.example.com` →
+ * `geraete.vpn.example.com`); `serverHost` der Name, unter dem der Server den
+ * Abruf beantwortet: `server_host` aus der Konfiguration, ohne das Feld (Server
+ * vor dem Geräte-Bereich) wie bisher `server.<zone>`.
+ */
 function parseSummary(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const wildcard = typeof raw.wildcard === 'string' ? raw.wildcard.trim().toLowerCase() : '';
   const fingerprint = typeof raw.fingerprint === 'string' ? raw.fingerprint.trim().toLowerCase() : '';
   if (!wildcard.startsWith('*.') || !ZONE_RE.test(wildcard.slice(2)) || !HEX64.test(fingerprint)) return null;
   const notAfter = typeof raw.not_after === 'string' && !Number.isNaN(Date.parse(raw.not_after)) ? new Date(raw.not_after).toISOString() : null;
-  return { wildcard, zone: wildcard.slice(2), fingerprint, notAfter };
+  const zone = wildcard.slice(2);
+  let serverHost = `server.${zone}`;
+  if (raw.server_host !== undefined && raw.server_host !== null) {
+    const sh = typeof raw.server_host === 'string' ? raw.server_host.trim().toLowerCase().replace(/\.$/, '') : '';
+    // ein voller Name, kein Wildcard – sonst ist die Bekanntgabe unbrauchbar
+    if (!ZONE_RE.test(sh)) return null;
+    serverHost = sh;
+  }
+  return { wildcard, zone, serverHost, fingerprint, notAfter };
 }
 
 /** SHA-256 über das DER des ersten Zertifikats (hex, klein) – wie der Server. */
@@ -75,12 +91,13 @@ function verifyMaterial(body, want, now = Date.now()) {
 }
 
 /**
- * Abruf über den Tunnel: TLS zu `serverIp:port` mit SNI/Host `server.<zone>`
- * (das Wildcard-Zertifikat des Servers, volle Prüfung), Quelle `localAddress`.
+ * Abruf über den Tunnel: TLS zu `serverIp:port` mit SNI/Host `serverHost`
+ * (z. B. `server.<zone>` – das Zertifikat des Servers, volle Prüfung; ohne
+ * `serverHost` wie früher `server.<zone>`), Quelle `localAddress`.
  * → { status, body } (body: JSON oder null)
  */
-function fetchOverTunnel({ serverIp, port = 443, zone, apiToken, localAddress, ca, timeoutMs = TIMEOUT_MS }) {
-  const host = `server.${zone}`;
+function fetchOverTunnel({ serverIp, port = 443, zone, serverHost, apiToken, localAddress, ca, timeoutMs = TIMEOUT_MS }) {
+  const host = serverHost || `server.${zone}`;
   return new Promise((resolve, reject) => {
     const req = https.request({
       host: serverIp,
@@ -231,7 +248,7 @@ class VpnCertManager {
     this.lastAttemptAt = this.now();
     this._changed();
     try {
-      const r = await this.fetchFn({ serverIp: this.serverIp, port: this.port, zone: want.zone, apiToken: this.apiToken, localAddress: this.tunnelIp, ca: this.ca });
+      const r = await this.fetchFn({ serverIp: this.serverIp, port: this.port, zone: want.zone, serverHost: want.serverHost, apiToken: this.apiToken, localAddress: this.tunnelIp, ca: this.ca });
       if (r.status !== 200) {
         const code = r.body && typeof r.body.error === 'string' && /^[a-z_]{1,40}$/.test(r.body.error) ? r.body.error : `http_${r.status}`;
         throw Object.assign(new Error(code), { code });

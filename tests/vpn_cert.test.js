@@ -38,12 +38,26 @@ describe('vpn cert: summary from the config pull', () => {
   it('takes wildcard, fingerprint and expiry, refuses anything else', () => {
     const fp = 'ab'.repeat(32);
     assert.deepEqual(parseSummary({ wildcard: '*.VPN.example.com', fingerprint: fp.toUpperCase(), not_after: '2027-02-01T00:00:00Z' }),
-      { wildcard: '*.vpn.example.com', zone: 'vpn.example.com', fingerprint: fp, notAfter: '2027-02-01T00:00:00.000Z' });
+      { wildcard: '*.vpn.example.com', zone: 'vpn.example.com', serverHost: 'server.vpn.example.com', fingerprint: fp, notAfter: '2027-02-01T00:00:00.000Z' });
     assert.equal(parseSummary(undefined), null);
     assert.equal(parseSummary(null), null);
     assert.equal(parseSummary({ wildcard: 'vpn.example.com', fingerprint: fp }), null);
     assert.equal(parseSummary({ wildcard: '*.vpn.example.com', fingerprint: 'xyz' }), null);
     assert.equal(parseSummary({ wildcard: '*.bad_zone/../x', fingerprint: fp }), null);
+  });
+
+  it('the device area: *.geraete.<zone>, fetched at server_host', () => {
+    const fp = 'cd'.repeat(32);
+    assert.deepEqual(parseSummary({
+      wildcard: '*.geraete.vpn.example.com', zone: 'vpn.example.com', device_zone: 'geraete.vpn.example.com',
+      server_host: 'Server.vpn.example.com.', host: 'gw-home.geraete.vpn.example.com', fingerprint: fp, not_after: '2027-02-01T00:00:00Z',
+    }), { wildcard: '*.geraete.vpn.example.com', zone: 'geraete.vpn.example.com', serverHost: 'server.vpn.example.com', fingerprint: fp, notAfter: '2027-02-01T00:00:00.000Z' });
+    // without server_host (an older server): server.<zone of the wildcard> as before
+    assert.equal(parseSummary({ wildcard: '*.geraete.vpn.example.com', fingerprint: fp }).serverHost, 'server.geraete.vpn.example.com');
+    // a server_host that is not a full name makes the summary unusable
+    for (const bad of ['*.vpn.example.com', 'server vpn', '', 42, 'a/b.example.com']) {
+      assert.equal(parseSummary({ wildcard: '*.geraete.vpn.example.com', fingerprint: fp, server_host: bad }), null, String(bad));
+    }
   });
 });
 
@@ -91,7 +105,8 @@ describe('vpn cert: manager', () => {
     mgr.apply(m.summary, { serverIp: '10.8.0.1' });
     await until(() => mgr.state === 'ok');
     assert.equal(calls.length, 1);
-    assert.deepEqual({ serverIp: calls[0].serverIp, zone: calls[0].zone, localAddress: calls[0].localAddress }, { serverIp: '10.8.0.1', zone: 'vpn.example.com', localAddress: '10.8.0.5' });
+    assert.deepEqual({ serverIp: calls[0].serverIp, zone: calls[0].zone, serverHost: calls[0].serverHost, localAddress: calls[0].localAddress },
+      { serverIp: '10.8.0.1', zone: 'vpn.example.com', serverHost: 'server.vpn.example.com', localAddress: '10.8.0.5' });
     assert.equal(fs.readFileSync(path.join(dir, KEY_FILE), 'utf8'), m.key);
     assert.equal(fs.readFileSync(path.join(dir, CERT_FILE), 'utf8'), m.cert);
     assert.equal(fs.statSync(dir).mode & 0o777, 0o700);

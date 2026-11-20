@@ -47,7 +47,7 @@ describe('integration: vpn cert against a fake server', () => {
       if (!srv.shared) return send(404, { ok: false, error: 'not_shared' });
       if (req.socket.remoteAddress.replace(/^::ffff:/, '') !== srv.allowedIp) return send(403, { ok: false, error: 'not_from_vpn' });
       const c = srv.current;
-      return send(200, { ok: true, wildcard: WILDCARD, zone: ZONE, cert_pem: c.cert, key_pem: c.key, not_after: c.notAfter, fingerprint: c.sha256 });
+      return send(200, { ok: true, wildcard: srv.wildcard || WILDCARD, zone: ZONE, cert_pem: c.cert, key_pem: c.key, not_after: c.notAfter, fingerprint: c.sha256 });
     });
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
     port = server.address().port;
@@ -121,5 +121,36 @@ describe('integration: vpn cert against a fake server', () => {
     mgr.stop();
 
     assert.ok(!logs.join('\n').includes('PRIVATE KEY'), 'the key never reaches the log');
+  });
+
+  it('the device area: *.geraete.<zone> is fetched at server_host (server.<zone>), not server.geraete.<zone>', async () => {
+    const DEVICES = `*.geraete.${ZONE}`;
+    const dev = makeSelfSigned({ commonName: DEVICES, days: 90, altNames: [{ dns: DEVICES }] });
+    const before = { current: srv.current, shared: srv.shared, allowedIp: srv.allowedIp, wildcard: srv.wildcard };
+    srv.current = { ...dev, notAfter: new Date(Date.now() + 90 * 86_400_000).toISOString() };
+    srv.wildcard = DEVICES;
+    srv.shared = true;
+    srv.allowedIp = '127.0.0.1';
+    const mgr = new VpnCertManager({ dir, apiToken: TOKEN, tunnelIp: '127.0.0.1', port, ca: serverTls.cert, retryMinMs: 30, retryMaxMs: 60 });
+    try {
+      const n = seen.length;
+      mgr.apply({ wildcard: DEVICES, zone: ZONE, device_zone: `geraete.${ZONE}`, server_host: `server.${ZONE}`, host: `gw-home.geraete.${ZONE}`,
+        fingerprint: dev.sha256, not_after: srv.current.notAfter }, { serverIp: '127.0.0.1' });
+      await until(() => mgr.state === 'ok');
+      const req = seen[n];
+      assert.equal(req.sni, `server.${ZONE}`);
+      assert.equal(req.host, `server.${ZONE}`);
+      assert.equal(fs.readFileSync(path.join(dir, KEY_FILE), 'utf8'), dev.key);
+      assert.equal(mgr.status().wildcard, DEVICES);
+      // an old-style summary without server_host would ask server.geraete.<zone>: the server's certificate does not cover it
+      mgr.remove();
+      mgr.apply({ wildcard: DEVICES, fingerprint: dev.sha256, not_after: srv.current.notAfter }, { serverIp: '127.0.0.1' });
+      await until(() => mgr.state === 'error');
+      assert.equal(fs.existsSync(path.join(dir, KEY_FILE)), false);
+    } finally {
+      mgr.stop();
+      mgr.remove();
+      Object.assign(srv, before);
+    }
   });
 });
