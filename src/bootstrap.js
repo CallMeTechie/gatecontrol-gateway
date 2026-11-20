@@ -135,15 +135,24 @@ async function bootstrap(opts = {}) {
   // Zertifikat der VPN-Namen (docs/vpn-cert.md): nur, wenn der Server es diesem
   // Gateway weitergibt (`features.vpn_cert`); Abruf über den Tunnel.
   let vpnStatus = null; // Statusseite im VPN (unten)
+  // MQTT-TLS mit dem Gerätezertifikat (docs/vpn-cert.md „MQTT mit dem Gerätezertifikat“): nur der
+  // Broker, dessen Dateien dieser Container schreibt (neue Compose-Datei); Standard aus (features.mqtt_tls.vpn_cert)
+  const brokerMqtt = edgeLink.bridge && edgeLink.bridge.mqtt && typeof edgeLink.bridge.mqtt.attachVpnCert === 'function' ? edgeLink.bridge.mqtt : null;
   const vpnCert = new VpnCertManager({
     dir: path.join(config.stateDir, 'vpn-cert'),
     apiToken: config.apiToken,
     tunnelIp: config.tunnelIp,
     serverIp: HUB_TUNNEL_IP,
     logger,
-    // neues/entferntes Zertifikat → Statusseite im VPN neu ausrichten
-    onChange: () => { if (vpnStatus) vpnStatus.refresh(); },
+    // neues/entferntes Zertifikat → Statusseite im VPN und MQTT-TLS neu ausrichten
+    onChange: () => {
+      if (vpnStatus) vpnStatus.refresh();
+      try { if (brokerMqtt) brokerMqtt.refresh(); } catch (err) { logger.warn({ err: err.message }, 'edge: MQTT TLS not refreshed'); }
+    },
   });
+  try {
+    if (brokerMqtt) brokerMqtt.attachVpnCert({ vpnCert, tunnelIp: config.tunnelIp, portTaken: (port) => tcpMgr.listListenerPorts().includes(port) });
+  } catch (err) { logger.warn({ err: err.message }, 'edge: device certificate not attached to MQTT'); }
   // Statusseite zusätzlich per HTTPS aus dem VPN (docs/setup-page.md): nur mit
   // Statusseite (nicht mit GC_SETUP_PAGE=off), Standard aus (features.setup_page.vpn_https)
   vpnStatus = typeof hooks.snapshotForVpn === 'function' ? createVpnStatusServer({
@@ -166,6 +175,7 @@ async function bootstrap(opts = {}) {
       vpnCert.apply(f.vpn_cert, { serverIp: f.internal_dns && f.internal_dns.server });
     } catch (err) { logger.warn({ err: err.message }, 'vpn cert: apply failed'); }
     try { if (vpnStatus) vpnStatus.apply(cfg.features && cfg.features.setup_page); } catch (err) { logger.warn({ err: err.message }, 'status page over the VPN: apply failed'); }
+    try { if (brokerMqtt) brokerMqtt.applyVpnCert(cfg.features && cfg.features.mqtt_tls); } catch (err) { logger.warn({ err: err.message }, 'edge: MQTT TLS with the device certificate: apply failed'); }
     try { hooks.onConfig?.(cfg); } catch (err) { logger.warn({ err: err.message }, 'setup page: config not applied'); }
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
@@ -308,6 +318,13 @@ async function bootstrap(opts = {}) {
         health.telemetry.vpn_cert = vpnCert.telemetry();
         // vpn-cert-devices: holt bei vpn_cert.server_host, nimmt das Wildcard des Geräte-Bereichs (*.geraete.<zone>)
         if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('vpn-cert', 'vpn-cert-devices');
+      } catch (_e) { /* best-effort */ }
+      // MQTT-TLS mit dem Gerätezertifikat: { enabled, state, host, tunnel } – nur, wo dieser Container den Broker schreibt
+      try {
+        if (brokerMqtt && brokerMqtt.vpnCertSupported()) {
+          health.telemetry.mqtt_tls = { vpn_cert: brokerMqtt.vpnTelemetry() };
+          if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('mqtt-vpn-cert');
+        }
       } catch (_e) { /* best-effort */ }
       // Statusseite im Heimnetz (docs/setup-page.md): an/aus und Zustand
       try {

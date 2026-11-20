@@ -9,10 +9,15 @@
 //   reload           Zähler – ändert er sich, schickt der Wächter im mqtt-Container SIGHUP
 //   enabled          vorhanden = Broker soll laufen
 //   tls/server.crt   nur mit TLS (state.mqtt.tls): das selbst erzeugte Zertifikat des
-//   tls/server.key   Gateways (manager.js, src/cache/selfsigned.js) – Mosquitto liest
-//                    beide direkt aus dieser Ablage (certfile/keyfile zeigen hierher)
+//   tls/server.key   Gateways (manager.js, src/cache/selfsigned.js) oder – Schalter
+//                    features.mqtt_tls.vpn_cert – das Gerätezertifikat (*.geraete.<zone>,
+//                    src/vpncert/vpnCert.js). Mosquitto liest beide direkt aus dieser
+//                    Ablage (certfile/keyfile zeigen hierher)
 // Der Wächter im mqtt-Container startet Mosquitto neu, wenn sich mosquitto.conf
-// ändert (Listener lassen sich per SIGHUP nicht ändern), sonst SIGHUP.
+// ändert (Listener lassen sich per SIGHUP nicht ändern), sonst SIGHUP. Ein neues
+// Zertifikat unter denselben Pfaden (Erneuerung des Gerätezertifikats) ändert nur
+// `reload`: Mosquitto liest certfile/keyfile bei SIGHUP neu, bestehende
+// Verbindungen bleiben.
 //
 // Neue Compose-Datei (Edge-Container ohne Netz): diese Dateien schreibt der
 // Gateway-Container nach /gc-mqtt-conf (tmpfs, gid 61001) – der Edge-Container
@@ -70,9 +75,16 @@ function buildConf({ dir, listenAddrs, tls }) {
     lines.push(`listener ${PORT} ${ip}`);
   }
   if (tls && tls.certfile && tls.keyfile) {
-    // der Fingerabdruck steht in der Datei, damit ein neues Zertifikat sie ändert → der Wächter startet Mosquitto neu
-    if (tls.sha256) lines.push('', `# TLS: Zertifikat des Gateways, SHA-256 ${tls.sha256}`);
-    for (const ip of listenAddrs) {
+    if (tls.source === 'vpn-cert') {
+      // Gerätezertifikat: wechselt alle 60–90 Tage – kein Fingerabdruck hier, die Erneuerung geht per SIGHUP
+      lines.push('', tls.wildcard ? `# TLS: Gerätezertifikat ${tls.wildcard} – Erneuerung per SIGHUP` : '# TLS: Gerätezertifikat – Erneuerung per SIGHUP');
+    } else if (tls.sha256) {
+      // der Fingerabdruck steht in der Datei, damit ein neues Zertifikat sie ändert → der Wächter startet Mosquitto neu
+      lines.push('', `# TLS: Zertifikat des Gateways, SHA-256 ${tls.sha256}`);
+    }
+    // zusätzliche Adressen nur für TLS (Gerätezertifikat: die Tunnel-Adresse, Name mqtt-<gateway>.<Bereich>)
+    const tlsAddrs = [...new Set([...listenAddrs, ...(tls.extraAddrs || [])])];
+    for (const ip of tlsAddrs) {
       if (!net.isIPv4(ip)) continue;
       lines.push(`listener ${TLS_PORT} ${ip}`, `certfile ${tls.certfile}`, `keyfile ${tls.keyfile}`);
     }
@@ -138,27 +150,37 @@ class BrokerFiles {
   }
 
   /**
-   * Alles schreiben; liefert { confChanged, authChanged, tls }.
-   * `cert` ({ cert, key, sha256 }, PEM): das Zertifikat des Gateways für den TLS-Listener –
-   * zuerst abgelegt, dann erst die mosquitto.conf, die darauf zeigt.
+   * Alles schreiben; liefert { confChanged, authChanged, tlsChanged, tls }.
+   * `cert` ({ cert, key, sha256, source?, wildcard? }, PEM): das Zertifikat für den TLS-Listener –
+   * zuerst abgelegt, dann erst die mosquitto.conf, die darauf zeigt. `source` 'vpn-cert': das
+   * Gerätezertifikat (eine Erneuerung ändert nur die Dateien → `reload`, SIGHUP).
+   * `tlsExtraAddrs`: Adressen nur für Port 8883 (die Tunnel-Adresse beim Gerätezertifikat).
    */
-  write({ accounts, internalHash, internalTopics, listenAddrs, tls, cert = null }) {
+  write({ accounts, internalHash, internalTopics, listenAddrs, tls, cert = null, tlsExtraAddrs = [] }) {
     // data/ legt im neuen Weg der Wächter im eigenen Volume an
     if (this.brokerDir === this.dir) fs.mkdirSync(path.join(this.dir, 'data'), { recursive: true, mode: 0o700 });
-    if (tls && cert) this.writeTls(cert);
+    let tlsChanged = false;
+    if (tls && cert) tlsChanged = this.writeTls(cert);
     else if (!tls) this.removeTls();
     const found = tls ? this.tlsFiles() : null;
-    const tlsFiles = found ? { ...found, sha256: cert ? cert.sha256 : null } : null;
+    const tlsFiles = found ? {
+      ...found, sha256: cert ? cert.sha256 : null, source: cert && cert.source === 'vpn-cert' ? 'vpn-cert' : 'self',
+      wildcard: cert && cert.source === 'vpn-cert' ? cert.wildcard || null : null,
+      extraAddrs: cert && cert.source === 'vpn-cert' ? tlsExtraAddrs : [],
+    } : null;
     const confChanged = writeIfChanged(path.join(this.dir, 'mosquitto.conf'), buildConf({ dir: this.brokerDir, listenAddrs, tls: tlsFiles }), this.fileMode);
     const a = writeIfChanged(path.join(this.dir, 'passwd'), buildPasswd(accounts, internalHash), this.fileMode);
     const b = writeIfChanged(path.join(this.dir, 'acl'), buildAcl(accounts, internalTopics), this.fileMode);
-    if (a || b) writeIfChanged(path.join(this.dir, 'reload'), `${Date.now()}-${++this.reloadSeq}\n`, 0o644);
+    // neues Zertifikat unter denselben Pfaden: SIGHUP reicht (Mosquitto liest certfile/keyfile neu)
+    if (a || b || tlsChanged) writeIfChanged(path.join(this.dir, 'reload'), `${Date.now()}-${++this.reloadSeq}\n`, 0o644);
     writeIfChanged(path.join(this.dir, 'enabled'), '1\n', 0o644);
-    return { confChanged, authChanged: a || b, tls: tls ? (tlsFiles ? 'on' : 'missing_cert') : 'off' };
+    return { confChanged, authChanged: a || b, tlsChanged, tls: tls ? (tlsFiles ? 'on' : 'missing_cert') : 'off' };
   }
 
+  /** Broker aus: auch kein Schlüssel bleibt in der Ablage liegen (beim Einschalten wieder geschrieben). */
   disable() {
     try { fs.rmSync(path.join(this.dir, 'enabled'), { force: true }); } catch { /* weg */ }
+    this.removeTls();
   }
 }
 
