@@ -34,7 +34,10 @@ jobs:
   rpi-image-config:
     # Schneller Struktur-Test des Raspberry-Pi-Images (kein Image-Bau; der
     # läuft im Release bzw. per Hand über rpi-image.yml).
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (ubuntu-latest seit Nov. 2026): systemd-analyze vermisst dracut-Units
+    # des Runners, mosquitto öffnet seine Konfiguration unter /tmp nicht. Bis die
+    # Prüfungen dort laufen, fest auf 24.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -74,7 +77,10 @@ jobs:
     # MQTT-Broker mit TLS (docs/edge.md „MQTT“): ein echter Mosquitto als Benutzer
     # 61001 mit den Rechten der Compose-Datei – Port 8883 mit dem selbst erzeugten
     # Zertifikat des Gateways (Fingerabdruck aus dem Status), Port 1883 daneben.
-    runs-on: ubuntu-latest
+    # ubuntu-26.04 (ubuntu-latest seit Nov. 2026): systemd-analyze vermisst dracut-Units
+    # des Runners, mosquitto öffnet seine Konfiguration unter /tmp nicht. Bis die
+    # Prüfungen dort laufen, fest auf 24.04.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
