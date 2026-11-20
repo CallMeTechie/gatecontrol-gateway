@@ -117,12 +117,95 @@ Code verbinden – auch mit dem eines fremden GateControl. Deshalb: Gateway
 starten und gleich einrichten, oder mit `GC_SETUP_PAGE=off` beim Weg über die
 Datei bleiben.
 
+## Aus dem VPN per HTTPS
+
+Zusätzlich lässt sich die **Statusseite** (nicht die Einrichtung) aus dem VPN
+öffnen, unter dem Namen des Gateways in dem Bereich, für den das
+weitergegebene Wildcard-Zertifikat gilt:
+
+```
+https://<Name des Gateways>.<Bereich>:8643     z. B. https://gw-keller.geraete.vpn.example.com:8643
+```
+
+Der Bereich ist nicht fest verdrahtet. Er kommt aus dem Namen des Wildcards in
+`features.vpn_cert.wildcard`: `*.geraete.vpn.example.com` ergibt
+`geraete.vpn.example.com`. Weitergegeben wird das Geräte-Wildcard
+(`*.<label>.<zone>`, Label in GateControl einstellbar, Standard `geraete`),
+nicht das Wildcard der Zone selbst.
+
+**Standard aus.** Eingeschaltet wird sie in GateControl beim Gateway
+(„Statusseite im VPN (HTTPS)“). Das Gateway bekommt dann im Config-Pull
+`features.setup_page: { status, vpn_https: true, vpn_name }`: `vpn_name` ist
+der Name des Gateways unter „Namen im VPN“ (ein DNS-Label). GateControl löst
+`<Name>.<Bereich>` im VPN auf die Tunnel-Adresse des Gateways auf.
+
+Der Port ist nur offen, wenn alles zusammenkommt:
+
+| Bedingung | sonst (`telemetry.setup_page.vpn_https.state`) |
+|---|---|
+| eingeschaltet | `off` |
+| Name gesetzt (ein DNS-Label) | `no_name` |
+| gültiges weitergegebenes Wildcard-Zertifikat liegt vor ([vpn-cert.md](vpn-cert.md): Weitergabe an dieses Gateway eingeschaltet) | `no_cert` |
+| Port frei (z. B. keine TCP-Route auf 8643 an der Tunnel-Adresse) | `port_in_use`, neuer Versuch jede Minute |
+
+Läuft sie, ist der Zustand `listening`. Ein erneuertes Zertifikat nimmt die
+Seite ohne Neustart des Ports. Fehlt es oder ist es abgelaufen, wird der Port
+geschlossen.
+
+**Anmeldung nur über GateControl.** Das Gateway kennt keine eigenen Konten
+oder Passwörter. In GateControl öffnet ein Admin die Seite mit „Im VPN öffnen“.
+Dafür gilt die Anmeldung am Server, mit 2FA, wenn sie eingerichtet ist. Der
+Server
+
+1. erzeugt ein zufälliges Einmal-Ticket (32 Byte),
+2. legt über die Management-API (Tunnel, Gateway-Token) **nur dessen SHA-256**
+   ab: `POST /api/status-page/ticket { ticket_sha256, ttl_s }`, Antwort
+   `{ ok, host, port, expires_in_s }` bzw. `409 { error: not_enabled |
+   no_name | no_cert | port_in_use | … }`. Das Ticket gilt höchstens 120 s
+   (Standard 60 s), es liegen höchstens 8 offen.
+3. schickt den Browser nach `https://<host>:<port>/login?t=<ticket>`.
+
+Das Gateway löst das Ticket genau einmal ein und setzt ein Sitzungs-Cookie
+`__Host-gc_status` (`Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/`).
+Die Sitzung endet nach **30 Minuten** ohne Abruf, spätestens nach **8 Stunden**,
+mit „Abmelden“ oder wenn die Seite abgeschaltet wird. Die offene Seite fragt
+alle 5 s nach und hält die Sitzung damit wach, bis die 8 Stunden um sind.
+Sitzungen und Tickets liegen nur im Speicher, gehasht, höchstens 32 Sitzungen.
+Nach einem Neustart des Gateways meldet man sich neu an. Nach einer Antwort auf
+`/login` lädt die Seite per `meta refresh` neu und nicht per Redirect: Bei einer
+Weiterleitung innerhalb einer Navigation von außen schickte der Browser das
+`SameSite=Strict`-Cookie nicht mit.
+
+**Schutz:**
+
+- Port nur an der **Tunnel-Adresse** (`GC_TUNNEL_IP`). Angenommen werden nur
+  Absender aus dem VPN (`WG_ADDRESS`/`WG_ALLOWED_IPS`, ohne `0.0.0.0/0`), nicht
+  die eigene Tunnel-Adresse. Alles andere wird vor dem TLS-Handshake
+  geschlossen.
+- SNI **und** `Host` genau `<name>.<Bereich>`, sonst `421`. Proxy-Kopfzeilen →
+  `403`.
+- Ohne Sitzung gibt es nur einen Hinweis (`401`), auch nicht die Dateien der
+  Seite. Höchstens 20 fehlgeschlagene Anmeldungen je Minute (dann `429`).
+- **Nur lesen:** kein `/api/pair`, die Selbstprüfungen werden nicht
+  angestoßen, `/api/state` ohne CSRF-Token und ohne Einrichtungsteil
+  (`readOnly: true`, `via: "vpn"`). Ist das Gateway im Zustand A/F, sagt die
+  Seite nur, dass das Einrichten im Heimnetz geht.
+- Kopfzeilen wie im Heimnetz, dazu `Strict-Transport-Security:
+  max-age=31536000` (ohne Subdomains).
+- Ticket, Cookie und Schlüssel stehen nie im Log oder Heartbeat. Telemetrie:
+  `telemetry.setup_page.vpn_https = { enabled, state, host, port, sessions }`,
+  Capability `setup-page-vpn`.
+
+Die Seite im Heimnetz (Port 8642) ändert sich nicht. Sie nimmt weiter nichts
+aus dem Tunnel an. Mit `GC_SETUP_PAGE=off` gibt es auch die Seite im VPN nicht.
+
 ## Einstellungen
 
 | Variable (Dienst `gateway`) | Standard | Bedeutung |
 |---|---|---|
 | `GC_SETUP_PORT` | `8642` | Port der Seite |
 | `GC_SETUP_ALT_PORT` | – | zweiter Port (Raspberry-Pi-Image: `80`) |
+| `GC_SETUP_VPN_PORT` | `8643` | Port der Statusseite aus dem VPN (HTTPS, nur Tunnel-Adresse), siehe oben |
 | `GC_SETUP_ALLOWED_HOSTS` | – | weitere erlaubte Namen in der `Host`-Zeile, mit Komma getrennt (z. B. `nas.fritz.box`) |
 | `GC_SETUP_PAGE` | an | `off`: keine Seite; ohne `gateway.env` beendet sich der Container wie früher |
 
@@ -159,6 +242,7 @@ Seite antwortet (`/healthz`).
 `src/setup/`: `net.js` (wer darf, Eingaben), `checks.js` (Selbstprüfungen),
 `pairing.js` (Einlösen, Schreiben), `controller.js` (Zustände A–F,
 Versuchszähler, Erkennung „Zugang ungültig“), `server.js` (HTTP),
-`ui/` (Seite). `src/index.js` startet die Seite vor allem anderen und wartet
+`vpnHttps.js` (HTTPS aus dem VPN, Ticket und Sitzung), `ui/` (Seite);
+`src/api/routes/statusPage.js` (Ticket über die Management-API). `src/index.js` startet die Seite vor allem anderen und wartet
 ohne `gateway.env` auf den Code; `bootstrap()` meldet Tunnel, Heartbeat und
-Config-Pull über `hooks` zurück. Tests: `tests/setup_*.test.js`.
+Config-Pull über `hooks` zurück. Tests: `tests/setup_*.test.js` (aus dem VPN: `tests/setup_vpn_https.test.js`).

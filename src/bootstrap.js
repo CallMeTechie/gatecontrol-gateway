@@ -39,6 +39,8 @@ const { configHash } = require('./features/config');
 const { createFeaturesRouter } = require('./api/routes/features');
 const { createCamerasRouter } = require('./api/routes/cameras');
 const { VpnCertManager } = require('./vpncert/vpnCert');
+const { createVpnStatusServer } = require('./setup/vpnHttps');
+const { createStatusPageRouter } = require('./api/routes/statusPage');
 const path = require('node:path');
 
 const DEFAULT_ENV_PATH = process.env.GATEWAY_ENV_PATH || '/config/gateway.env';
@@ -61,6 +63,12 @@ function makeHostGuard(gwIp) {
  *   (index.js, after the setup page wrote gateway.env); `hooks`: feedback for
  *   the setup/status page (src/setup/controller.js) — all optional.
  */
+/** Port der Statusseite im VPN (GC_SETUP_VPN_PORT, Standard 8643). */
+function vpnStatusPort() {
+  const n = Number(process.env.GC_SETUP_VPN_PORT);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 8643;
+}
+
 async function bootstrap(opts = {}) {
   const hooks = opts.hooks || {};
   const config = opts.config || loadConfig(DEFAULT_ENV_PATH);
@@ -126,13 +134,27 @@ async function bootstrap(opts = {}) {
 
   // Zertifikat der VPN-Namen (docs/vpn-cert.md): nur, wenn der Server es diesem
   // Gateway weitergibt (`features.vpn_cert`); Abruf über den Tunnel.
+  let vpnStatus = null; // Statusseite im VPN (unten)
   const vpnCert = new VpnCertManager({
     dir: path.join(config.stateDir, 'vpn-cert'),
     apiToken: config.apiToken,
     tunnelIp: config.tunnelIp,
     serverIp: HUB_TUNNEL_IP,
     logger,
+    // neues/entferntes Zertifikat → Statusseite im VPN neu ausrichten
+    onChange: () => { if (vpnStatus) vpnStatus.refresh(); },
   });
+  // Statusseite zusätzlich per HTTPS aus dem VPN (docs/setup-page.md): nur mit
+  // Statusseite (nicht mit GC_SETUP_PAGE=off), Standard aus (features.setup_page.vpn_https)
+  vpnStatus = typeof hooks.snapshotForVpn === 'function' ? createVpnStatusServer({
+    snapshot: () => hooks.snapshotForVpn(),
+    vpnCert,
+    tunnelIp: config.tunnelIp,
+    wgAddress: config.wg && config.wg.address,
+    wgAllowedIps: config.wg && config.wg.allowedIps,
+    port: vpnStatusPort(),
+    logger,
+  }) : null;
   try { hooks.attachVpnCert?.(() => vpnCert.status()); } catch (err) { logger.warn({ err: err.message }, 'setup page: vpn cert status not attached'); }
 
   // 3. On config change → apply
@@ -143,6 +165,7 @@ async function bootstrap(opts = {}) {
       const f = cfg.features || {};
       vpnCert.apply(f.vpn_cert, { serverIp: f.internal_dns && f.internal_dns.server });
     } catch (err) { logger.warn({ err: err.message }, 'vpn cert: apply failed'); }
+    try { if (vpnStatus) vpnStatus.apply(cfg.features && cfg.features.setup_page); } catch (err) { logger.warn({ err: err.message }, 'status page over the VPN: apply failed'); }
     try { hooks.onConfig?.(cfg); } catch (err) { logger.warn({ err: err.message }, 'setup page: config not applied'); }
     router.setRoutes(cfg.routes);
     await tcpMgr.setRoutes(cfg.l4_routes);
@@ -221,6 +244,7 @@ async function bootstrap(opts = {}) {
         mergeRouter.use(createLanScanRouter({ scanMgr, defaultGatewayIp }));
         mergeRouter.use(createFeaturesRouter({ featureMgr }));
         mergeRouter.use(createCamerasRouter({ featureMgr }));
+        mergeRouter.use(createStatusPageRouter({ getVpnStatus: () => vpnStatus }));
         return mergeRouter;
       },
     },
@@ -288,6 +312,11 @@ async function bootstrap(opts = {}) {
       try {
         if (hooks.telemetry) {
           health.telemetry.setup_page = hooks.telemetry();
+          // HTTPS aus dem VPN: { enabled, state, host, port, sessions } – nie Ticket oder Cookie
+          if (vpnStatus) {
+            health.telemetry.setup_page.vpn_https = vpnStatus.telemetry();
+            if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('setup-page-vpn');
+          }
           // Capability nur, wenn die Seite wirklich läuft (GC_SETUP_PAGE=off: nicht schaltbar)
           if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('setup-page');
         }
@@ -297,7 +326,7 @@ async function bootstrap(opts = {}) {
     },
   });
 
-  return { config, poller, httpProxyServer, apiServer, tcpMgr, udpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr, vpnCert };
+  return { config, poller, httpProxyServer, apiServer, tcpMgr, udpMgr, egressMgr, nearMgr, hb, edgeLink, featureMgr, vpnCert, vpnStatus };
 }
 
 module.exports = { bootstrap };

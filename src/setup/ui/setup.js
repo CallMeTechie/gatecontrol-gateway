@@ -80,6 +80,10 @@
       offline: 'Das Gateway antwortet gerade nicht. Die Seite versucht es weiter.',
       ago_now: 'gerade eben', ago: 'vor {dur}',
       sec_1: '1 Sekunde', sec_n: '{n} Sekunden', min_1: '1 Minute', min_n: '{n} Minuten', h_1: '1 Stunde', h_n: '{n} Stunden', d_1: '1 Tag', d_n: '{n} Tagen',
+      vpn_note: 'Aus dem VPN, angemeldet über GateControl. Die Sitzung endet 30 Minuten nach dem letzten Abruf, spätestens nach 8 Stunden.',
+      logout: 'Abmelden', logged_out: 'Abgemeldet. Neu öffnen über GateControl › Gateway › Statusseite.',
+      ro_title: 'Einrichten nur im Heimnetz',
+      ro_text: 'Verbinden und einen neuen Code eingeben geht nur über die Seite im Heimnetz (Adresse des Geräts, Port 8642), nicht aus dem VPN.',
       lang_label: 'Sprache'
     },
     en: {
@@ -156,6 +160,10 @@
       offline: 'The gateway does not answer right now. The page keeps trying.',
       ago_now: 'just now', ago: '{dur} ago',
       sec_1: '1 second', sec_n: '{n} seconds', min_1: '1 minute', min_n: '{n} minutes', h_1: '1 hour', h_n: '{n} hours', d_1: '1 day', d_n: '{n} days',
+      vpn_note: 'From the VPN, signed in through GateControl. The session ends 30 minutes after the last request, after 8 hours at the latest.',
+      logout: 'Sign out', logged_out: 'Signed out. Open it again from GateControl › gateway › status page.',
+      ro_title: 'Setup only in the home network',
+      ro_text: 'Connecting and entering a new code only works on the page in the home network (device address, port 8642), not from the VPN.',
       lang_label: 'Language'
     }
   };
@@ -167,6 +175,7 @@
 
   var state = null;      // letzte Antwort von /api/state
   var offline = false;
+  var loggedOut = false;  // aus dem VPN abgemeldet: nicht weiter fragen
   var form = { server: '', code: '' };
   var error = null;      // { code, server, retryAfterS }
   var sending = false;
@@ -399,6 +408,27 @@
     }
     return [top(state.name || state.device, 'busy', t('pill_invalid')), card, foot([t('inv_foot')].concat(baseFoot()))];
   }
+  // Aus dem VPN (docs/setup-page.md „Aus dem VPN per HTTPS“): nur lesen, nie verbinden
+  function viewReadOnly() {
+    var card = h('div', { class: 'card' }, [h('h2', { text: t('ro_title') }), h('p', { text: t('ro_text') })]);
+    var pill = state.mode === 'invalid' ? t('pill_invalid') : t('pill_setup');
+    return [top(state.name || state.device, 'busy', pill), card, vpnNote(), foot(baseFoot())];
+  }
+  function logout() {
+    fetch('api/logout', { method: 'POST', credentials: 'same-origin', cache: 'no-store' }).catch(function () { return null; }).then(function () {
+      clearTimeout(timer);
+      loggedOut = true;
+      app.textContent = '';
+      app.appendChild(top('', '', ''));
+      app.appendChild(h('div', { class: 'card' }, [h('p', { text: t('logged_out') })]));
+    });
+  }
+  function vpnNote() {
+    if (!state || state.via !== 'vpn') return null;
+    var b = h('button', { class: 'btn ghost', type: 'button', id: 'btn-logout', text: t('logout') });
+    b.addEventListener('click', logout);
+    return h('div', { class: 'note help' }, [h('span', { text: t('vpn_note') }), h('div', { class: 'row' }, [b])]);
+  }
   function viewConnecting() {
     var st = state.steps || {};
     var items = [];
@@ -444,7 +474,7 @@
       kv,
       /^https?:\/\//.test(state.openUrl || '') ? h('div', { class: 'row' }, [h('a', { class: 'btn', href: state.openUrl, target: '_blank', rel: 'noopener noreferrer' }, [t('open_gc'), icon('i-ext')])]) : null
     ]);
-    return [top(state.name || state.device, 'ok', t('pill_connected')), card, h('div', { class: 'note help' }, [h('span', { text: t('ok_note') })]), foot([])];
+    return [top(state.name || state.device, 'ok', t('pill_connected')), card, h('div', { class: 'note help' }, [h('span', { text: t('ok_note') })]), vpnNote(), foot([])];
   }
 
   function render() {
@@ -456,7 +486,7 @@
     }
     var active = document.activeElement;
     var keep = active && active.id ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null;
-    var view = state.mode === 'setup' ? viewSetup() : state.mode === 'invalid' ? viewInvalid() : state.mode === 'connecting' ? viewConnecting() : viewConnected();
+    var view = state.readOnly && (state.mode === 'setup' || state.mode === 'invalid') ? viewReadOnly() : state.mode === 'setup' ? viewSetup() : state.mode === 'invalid' ? viewInvalid() : state.mode === 'connecting' ? viewConnecting() : viewConnected();
     app.textContent = '';
     view.forEach(function (n) { if (n) app.appendChild(n); });
     if (keep) {
@@ -469,11 +499,18 @@
   var lastKey = '';
   function poll(recheck) {
     clearTimeout(timer);
+    if (loggedOut) return Promise.resolve();
     // im Hintergrund nicht weiterfragen (jede Abfrage kann die Prüfungen anstoßen)
     if (document.hidden && state && !recheck) { timer = setTimeout(poll, 10000); return Promise.resolve(); }
     return fetch('api/state' + (recheck ? '?recheck=1' : ''), { credentials: 'same-origin', cache: 'no-store' })
-      .then(function (r) { if (!r.ok) throw new Error('http'); return r.json(); })
+      .then(function (r) {
+        // aus dem VPN: Sitzung abgelaufen → neu laden zeigt den Hinweis zur Anmeldung
+        if (r.status === 401) { loggedOut = true; window.location.reload(); throw new Error('login'); }
+        if (!r.ok) throw new Error('http');
+        return r.json();
+      })
       .then(function (j) {
+        if (loggedOut) return;
         var wasMode = state && state.mode;
         state = j; offline = false;
         if (wasMode && wasMode !== j.mode) { error = null; }
@@ -482,6 +519,7 @@
       })
       .catch(function () { if (!offline) { offline = true; lastKey = ''; render(); } })
       .then(function () {
+        if (loggedOut) return;
         var ms = state && state.mode === 'connecting' ? 2000 : state && state.mode === 'connected' ? 5000 : 10000;
         timer = setTimeout(poll, offline ? 3000 : ms);
       });
