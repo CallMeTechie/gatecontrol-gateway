@@ -15,8 +15,12 @@ async function tcpProbe(host, port, timeoutMs = 2000) {
 // The heartbeat body is capped at 16 kB on the server — the two lists below
 // name at most this many routes each (the counters stay exact).
 const MAX_L4_ENTRIES = 20;
+const MAX_UDP_STATUS = 10;
 
-async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dnsResolveFn, reachabilityFn, routes, l4RouteCount, l4Issues, l4Direct }) {
+async function runSelfCheck({
+  proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dnsResolveFn, reachabilityFn, routes, l4RouteCount, l4Issues, l4Direct,
+  udpRouteCount = 0, udpListenerCount = 0, udpIssues = [], udpDirect = [], udpStatus = [],
+}) {
   // Layer 1 — Process: probe the address each listener actually binds to.
   // The HTTP proxy, management API, and TCP listeners all bind to the WG
   // tunnel IP (config.tunnelIp), NOT 127.0.0.1 — so probing localhost
@@ -69,12 +73,18 @@ async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dn
     listen_port: d.listen_port,
     reachable: (await tcpProbe(probeIp, d.listen_port)).reachable,
   })));
-  const l4_routes_configured = l4RouteCount || 0;
-  const l4_listeners_present = tcp_listeners.length;
-  const l4_listeners_missing = Math.max(0, l4_routes_configured - l4_listeners_present - l4_listeners_direct.length);
+  // UDP routes (docs/udp.md) count with the TCP ones: a UDP listener that
+  // could not be bound is a missing listener too (same re-apply, same hint on
+  // the server — the server reads the protocol from the route). A UDP route
+  // served directly by its target service is not probed: a UDP service need
+  // not answer an empty datagram (reachable stays unknown).
+  const udp_direct = (udpDirect || []).map(d => ({ route_id: d.route_id, listen_port: d.listen_port, protocol: 'udp' }));
+  const l4_routes_configured = (l4RouteCount || 0) + (udpRouteCount || 0);
+  const l4_listeners_present = tcp_listeners.length + (udpListenerCount || 0);
+  const l4_listeners_missing = Math.max(0, l4_routes_configured - l4_listeners_present - l4_listeners_direct.length - udp_direct.length);
   // Which listeners are missing and why (port_in_use, permission_denied,
   // address_unavailable, error). New fields — an older server ignores them.
-  const l4_listener_issues = l4_listeners_missing > 0 ? (l4Issues || []).slice(0, MAX_L4_ENTRIES) : [];
+  const l4_listener_issues = l4_listeners_missing > 0 ? [...(l4Issues || []), ...(udpIssues || [])].slice(0, MAX_L4_ENTRIES) : [];
 
   return {
     http_proxy_healthy: proxyHealthy,
@@ -83,7 +93,11 @@ async function runSelfCheck({ proxyPort, apiPort, tcpPorts, bindIp, wgStatus, dn
     l4_routes_configured,
     l4_listeners_missing,
     l4_listener_issues,
-    l4_listeners_direct: l4_listeners_direct.slice(0, MAX_L4_ENTRIES),
+    l4_listeners_direct: [...l4_listeners_direct, ...udp_direct].slice(0, MAX_L4_ENTRIES),
+    // UDP listeners with their counters (sessions, datagrams/bytes both ways,
+    // drops at the session limit, ICMP unreachable, errors). New field; at
+    // most MAX_UDP_STATUS entries (heartbeat body cap on the server).
+    udp_listeners: (udpStatus || []).slice(0, MAX_UDP_STATUS),
     wg_handshake_age_s,
     dns_resolve_ok,
     route_reachability,

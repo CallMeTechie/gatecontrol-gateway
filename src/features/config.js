@@ -131,12 +131,20 @@ function stableJson(v) {
  * Config-Hash wie der Server ihn bildet (Vertrag, Änderung Server-Seite 1):
  * ohne `features` der Bibliotheks-Hash, sonst
  * 'sha256:' + sha256hex(libHash + '\n' + stableJson(features)).
+ * UDP-Routen (`udp_routes`, docs/udp.md) kennt das Schema der Bibliothek
+ * nicht; ist das Feld da, kommt es danach dazu:
+ * 'sha256:' + sha256hex(h + '\nudp_routes\n' + stableJson(udp_routes)).
  */
 function configHash(cfgBody, libComputeHash) {
-  const { features, ...rest } = cfgBody || {};
-  const libHash = libComputeHash(rest);
-  if (features === undefined) return libHash;
-  return 'sha256:' + crypto.createHash('sha256').update(libHash + '\n' + stableJson(features), 'utf8').digest('hex');
+  const { features, udp_routes: udpRoutes, ...rest } = cfgBody || {};
+  let h = libComputeHash(rest);
+  if (features !== undefined) {
+    h = 'sha256:' + crypto.createHash('sha256').update(h + '\n' + stableJson(features), 'utf8').digest('hex');
+  }
+  if (udpRoutes !== undefined) {
+    h = 'sha256:' + crypto.createHash('sha256').update(h + '\nudp_routes\n' + stableJson(udpRoutes), 'utf8').digest('hex');
+  }
+  return h;
 }
 
 module.exports = { normalizeFeatures, normalizeMac, stableJson, configHash, isUsableTarget, DEFAULT_TARGETS };
