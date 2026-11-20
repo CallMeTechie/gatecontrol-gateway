@@ -1,36 +1,49 @@
 # Zertifikat der VPN-Namen auf dem Gateway
 
-Gibt GateControl das Wildcard-Zertifikat der VPN-Zone (z. B.
-`*.vpn.example.com`) samt privatem Schlüssel an dieses Gateway weiter, holt das
-Gateway beides selbst ab und legt es im State-Verzeichnis ab. Dienste, die
-direkt auf dem Gateway-Rechner laufen, können damit unter einem Namen der Zone
-mit einem gültigen Zertifikat antworten.
+Gibt GateControl ein Wildcard-Zertifikat samt privatem Schlüssel an dieses
+Gateway weiter, holt das Gateway beides selbst ab und legt es im
+State-Verzeichnis ab. Dienste, die direkt auf dem Gateway-Rechner laufen,
+können damit mit einem gültigen Zertifikat antworten.
+
+Seit dem **Geräte-Bereich** gibt der Server nie das Wildcard der Zone
+(`*.vpn.example.com`, Portal, Verwaltung, Routen) weiter, sondern ein eigenes
+für den Geräte-Bereich, z. B. `*.geraete.vpn.example.com`. Das Gateway
+antwortet damit unter seinem Namen in diesem Bereich (`host`, z. B.
+`gw-home.geraete.vpn.example.com`, siehe [Statusseite](setup-page.md)). Ab
+Gateway 1.43.0 (Capability `vpn-cert-devices`); ältere Gateways fragen beim
+Abruf `server.<Bereich>` und scheitern daran.
 
 Auf dem Server ist das **standardmäßig aus** und nur für Admins schaltbar:
 Einstellungen › VPN & Netzwerk › Zertifikat für die Namen › „Zertifikat und
 Schlüssel an Geräte weitergeben“, dieses Gateway unter „Darf abholen“ anhaken
 (Server ab 1.308.0, Handbuch 2.12 „Zertifikat an Geräte weitergeben“).
 
-> **Risiko:** Der Schlüssel gilt für jeden Namen unter der Zone. Wer ihn vom
-> Gateway-Rechner liest, kann sich im VPN als Portal, Verwaltung oder jede
-> Route unter der Zone ausgeben. Den Ordner nur an Dienste geben, denen du
-> voll vertraust.
+> **Risiko:** Der Schlüssel gilt für jeden Namen unter dem weitergegebenen
+> Wildcard (beim Geräte-Bereich: jedes Gerät darin). Wer ihn vom
+> Gateway-Rechner liest, kann sich im VPN als jedes dieser Geräte ausgeben.
+> Den Ordner nur an Dienste geben, denen du voll vertraust.
 
 ## Ablauf
 
 1. **Bekanntgabe.** Nur ein erlaubtes Gateway bekommt im Config-Pull
    (`GET /api/v1/gateway/config`) das Feld
-   `features.vpn_cert: { wildcard, fingerprint, not_after }` – nie den
-   Schlüssel. `fingerprint` ist SHA-256 über das DER des Zertifikats (hex,
-   klein).
+   `features.vpn_cert: { wildcard, zone, device_zone, server_host, host,
+   fingerprint, not_after }` – nie den Schlüssel. `wildcard` ist das
+   weitergegebene (`*.geraete.vpn.example.com`), `server_host` der Name, unter
+   dem der Server den Abruf beantwortet (`server.vpn.example.com`), `host` der
+   eigene Name des Gateways im Bereich (oder `null`). `fingerprint` ist
+   SHA-256 über das DER des Zertifikats (hex, klein). Ein älterer Server schickt
+   nur `{ wildcard, fingerprint, not_after }`.
 2. **Abruf über den Tunnel.** Ist der Fingerabdruck neu oder anders als der
    des gespeicherten Zertifikats, fragt das Gateway
    `GET /api/v1/gateway/vpn-cert` mit seinem Gateway-Token
    (`GC_API_TOKEN`, wie der Config-Pull). Die Verbindung geht an die
    VPN-Adresse des Servers (`features.internal_dns.server`, sonst
    `GC_HUB_TUNNEL_IP`, Vorgabe `10.8.0.1`), Port 443, mit SNI und `Host`
-   `server.<zone>` – der Name der Verwaltung unter der Zone, den der Server
-   mit genau diesem Wildcard ausliefert. TLS wird voll geprüft (Kette und
+   `server_host` – der Name der Verwaltung unter der Zone, den der Server mit
+   seinem eigenen Wildcard ausliefert; fehlt das Feld (älterer Server),
+   `server.<Zone aus wildcard>`. Ein `server_host`, der kein voller Name ist,
+   macht die Bekanntgabe unbrauchbar (ignoriert). TLS wird voll geprüft (Kette und
    Name); als Quelle nimmt das Gateway seine Tunnel-Adresse
    (`GC_TUNNEL_IP`). Der Server gibt den Schlüssel nur an die VPN-Adresse des
    Gateways heraus (`403 not_from_vpn` sonst) und antwortet mit
@@ -38,8 +51,8 @@ Schlüssel an Geräte weitergeben“, dieses Gateway unter „Darf abholen“ an
 3. **Prüfung.** Verworfen wird, was nicht passt: Fingerabdruck des ersten
    Zertifikats der Kette ≠ `vpn_cert.fingerprint` (oder ≠ dem Feld
    `fingerprint` der Antwort) → `fingerprint_mismatch`; Schlüssel gehört nicht
-   zum Zertifikat → `key_mismatch`; `*.zone` fehlt in den Namen →
-   `wrong_name`; abgelaufen → `expired`.
+   zum Zertifikat → `key_mismatch`; `wildcard` aus der Bekanntgabe fehlt in
+   den Namen → `wrong_name`; abgelaufen → `expired`.
 4. **Ablage** (atomar: temporäre Datei im selben Ordner, `fsync`, `rename`):
 
    | Gateway-Container | Host (Compose-Vorlage) | Inhalt | Rechte |
@@ -80,9 +93,10 @@ Statusseite. Das Log nennt Fingerabdruck, Ablauf und Fehlercodes.
   `vpnCert: { state, wildcard, fingerprint, notAfter, fetchedAgoS, error, retryInS }`
   (`state`: `fetching` | `ok` | `error`) – weder Schlüssel noch Pfad.
 - **Heartbeat:** `telemetry.vpn_cert: { fingerprint, not_after }` des
-  gespeicherten Zertifikats (sonst `null`) und die Capability `vpn-cert`. Der
-  Server speichert den Heartbeat in `gateway_meta.last_health`; er wertet das
-  Feld bisher nicht aus (älterer Server: ignoriert).
+  gespeicherten Zertifikats (sonst `null`) und die Capabilities `vpn-cert` und
+  (ab 1.43.0) `vpn-cert-devices`. Der Server zeigt damit je Gateway „abgeholt“,
+  „veraltet“, „noch nicht abgeholt“ oder „Gateway zu alt“ (ohne
+  `vpn-cert-devices`).
 
 ## Nutzung
 

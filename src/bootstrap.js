@@ -306,7 +306,8 @@ async function bootstrap(opts = {}) {
       // Zertifikat der VPN-Namen: nur Fingerabdruck und Ablauf (null = keins gespeichert), nie der Schlüssel
       try {
         health.telemetry.vpn_cert = vpnCert.telemetry();
-        if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('vpn-cert');
+        // vpn-cert-devices: holt bei vpn_cert.server_host, nimmt das Wildcard des Geräte-Bereichs (*.geraete.<zone>)
+        if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('vpn-cert', 'vpn-cert-devices');
       } catch (_e) { /* best-effort */ }
       // Statusseite im Heimnetz (docs/setup-page.md): an/aus und Zustand
       try {
