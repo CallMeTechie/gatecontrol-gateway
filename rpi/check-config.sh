@@ -76,6 +76,13 @@ step "systemd-analyze verify"
 VROOT="$(mktemp -d)"
 mkdir -p "$VROOT/usr/lib/systemd"
 cp -a /usr/lib/systemd/system "$VROOT/usr/lib/systemd/"
+# Units, die als Verweis außerhalb von /usr/lib/systemd/system liegen (z. B. dracut ab
+# Ubuntu 26.04: ../../dracut/modules.d/…), zeigen unter --root ins Leere – das Ziel des
+# Hosts unter demselben Pfad mitkopieren, damit verify sie wie auf dem Host liest.
+while IFS= read -r -d '' l; do
+  src="$(readlink -f "${l#"$VROOT"}")" || continue
+  [ -f "$src" ] && cp -a --parents "$src" "$VROOT/"
+done < <(find "$VROOT/usr/lib/systemd/system" -xtype l -print0)
 cp -a "$R/." "$VROOT/"
 install -D -m 0755 deploy/update.sh "$VROOT/opt/gatecontrol-gateway/update.sh"
 [ -f "$VROOT/usr/lib/systemd/system/docker.service" ] || \
