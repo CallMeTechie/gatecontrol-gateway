@@ -3,7 +3,9 @@
 
 // Live-Test des MQTT-Brokers mit TLS gegen einen echten Mosquitto – als root
 // ausführen (CI-Job mqtt-tls, lokal: sudo node tests/live/mqtt-tls-live.js;
-// MOSQUITTO=/pfad/zu/mosquitto, sonst der aus dem PATH).
+// MOSQUITTO=/pfad/zu/mosquitto, sonst der aus dem PATH). Ab Ubuntu 26.04 beschränkt ein
+// AppArmor-Profil /usr/sbin/mosquitto auf /etc/mosquitto – die lokale Ergänzung für
+// /tmp/gc-mqtt-live-* steht im CI-Job (.github/workflows/test.yml).
 //
 // Nachgestellt wird die neue Compose-Datei (docs/edge.md „MQTT“):
 //   /gc-mqtt-conf  Ablage des Gateways, root:61001, 2750 – der MqttManager schreibt
