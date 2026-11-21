@@ -11,8 +11,10 @@
 //   tls/server.crt   nur mit TLS (state.mqtt.tls): das selbst erzeugte Zertifikat des
 //   tls/server.key   Gateways (manager.js, src/cache/selfsigned.js) oder – Schalter
 //                    features.mqtt_tls.vpn_cert – das Gerätezertifikat (*.geraete.<zone>,
-//                    src/vpncert/vpnCert.js). Mosquitto liest beide direkt aus dieser
-//                    Ablage (certfile/keyfile zeigen hierher)
+//                    src/vpncert/vpnCert.js). certfile/keyfile zeigen hierher; der
+//                    Wächter der aktuellen Compose-Datei kopiert tls/ und tls-self/
+//                    in sein tmpfs /run/gc-mqtt-tls (0600) und biegt die Pfade in seiner
+//                    Kopie der mosquitto.conf dorthin um, alte lesen direkt von hier
 //   tls-self/server.crt  nur mit Gerätezertifikat und Unterschalter
 //   tls-self/server.key  features.mqtt_tls.fingerprint_port: das selbst erzeugte Zertifikat
 //                    für den zweiten TLS-Listener (Port 8884, fester Fingerabdruck) –

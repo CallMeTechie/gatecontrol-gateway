@@ -9,8 +9,11 @@
 //   /gc-mqtt-conf  Ablage des Gateways, root:61001, 2750 – der MqttManager schreibt
 //                  mosquitto.conf/passwd/acl (0640) und tls/server.crt + server.key
 //   /gc-mqtt       Volume des Brokers, 61001 – der Wächter kopiert conf/passwd/acl (0600)
-//   Mosquitto      läuft als 61001:61001 und liest Zertifikat und Schlüssel
-//                  direkt aus der Ablage des Gateways (nur über die Gruppe)
+//   /run/gc-mqtt-tls  tmpfs des mqtt-Containers, 61001, 0700 – der Wächter kopiert tls/ und
+//                  tls-self/ (0600) und lässt certfile/keyfile in seiner Kopie der
+//                  mosquitto.conf dorthin zeigen
+//   Mosquitto      läuft als 61001:61001 und liest Zertifikat und Schlüssel nur aus /run/gc-mqtt-tls
+// Der Wächter ist der echte aus docker-compose.example.yml (put/take aus dem Dienst mqtt).
 // Geprüft:
 //   1. Port 8883 spricht TLS mit genau dem Zertifikat, dessen Fingerabdruck der Status meldet;
 //   2. ein Konto meldet sich über TLS an, ein falsches Passwort nicht;
@@ -23,6 +26,11 @@
 //      lauscht 8884 mit dem selbst erzeugten – derselbe Fingerabdruck wie vorher auf 8883, an
 //      LAN- und Tunnel-Adresse; eine Erneuerung auf 8883 (SIGHUP) lässt eine Verbindung auf
 //      8884 offen; Unterschalter aus → 8884 zu, tls-self/ entfernt.
+//   7. Rechte: die Kopien in /run/gc-mqtt-tls sind 0600 und gehören 61001 (Ordner 0700),
+//      Mosquitto liest nur sie (ein SIGHUP ohne Kopie behält das alte Zertifikat), TLS bzw.
+//      Unterschalter aus → die Kopie ist weg.
+//   8. Alte Compose-Datei (Wächter ohne tmpfs): wie bisher – Mosquitto liest Zertifikat und
+//      Schlüssel aus der Ablage des Gateways (0640, Gruppe 61001), TLS läuft.
 
 const assert = require('node:assert');
 const crypto = require('node:crypto');
@@ -42,8 +50,20 @@ const TUNNEL = '127.0.0.3'; // steht für die Tunnel-Adresse
 const AREA = 'geraete.vpn.example.test';
 const VPN_HOST = `mqtt-gw-live.${AREA}`;
 const MOSQUITTO = process.env.MOSQUITTO || 'mosquitto';
+const COMPOSE = path.join(__dirname, '..', '..', 'docker-compose.example.yml');
+// der Wächter alter Compose-Dateien (bis Gateway 1.45): kopiert nur conf/passwd/acl
+const OLD_TAKE = 'take() { for f in mosquitto.conf passwd acl; do cp "$G/$f" "$C/.$f" && chmod 600 "$C/.$f" && mv -f "$C/.$f" "$C/$f" || return 1; done; }';
 const quiet = { info() {}, warn(...a) { console.log('warn:', ...a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x)))); }, debug() {} };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Die Funktionen des Wächters (umask, put, take) aus dem Dienst mqtt der Compose-Datei, `$$` → `$`. */
+function watcherFns(file = COMPOSE) {
+  const lines = fs.readFileSync(file, 'utf8').split('\n');
+  const a = lines.findIndex((l) => /^ {8}G=\/gc-mqtt-conf; C=\/gc-mqtt; T=/.test(l));
+  const b = lines.findIndex((l, i) => i > a && /^ {8}trap /.test(l));
+  assert.ok(a > 0 && b > a, 'watcher of the service mqtt not found in docker-compose.example.yml');
+  return lines.slice(a + 1, b).map((l) => l.slice(8)).join('\n').replace(/\$\$/g, '$');
+}
 
 /** MQTT 3.1.1 CONNECT → Rückgabecode des CONNACK (0 = angenommen). */
 function connack(socket, { username, password }) {
@@ -131,15 +151,36 @@ async function main() {
   const conf = path.join(tmp, 'gc-mqtt-conf');
   const vol = path.join(tmp, 'gc-mqtt');
   const state = path.join(tmp, 'state');
+  const tlsCopy = path.join(tmp, 'gc-mqtt-tls'); // steht für das tmpfs /run/gc-mqtt-tls
   fs.mkdirSync(conf); fs.chownSync(conf, 0, UID); fs.chmodSync(conf, 0o2750);
   fs.mkdirSync(vol); fs.chownSync(vol, UID, UID); fs.chmodSync(vol, 0o700);
+  fs.mkdirSync(tlsCopy); fs.chownSync(tlsCopy, UID, UID); fs.chmodSync(tlsCopy, 0o700);
   fs.mkdirSync(state, { mode: 0o700 });
   const as = { uid: UID, gid: UID };
-  // der Wächter des Dienstes mqtt (docker-compose.example.yml): conf/passwd/acl kopieren, data/ anlegen
+  // der Wächter des Dienstes mqtt (docker-compose.example.yml): data/ anlegen, take
+  let fns = watcherFns();
   const take = () => {
-    const r = spawnSync('sh', ['-c', 'mkdir -p "$C/data"; for f in mosquitto.conf passwd acl; do cp "$G/$f" "$C/.$f" && chmod 600 "$C/.$f" && mv -f "$C/.$f" "$C/$f" || exit 1; done'],
-      { ...as, env: { G: conf, C: vol, PATH: process.env.PATH }, encoding: 'utf8' });
+    const r = spawnSync('sh', ['-c', `${fns}\nmkdir -p "$C/data"; take`],
+      { ...as, env: { G: conf, C: vol, T: tlsCopy, PATH: process.env.PATH }, encoding: 'utf8' });
     assert.strictEqual(r.status, 0, `take: ${r.stderr}`);
+  };
+  // 7: Rechte der Kopie, die Mosquitto liest; `subs` = die Ordner, die da sein müssen
+  const copyRights = (subs) => {
+    const c = fs.readFileSync(path.join(vol, 'mosquitto.conf'), 'utf8');
+    assert.ok(!c.includes(`file ${conf}/`), 'certfile/keyfile do not point into the store of the gateway');
+    for (const d of ['tls', 'tls-self']) {
+      const dir = path.join(tlsCopy, d);
+      if (!subs.includes(d)) { assert.ok(!fs.existsSync(dir), `${d}/ leaves the copy`); continue; }
+      assert.strictEqual(fs.statSync(dir).mode & 0o777, 0o700, `${d}/ 0700`);
+      for (const f of ['server.crt', 'server.key']) {
+        const st = fs.statSync(path.join(dir, f));
+        assert.strictEqual(st.mode & 0o777, 0o600, `${d}/${f} 0600`);
+        assert.strictEqual(st.uid, UID, `${d}/${f} belongs to the broker`);
+        assert.ok(c.includes(`${f === 'server.key' ? 'keyfile' : 'certfile'} ${path.join(dir, f)}\n`), `mosquitto.conf points to the copy ${d}/${f}`);
+        assert.strictEqual(fs.readFileSync(path.join(dir, f), 'utf8'), fs.readFileSync(path.join(conf, d, f), 'utf8'), `${d}/${f} is the current one`);
+      }
+    }
+    assert.strictEqual(fs.statSync(tlsCopy).mode & 0o777, 0o700);
   };
   let proc = null;
   let out = '';
@@ -162,6 +203,7 @@ async function main() {
     assert.strictEqual(fs.statSync(path.join(conf, 'tls', 'server.key')).gid, UID, 'the key belongs to the group of the broker (setgid of the store)');
     assert.strictEqual(fs.statSync(path.join(conf, 'tls', 'server.key')).mode & 0o777, 0o640);
     take();
+    copyRights(['tls']);
     start();
     const st = await until(async () => { const s = m.status(); assert.ok(s.running, 'internal account not connected'); return s; }, 'broker did not start');
     assert.strictEqual(st.tls, 'on');
@@ -192,6 +234,7 @@ async function main() {
     assert.ok(!fs.existsSync(path.join(conf, 'tls')), 'the key leaves the store of the broker');
     await stop();
     take();
+    copyRights([]);
     start();
     s = await until(() => plain(PORT), 'port 1883 after the restart');
     assert.strictEqual(await connack(s, { username: 'shelly-kueche', password: 'geheim-123' }), 0);
@@ -238,7 +281,14 @@ async function main() {
     m.refresh();
     assert.strictEqual(fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'), confVpn, 'renewal: mosquitto.conf unchanged (no restart)');
     assert.notStrictEqual(fs.readFileSync(path.join(conf, 'reload'), 'utf8'), r1, 'renewal: reload changed (SIGHUP)');
+    // 7: Mosquitto liest nur die Kopie – SIGHUP ohne take: weiter das alte Zertifikat
+    proc.kill('SIGHUP');
+    await wait(500);
+    s = await named(TUNNEL, c1.cert);
+    assert.strictEqual(fpOf(s), c1.sha256, 'without the copy of the watcher Mosquitto keeps the old certificate');
+    s.destroy();
     take();
+    copyRights(['tls']);
     proc.kill('SIGHUP');
     await until(async () => { const x = await named(TUNNEL, c2.cert); const fp = fpOf(x); x.destroy(); assert.strictEqual(fp, c2.sha256); }, 'new certificate after SIGHUP');
     assert.strictEqual(await ping(kept), true, 'the connection opened before the renewal is still up');
@@ -254,6 +304,7 @@ async function main() {
     assert.deepStrictEqual(m.status().tlsFp, { port: TLS_FP_PORT, sha256: st.tlsSha256, cert: st.tlsCert }, '8884 reports the fingerprint 8883 had before');
     await stop();
     take();
+    copyRights(['tls', 'tls-self']);
     start();
     s = await until(() => pinned(TLS_FP_PORT, pin), 'port 8884 with the self-made certificate');
     assert.strictEqual(fpOf(s), st.tlsSha256, '8884 serves the old fingerprint');
@@ -275,6 +326,7 @@ async function main() {
     assert.strictEqual(fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'), confFp, 'renewal: mosquitto.conf unchanged');
     assert.notStrictEqual(fs.readFileSync(path.join(conf, 'reload'), 'utf8'), r2);
     take();
+    copyRights(['tls', 'tls-self']);
     proc.kill('SIGHUP');
     await until(async () => { const x = await named(TUNNEL, c3.cert); const fp = fpOf(x); x.destroy(); assert.strictEqual(fp, c3.sha256); }, 'renewed certificate on 8883');
     assert.strictEqual(await ping(keptFp), true, 'the connection on 8884 stays open over the renewal on 8883');
@@ -290,6 +342,7 @@ async function main() {
     assert.ok(!fs.existsSync(path.join(conf, 'tls-self')), 'the key of 8884 leaves the store');
     await stop();
     take();
+    copyRights(['tls']);
     start();
     await until(() => named(TUNNEL, c3.cert).then((x) => x.destroy()), 'port 8883 after the restart');
     await assert.rejects(tcp(LAN, TLS_FP_PORT), /ECONNREFUSED/, 'port 8884 closed without the sub-switch');
@@ -307,6 +360,29 @@ async function main() {
     s.destroy();
     await assert.rejects(tcp(TUNNEL, TLS_PORT), /ECONNREFUSED/, 'no listener at the tunnel address without the device certificate');
     console.log('switch off: self-made certificate again, tunnel listener gone');
+    console.log('rights: copies in /run/gc-mqtt-tls 0600 (owner 61001, folder 0700), Mosquitto reads only them');
+
+    // 8: alte Compose-Datei – Wächter ohne tmpfs: Mosquitto liest wie bisher aus der Ablage (0640)
+    fs.rmSync(tlsCopy, { recursive: true, force: true });
+    fns = OLD_TAKE;
+    await stop();
+    take();
+    assert.strictEqual(fs.readFileSync(path.join(vol, 'mosquitto.conf'), 'utf8'), fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'));
+    assert.ok(fs.readFileSync(path.join(vol, 'mosquitto.conf'), 'utf8').includes(`keyfile ${path.join(conf, 'tls', 'server.key')}\n`));
+    assert.strictEqual(fs.statSync(path.join(conf, 'tls', 'server.key')).mode & 0o777, 0o640);
+    start();
+    s = await until(() => pinned(TLS_PORT, pin), 'old compose file: TLS from the store of the gateway');
+    assert.strictEqual(await connack(s, { username: 'shelly-kueche', password: 'geheim-123' }), 0);
+    s.destroy();
+    // neuer Wächter, aber ohne tmpfs (Compose-Datei von Hand gekürzt): genauso
+    fns = watcherFns();
+    await stop();
+    take();
+    assert.strictEqual(fs.readFileSync(path.join(vol, 'mosquitto.conf'), 'utf8'), fs.readFileSync(path.join(conf, 'mosquitto.conf'), 'utf8'));
+    start();
+    s = await until(() => pinned(TLS_PORT, pin), 'new watcher without tmpfs: TLS from the store of the gateway');
+    s.destroy();
+    console.log('old compose file / no tmpfs: Mosquitto reads the store of the gateway (0640) as before');
     console.log('OK');
   } catch (e) {
     console.error('mosquitto output:\n' + out);
