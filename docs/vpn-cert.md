@@ -174,13 +174,17 @@ Vertrauen, sie prüfen Kette und Namen wie bei jeder Website.
   Telemetrie sagt warum.
 - **Ablage:** Zertifikat und Schlüssel werden nach `/gc-mqtt-conf/tls/`
   (`server.crt`, `server.key`) kopiert, wie das selbst erzeugte: in der Ablage
-  des Gateways `0640` mit Gruppe 61001 (Ordner `0750`) – nur Mosquitto liest
-  sie (der Edge-Container hat die Ablage nicht); in einer eigenen Ablage
-  (Edge-Host, alte Compose-Datei) `0600`. Schalter aus, TLS aus oder Broker aus
-  → der Schlüssel ist dort weg.
+  des Gateways `0640` mit Gruppe 61001 (Ordner `0750`) – nur der `mqtt`-Container
+  hängt sie ein (der Edge-Container hat die Ablage nicht); in einer eigenen Ablage
+  (Edge-Host, alte Compose-Datei) `0600`. Der Wächter im `mqtt`-Container kopiert
+  sie als 61001 nach `/run/gc-mqtt-tls/tls/` (tmpfs des Containers, `0600`,
+  Besitzer 61001, Ordner `0700`); `certfile`/`keyfile` zeigen in seiner Kopie der
+  `mosquitto.conf` dorthin. Alte Compose-Dateien (Wächter ohne dieses tmpfs) lesen
+  wie bisher direkt aus der Ablage (`0640`). Schalter aus, TLS aus oder Broker aus
+  → der Schlüssel ist in der Ablage weg, mit dem nächsten Kopieren auch in der Kopie.
 - **Erneuerung:** neue Dateien unter denselben Pfaden, `mosquitto.conf` bleibt
   gleich (kein Fingerabdruck darin), nur `reload` ändert sich → der Wächter
-  schickt **SIGHUP**, Mosquitto liest `certfile`/`keyfile` neu. Bestehende
+  kopiert die neuen Dateien und schickt **SIGHUP**, Mosquitto liest `certfile`/`keyfile` neu. Bestehende
   Verbindungen bleiben, neue sehen das neue Zertifikat
   (`tests/live/mqtt-tls-live.js`). Ein- und Ausschalten ändert die Listener →
   einmal Neustart des Brokers, Clients verbinden sich neu.
@@ -220,7 +224,8 @@ dessen Fingerabdruck wechselt bei jeder Erneuerung. Dafür gibt es einen
   (Mosquitto scheitert nie an einem belegten Port). Port 1883 bleibt unverändert.
 - **Ablage:** eigener Ordner `/gc-mqtt-conf/tls-self/` (`server.crt`,
   `server.key`), getrennt von `tls/` des Gerätezertifikats, Rechte wie dort
-  (`0640`, Gruppe 61001, Ordner `0750`; eigene Ablage `0600`). Unterschalter
+  (`0640`, Gruppe 61001, Ordner `0750`; eigene Ablage `0600`; Kopie des Wächters
+  `/run/gc-mqtt-tls/tls-self/`, `0600`). Unterschalter
   aus, Gerätezertifikat weg, TLS aus oder Broker aus → `tls-self/` ist weg.
 - **Erneuerung des Gerätezertifikats:** ändert nur `tls/` und `reload` (SIGHUP);
   `mosquitto.conf` und `tls-self/` bleiben unberührt, Verbindungen auf 8884

@@ -359,9 +359,15 @@ wird. Es liegt im State-Verzeichnis (`/state/mqtt-tls/cert.pem` + `key.pem`,
 Updates gleich**; erneuert wird es nur, wenn es fehlt, kaputt ist oder in weniger
 als 30 Tagen abläuft. Für den Broker legt das Gateway Kopien nach
 `tls/server.crt` + `tls/server.key` in die Ablage der Broker-Dateien
-(`/gc-mqtt-conf/tls/`, `0640`, Gruppe 61001; Ordner `0750`): Mosquitto liest
-beide direkt von dort (`certfile`/`keyfile`), der Wächter kopiert weiter nur
-`mosquitto.conf`, `passwd` und `acl` – die Compose-Datei bleibt, wie sie ist.
+(`/gc-mqtt-conf/tls/`, `0640`, Gruppe 61001; Ordner `0750` – das Gateway ist root
+ohne `CAP_CHOWN` und kann die Datei 61001 nicht übergeben). Der Wächter im
+`mqtt`-Container kopiert sie als 61001 in sein eigenes tmpfs `/run/gc-mqtt-tls/`
+(`0600`, Besitzer 61001, Ordner `0700`; nie auf der Platte, mit dem Container weg)
+und lässt `certfile`/`keyfile` in seiner Kopie der `mosquitto.conf` dorthin zeigen –
+Mosquitto liest den Schlüssel nur dort. Dasselbe gilt für `tls-self/` (Port 8884).
+TLS aus → `tls/` ist auch in der Kopie weg. **Alte Compose-Dateien** (Wächter ohne
+tmpfs, bis Gateway 1.45): Mosquitto liest wie bisher direkt aus der Ablage
+(`0640`) – das Gateway schreibt für beide Fälle dasselbe.
 Der Fingerabdruck steht als Kommentar in `mosquitto.conf`: ein neues Zertifikat
 ändert die Datei, der Wächter startet Mosquitto neu. TLS aus → Listener und
 `tls/` weg (das Zertifikat im State-Verzeichnis bleibt, der Fingerabdruck ist
