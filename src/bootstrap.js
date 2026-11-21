@@ -313,6 +313,8 @@ async function bootstrap(opts = {}) {
       health.telemetry.edge = edgeLink.telemetry();
       // Phase 3a: capabilities, Zustand je Funktion (Karte „Funktionen“), USV, RAM des Prozesses
       try { Object.assign(health.telemetry, featureMgr.telemetry()); } catch (_e) { /* best-effort */ }
+      // edge-optional-caps: bestätigte optionale MQTT-Topics der Edge-Plugins (edge.optionalCapabilities) gelten (docs/edge.md)
+      if (Array.isArray(health.telemetry.capabilities)) health.telemetry.capabilities.push('edge-optional-caps');
       // Zertifikat der VPN-Namen: nur Fingerabdruck und Ablauf (null = keins gespeichert), nie der Schlüssel
       try {
         health.telemetry.vpn_cert = vpnCert.telemetry();

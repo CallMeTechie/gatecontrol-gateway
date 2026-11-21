@@ -13,7 +13,7 @@ const https = require('node:https');
 const { LIMITS, TIMING, PACKAGES_PATH, assertId, assertVersion } = require('./constants');
 const gcplugin = require('./gcplugin');
 const signature = require('./signature');
-const { validateEdgeManifest, ManifestError } = require('./manifest');
+const { validateEdgeManifest, validateOptionalCaps, ManifestError } = require('./manifest');
 const { pinnedLookup } = require('./channel');
 
 class PackageRejected extends Error {
@@ -107,8 +107,17 @@ class PackageStore {
   installed(id, version, sha256) {
     try {
       const info = JSON.parse(fs.readFileSync(path.join(this.dir(id, version), READY_FILE), 'utf8'));
-      if (info && info.sha256 === String(sha256).toLowerCase() && info.edge && info.edge.entry) return { dir: this.dir(id, version), ...info };
-    } catch { /* nicht vorhanden */ }
+      if (info && info.sha256 === String(sha256).toLowerCase() && info.edge && info.edge.entry) {
+        // von einem älteren Gateway entpackt: optionale Fähigkeiten aus der geprüften plugin.json nachtragen
+        // (ungültig nach den neuen Regeln → null, das Paket wird neu geholt und ganz geprüft)
+        if (info.edge.optionalCapabilities === undefined) {
+          const manifest = JSON.parse(fs.readFileSync(path.join(this.dir(id, version), MANIFEST_FILE), 'utf8'));
+          const opt = manifest && manifest.edge ? manifest.edge.optionalCapabilities : undefined;
+          info.edge = { ...info.edge, optionalCapabilities: validateOptionalCaps(opt, info.edge.capabilities) };
+        }
+        return { dir: this.dir(id, version), ...info };
+      }
+    } catch { /* nicht vorhanden oder nicht mehr gültig */ }
     return null;
   }
 

@@ -207,10 +207,10 @@ test('MQTT im Gateway: Broker-Dateien aus dem mitgelesenen Sollzustand (0640, Pf
   const { MqttManager } = require('../src/edge/mqtt/manager');
   const { hashPassword } = require('../src/edge/mqtt/broker');
   class FakeClient extends EventEmitter {
-    constructor() { super(); this.connected = false; this.subs = []; this.pubs = []; }
+    constructor() { super(); this.connected = false; this.subs = []; this.unsubs = []; this.pubs = []; }
     async connect() { this.connected = true; }
     async subscribe(f) { this.subs.push(f); return 1; }
-    async unsubscribe() {}
+    async unsubscribe(f) { this.unsubs.push(f); }
     async publish(t, p) { this.pubs.push([t, p.toString()]); }
     end() { this.connected = false; }
   }
@@ -251,6 +251,22 @@ test('MQTT im Gateway: Broker-Dateien aus dem mitgelesenen Sollzustand (0640, Pf
     // breiter als genehmigt → abgelehnt, auch wenn der Edge mehr behauptet
     const no = await ws.call('shelly', 'mqtt.publish', { topic: 'other/x', b64: '' }, { mqtt: { topics: ['shellies/#', 'other/#'] } });
     assert.strictEqual(no.error.code, 'denied');
+    // bestätigtes optionales Topic: Abo läuft; entzogen (nächster state ohne) → Abo beendet
+    const withOpt = { mqtt: { topics: ['shellies/#', 'zigbee2mqtt/#'] } };
+    const desired = (topics) => parseState({ t: 'state', edgeEnabled: true,
+      mqtt: { enabled: true, accounts: [], pluginTopics: { shelly: topics } },
+      plugins: [{ id: 'shelly', version: '1.0.0', sha256: 'a'.repeat(64), caps: { mqtt: { topics } } }] });
+    b.setDesired(desired(['shellies/#', 'zigbee2mqtt/#']));
+    await new Promise((r) => setTimeout(r, 50));
+    const sub = await ws.call('shelly', 'mqtt.subscribe', { topic: 'zigbee2mqtt/#' }, withOpt);
+    assert.strictEqual(sub.ok, true);
+    assert.ok(fake.subs.includes('zigbee2mqtt/#'));
+    b.setDesired(desired(['shellies/#']));
+    await new Promise((r) => setTimeout(r, 50));
+    assert.deepStrictEqual(fake.unsubs, ['zigbee2mqtt/#'], 'Abo auf das entzogene Topic beendet');
+    assert.deepStrictEqual(b.plugins.get('shelly').caps.mqtt, { topics: ['shellies/#'] }, 'Fähigkeiten sofort eingeengt');
+    const gone = await ws.call('shelly', 'mqtt.publish', { topic: 'zigbee2mqtt/x/set', b64: '' }, withOpt);
+    assert.strictEqual(gone.error.code, 'denied');
     // MQTT aus → enabled weg
     b.setDesired(parseState({ t: 'state', edgeEnabled: false, plugins: [] }));
     await new Promise((r) => setTimeout(r, 50));

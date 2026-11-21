@@ -349,8 +349,16 @@ class MqttManager {
       this.mdns.announce(addrs.length ? { instance: `GateControl MQTT ${this.hostname}`, service: '_mqtt._tcp', host: this.hostname, port: PORT, addresses: addrs } : null);
     }
     this.lastAddrs = addrs;
-    // Abos neu prüfen: entfernte pluginTopics → Abos der Plugins beenden
-    for (const [k, s] of this.subs) if (!this.allowedFor(s.plugin, s.caps).some((a) => topics.covers(a, s.filter))) this.removeSub(k);
+    this.recheckSubs();
+  }
+
+  /**
+   * Abos neu prüfen: entfernte pluginTopics oder entzogene Fähigkeiten (auch
+   * bestätigte optionale Topics, die der nächste `state` nicht mehr nennt) →
+   * Abos der Plugins beenden. Geprüft wird gegen die aktuellen Fähigkeiten.
+   */
+  recheckSubs() {
+    for (const [k, s] of this.subs) if (!this.allowedFor(s.plugin, s.getCaps()).some((a) => topics.covers(a, s.filter))) this.removeSub(k);
   }
 
   ensureClient() {
@@ -441,7 +449,7 @@ class MqttManager {
         const mine = [...this.subs.values()].filter((s) => s.plugin === plugin).length;
         if (mine >= LIMITS.mqttSubscriptionsPerPlugin) throw new MqttError('busy', 'too many subscriptions');
         const id = ++this.nextId;
-        this.subs.set(`${plugin}#${id}`, { plugin, id, filter: f, toChild, caps: getCaps() });
+        this.subs.set(`${plugin}#${id}`, { plugin, id, filter: f, toChild, getCaps });
         const n = (this.filterRefs.get(f) || 0) + 1;
         this.filterRefs.set(f, n);
         if (n === 1 && this.client && this.client.connected) await this.client.subscribe(f, 1);

@@ -275,6 +275,8 @@ class EdgeBridge {
   setDesired(st) {
     this.desired = st;
     for (const id of [...this.plugins.keys()]) if (!this.wanted(id)) this.closePlugin(id, true);
+    // genehmigte Fähigkeiten nur einengen (entzogene optionale Topics) – der nächste Aufruf rechnet ohnehin neu
+    for (const [id, e] of this.plugins) { const p = this.wanted(id); if (p) e.caps = intersectCaps(e.caps, p.caps); }
     // Broker nur mit Volume edge-mqtt-conf (neue Compose-Datei); sonst verwaltet ihn der Edge-Host selbst
     if (this.mqtt && this.mqtt.available()) {
       this.mqtt.apply(st.edgeEnabled ? st.mqtt : MQTT_OFF).catch((e) => this.logger.warn({ err: e.message }, 'edge: mqtt apply failed'));

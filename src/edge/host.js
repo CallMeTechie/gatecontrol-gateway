@@ -31,6 +31,9 @@ const { NetError } = require('./netProxy');
 const { GatewayRpc, RemoteNet, RemoteMqtt } = require('./remote');
 const { checkBoundary } = require('./fence');
 
+// Merkmale für das hello (der Server zeigt „Gateway zu alt“, wenn eines fehlt)
+const EDGE_FEATURES = Object.freeze(['edge-optional-caps']);
+
 const GATEWAY_VERSION = (() => { try { return require('../../package.json').version; } catch { return '0.0.0'; } })();
 const DOWNLOAD_RETRY_MS = 60000;
 const INFO_WAIT_MS = 3000;
@@ -222,6 +225,8 @@ class EdgeHost extends EventEmitter {
         fence: this.fenceView(),
         isolation: { mode: this.mode, active: this.fence.active },
         hardware: this.hardware(),
+        // Merkmale des Edge-Hosts; edge-optional-caps: bestätigte optionale MQTT-Topics (edge.optionalCapabilities) gelten
+        features: EDGE_FEATURES,
       },
     };
   }
@@ -398,11 +403,14 @@ class EdgeHost extends EventEmitter {
       this.deny(e, 'unsigned', 'unsigned edge parts are not allowed on this gateway');
       return;
     }
-    const caps = intersectCaps(inst.edge.capabilities, p.caps);
+    // Obergrenze: Pflicht- ∪ optionale Fähigkeiten des Pakets; optionale nur, solange der Server sie schickt
+    const caps = intersectCaps(inst.edge.capabilities, p.caps, inst.edge.optionalCapabilities);
     const memoryMb = p.memoryMb || inst.edge.memoryMb;
     const spec = { id: p.id, version: p.version, dir: inst.dir, entry: inst.edge.entry, memoryMb };
     const changed = !e.spec || e.spec.version !== spec.version || e.sha256 !== p.sha256 || e.spec.memoryMb !== spec.memoryMb;
     e.caps = caps;
+    // entzogene Topics: laufende Abos sofort beenden (nicht erst beim nächsten Aufruf)
+    if (this.mqtt && this.mqtt.recheckSubs) this.mqtt.recheckSubs();
     e.version = p.version;
     e.sha256 = p.sha256;
     e.installed = inst;
