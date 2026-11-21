@@ -56,11 +56,9 @@
    Seite, was zu tun ist. Einzelheiten: [Einrichtungsseite](../setup-page.md).
 
    **Startet das Projekt nicht und die Meldung nennt `/dev/net/tun`**, fehlt
-   der NAS das Gerät – dann gibt es auch die Seite noch nicht. Ohne SSH:
-   Systemsteuerung › Aufgabenplaner › Erstellen › Ausgelöste Aufgabe ›
-   Benutzerdefiniertes Skript, Benutzer `root`, Ereignis „Hochfahren“, Befehl
-   `insmod /lib/modules/tun.ko`; Aufgabe markieren, „Ausführen“, Projekt
-   starten.
+   der NAS das Gerät – dann gibt es auch die Seite noch nicht. Die Aufgabe im
+   Abschnitt [„Aufgabe für `/dev/net/tun`“](#aufgabe-für-devnettun) einrichten,
+   einmal „Ausführen“, dann das Projekt starten.
 
    **Bisheriger Weg:** Im Assistenten „Lieber die Datei gateway.env
    herunterladen“ – das Paket enthält dann zusätzlich `config/gateway.env`;
@@ -82,6 +80,63 @@
    Container Manager → Container → Protokoll. In GateControl meldet sich das
    Gateway im Assistenten (Schritt 4); `http://<Adresse der Synology>:8642`
    zeigt „Verbunden“.
+
+## Aufgabe für `/dev/net/tun`
+
+Das Gateway baut den Tunnel mit wireguard-go auf und braucht dafür das Gerät
+`/dev/net/tun` der NAS. Auf manchen Modellen ist es nach dem Hochfahren von
+selbst da (im Test: DS918+), auf anderen nicht (im Test: DS218+). Fehlt es,
+startet Docker den Container `gateway` nicht (Meldung mit `/dev/net/tun`) –
+auch nicht nach einem **Neustart der NAS**: Docker versucht den Start, bevor
+das Gerät da ist, und versucht es danach nicht noch einmal.
+
+Dagegen hilft eine Aufgabe, ohne SSH: Systemsteuerung › Aufgabenplaner ›
+Erstellen › Ausgelöste Aufgabe › Benutzerdefiniertes Skript, Benutzer `root`,
+Ereignis „Hochfahren“, als Skript ([`deploy/synology-tun.sh`](../../deploy/synology-tun.sh)):
+
+```sh
+# GateControl-Gateway (Synology): /dev/net/tun bereitstellen, dann Gateway starten
+PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin"
+modprobe tun 2>/dev/null || insmod "$(find /lib/modules -name 'tun.ko*' | head -n 1)" 2>/dev/null
+mkdir -p /dev/net
+[ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200
+chmod 0666 /dev/net/tun
+n=0
+until docker info >/dev/null 2>&1; do
+  n=$((n + 1)); [ "$n" -lt 24 ] || exit 1
+  sleep 5
+done
+for c in $(docker ps -aq --filter status=exited --filter status=created); do
+  case "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}} {{.Config.Image}}' "$c")" in
+    "gateway "*gatecontrol-gateway* | "otbr "*openthread/otbr*) docker start "$c" ;;
+  esac
+done
+```
+
+Aufgabe markieren und einmal „Ausführen“ wählen; ab dann läuft sie bei jedem
+Hochfahren. Was sie tut:
+
+1. **Modul laden** – `modprobe tun`, sonst `insmod` mit der `tun.ko` der NAS.
+   Ist das Modul schon geladen oder fest im Kernel, passiert nichts.
+2. **Geräteknoten anlegen** – `/dev/net/tun` (Zeichengerät 10:200), wenn er
+   fehlt.
+3. **Gateway starten** – wartet höchstens zwei Minuten, bis Docker antwortet,
+   und startet dann die Container des Gateways, die das Gerät brauchen und
+   nicht laufen (Dienst `gateway`, mit Thread auch `otbr`). Gefunden werden sie
+   am Dienstnamen der Compose-Datei und am Image, der Projektname ist egal. Es
+   wird nichts neu erstellt; laufende Container bleiben unberührt.
+
+Die Aufgabe darf beliebig oft laufen. Auf einer NAS, auf der das Gerät ohnehin
+da ist, ändert sie nichts – dort ist sie nicht nötig, schadet aber nicht.
+
+**Prüfen:** Container Manager › Container: `…-gateway-1` läuft. Nach einem
+Neustart der NAS kann das ein bis zwei Minuten dauern. Im Aufgabenplaner zeigt
+„Aktion › Ergebnis anzeigen“ den letzten Lauf (dafür in den Einstellungen des
+Aufgabenplaners „Ausgabeergebnisse speichern“ einschalten).
+
+**Zu beachten:** Die Aufgabe startet das Gateway bei jedem Hochfahren – auch
+wenn du den Container vorher von Hand gestoppt hattest. Soll das Gateway aus
+bleiben, die Aufgabe im Aufgabenplaner deaktivieren.
 
 ## Ältere Projekte (`./config:/config:ro`)
 

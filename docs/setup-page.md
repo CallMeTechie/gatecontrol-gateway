@@ -53,11 +53,15 @@ Proxmox-LXC ohne durchgereichtes Gerät, bei einer eigenen Compose-Datei ohne
 **Synology:** Dort hilft die Seite bei diesem Punkt **nicht** – fehlt
 `/dev/net/tun` am Host, startet Docker den Container gar nicht erst (Meldung
 mit `/dev/net/tun` im Container Manager), und die Seite ist nicht erreichbar.
-Das Modul lädst du vor dem Start des Projekts, ohne SSH: Systemsteuerung ›
-Aufgabenplaner › Erstellen › Ausgelöste Aufgabe › Benutzerdefiniertes Skript,
-Benutzer `root`, Ereignis „Hochfahren“, Befehl `insmod /lib/modules/tun.ko`;
-Aufgabe markieren und „Ausführen“. Auf vielen Geräten (z. B. DS918+, DS218+)
-ist das Gerät ohnehin da.
+Dafür gibt es eine Aufgabe für den Aufgabenplaner (ohne SSH, Benutzer `root`,
+Ereignis „Hochfahren“): Sie lädt das Modul `tun`, legt das Gerät an und startet
+danach das Gateway – auch nach jedem Neustart der NAS. Skript und Erklärung:
+[Synology › Aufgabe für `/dev/net/tun`](deployment/synology.md#aufgabe-für-devnettun).
+Auf manchen Geräten (im Test: DS918+) ist das Gerät ohnehin da, auf anderen
+(im Test: DS218+) nicht.
+
+Läuft der Container und die Seite meldet trotzdem „VPN-Gerät fehlt“, zeigt sie
+dasselbe Skript zum Kopieren.
 
 **„Ordner config nicht beschreibbar“:** In älteren Compose-Dateien steht
 `./config:/config:ro`. Für die Einrichtungsseite das `:ro` entfernen und das
