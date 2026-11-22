@@ -90,7 +90,7 @@ Management-API (über den Tunnel, `X-Gateway-Token`):
 | `POST /api/radio/zigbee/unlock {}` | 202 – deCONZ nimmt 60 s lang neue Schlüssel an (Smart-Home-Plugin) |
 | `POST /api/radio/zigbee/retry {}` | 202 – Schlüssel neu holen |
 | `POST /api/radio/zigbee/remove { ieee }` | zigbee2mqtt: 202; 400; 404 `not_found`; 409 `not_running` – Gerät abmelden (`bridge/request/device/remove`) |
-| `POST /api/radio/zigbee/set { ieee, set }` | zigbee2mqtt: 202; 400 (`invalid_request`: Gerät kann das nicht); 404; 409 – `set` `{ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, cover, pos }` → `zigbee2mqtt/<Name>/set`; ein Kanal `{ on, channel }` (→ `state_<Kanal>`), ein Thermostat `{ setpoint, mode }`; `{ ota: check \| update }` → `zigbee2mqtt/bridge/request/device/ota_update/…` |
+| `POST /api/radio/zigbee/set { ieee, set }` | zigbee2mqtt: 202; 400 (`invalid_request`: Gerät kann das nicht); 404; 409 – `set` `{ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, cover, pos }` → `zigbee2mqtt/<Name>/set`; ein Kanal `{ on, channel }` (→ `state_<Kanal>`), ein Thermostat `{ setpoint, mode, preset, boost, boost_time, window_detection, window_open }`; `{ ota: check \| update }` → `zigbee2mqtt/bridge/request/device/ota_update/…` |
 | `POST /api/radio/thread/form { name? }` | 202; 409 `not_running` \| `has_network` – neues Thread-Netz (Rest zufällig) |
 | `POST /api/radio/thread/join { dataset }` | 202; 400; 409 – aktiver Datensatz eines anderen Border Routers (TLV-Hex), nie im Log |
 | `POST /api/radio/thread/dataset {}` | 200 `{ dataset }` (TLV-Hex, `Cache-Control: no-store`); 409 `not_running` \| `no_network` – für Matter-Controller, nie in der Telemetrie |
@@ -159,6 +159,20 @@ Adapter und MQTT-Zugang über Umgebungsvariablen (`ZIGBEE2MQTT_CONFIG_*`).
   `dry`); Werte `temperature` (`local_temperature`), `setpoint`, `mode`,
   `heating` (`running_state`, sonst `pi_heating_demand > 0`), `valve`.
   `set { setpoint, mode }` – das Soll wird auf Grenzen und Schrittweite gebracht.
+* **Preset, Boost, Fenster** (Capability `z2m-thermostat-ext`, im Heartbeat
+  und im `hello` unter `gw.features`): nur, was das `exposes` des Thermostats
+  nennt, sonst fehlen die Felder. Setzbar (Zugriffs-Bit 2) steht in `caps`:
+  `presets` (Werte des Enums `preset`, `[a-z0-9_]{1,24}`, höchstens 16),
+  `boost` (binär `boost_heating`, sonst `boost`), `boostTime { min, max, step,
+  unit? }` (numerisch `boost_time`, nur mit Obergrenze), `windowDetection`
+  (binär `window_detection`), `windowOpen` (binär `window_open`, z. B. Bosch
+  BTH-RA für einen externen Kontakt). Werte (auch nur lesbare Felder):
+  `preset`, `boost`, `boost_time`, `window_detection`, `window_open` (binär →
+  `true`/`false` nach `value_on`/`value_off` des Geräts). Gesetzt mit
+  `set { preset }`, `{ boost: true|false }`, `{ boost_time }` (auf Grenzen und
+  Schritt gebracht), `{ window_detection: true|false }`, `{ window_open:
+  true|false }` – auch zusammen mit `setpoint`/`mode`; was das Gerät nicht
+  setzen kann, gibt 400 `invalid_request`.
 * **OTA-Updates:** `caps.ota`, wenn die Definition `supports_ota` hat;
   `values.ota { state: idle|available|updating|scheduled, progress (ganze %),
   installed, latest, checked, error: check_failed|update_failed }` aus dem
@@ -170,8 +184,8 @@ Adapter und MQTT-Zugang über Umgebungsvariablen (`ZIGBEE2MQTT_CONFIG_*`).
   bei Änderung höchstens alle 5 s, sonst alle 5 Min. Das Smart-Home-Plugin
   schaltet über den Server (`/api/radio/zigbee/set`).
 * **Nicht dabei:** die Weboberfläche von zigbee2mqtt, Gruppen, Bindungen,
-  Helligkeit/Farbe je Kanal eines mehrkanaligen Geräts, Zeitpläne und
-  Voreinstellungen (`preset`) von Thermostaten, geplante OTA-Updates
+  Helligkeit/Farbe je Kanal eines mehrkanaligen Geräts, Zeitpläne von
+  Thermostaten, geplante OTA-Updates
   (`ota_update/schedule`).
 
 ## Thread (OpenThread Border Router)
