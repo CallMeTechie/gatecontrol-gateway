@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { validateCaps, intersectCaps, validateEdgeManifest, compareVersions, multicastAllowed } = require('../src/edge/manifest');
+const { validateCaps, validateOptionalCaps, intersectCaps, validateEdgeManifest, compareVersions, multicastAllowed } = require('../src/edge/manifest');
 const { makeLanGuard, checkPort, isPrivateNet } = require('../src/edge/lanGuard');
 const topics = require('../src/edge/topics');
 
@@ -38,6 +38,51 @@ test('wirksam = Manifest ∩ Genehmigung', () => {
   assert.deepStrictEqual(e.mqtt, { topics: ['b/#'] });
   assert.strictEqual(e.http, undefined, 'nicht genehmigt');
   assert.strictEqual(e.mdns, undefined, 'nicht verlangt');
+});
+
+test('optionalCapabilities: nur mqtt.topics, nie doppelt, höchstens 16 zusammen', () => {
+  const base = { id: 'x', version: '1.0.0' };
+  const edge = (extra) => ({ ...base, edge: { entry: 'edge/index.js', capabilities: { mqtt: { topics: ['shellies/#', 'tasmota/#'] } }, ...extra } });
+  const ok = validateEdgeManifest(edge({ optionalCapabilities: { mqtt: { topics: ['zigbee2mqtt/#', 'zigbee2mqtt/#'] } } }));
+  assert.deepStrictEqual(ok.optionalCapabilities, { mqtt: { topics: ['zigbee2mqtt/#'] } });
+  assert.deepStrictEqual(ok.capabilities.mqtt, { topics: ['shellies/#', 'tasmota/#'] }, 'Pflicht unverändert');
+  // ältere Manifeste ohne den Schlüssel
+  assert.deepStrictEqual(validateEdgeManifest(edge({})).optionalCapabilities, {});
+  assert.deepStrictEqual(validateEdgeManifest(edge({ optionalCapabilities: {} })).optionalCapabilities, {});
+  // ohne Pflicht-MQTT nur optional
+  assert.deepStrictEqual(validateEdgeManifest({ ...base, edge: { entry: 'e/i.js', optionalCapabilities: { mqtt: { topics: ['a/#'] } } } }).optionalCapabilities, { mqtt: { topics: ['a/#'] } });
+  const reject = (opt, re) => assert.throws(() => validateEdgeManifest(edge({ optionalCapabilities: opt })), (e) => e.code === 'bad_caps' && re.test(e.message), JSON.stringify(opt));
+  reject({ udp: { ports: [40000] } }, /only "mqtt" can be optional/);
+  reject({ http: { lan: true } }, /only "mqtt" can be optional/);
+  reject({ mqtt: { topics: ['a/#'], qos: 1 } }, /only "topics" can be optional/);
+  reject({ mqtt: { topics: ['#'] } }, /optionalCapabilities\.mqtt\.topics: #/);
+  reject({ mqtt: { topics: 'a/#' } }, /optionalCapabilities\.mqtt\.topics/);
+  reject({ mqtt: { topics: ['tasmota/#'] } }, /tasmota\/# is already in edge\.capabilities/);
+  reject({ mqtt: { topics: Array.from({ length: 15 }, (_, i) => `t${i}/#`) } }, /at most 16 topics together/);
+  reject([], /must be an object/);
+  // 14 + 2 = 16 geht
+  assert.strictEqual(validateEdgeManifest(edge({ optionalCapabilities: { mqtt: { topics: Array.from({ length: 14 }, (_, i) => `t${i}/#`) } } })).optionalCapabilities.mqtt.topics.length, 14);
+  assert.deepStrictEqual(validateOptionalCaps(undefined, {}), {});
+});
+
+test('wirksam mit optionalen Topics: (Pflicht ∪ optional) ∩ state – entzogen fällt heraus', () => {
+  const req = validateCaps({ mqtt: { topics: ['shellies/#', 'tasmota/#'] }, tcp: { lan: true } });
+  const opt = { mqtt: { topics: ['zigbee2mqtt/#'] } };
+  // Server schickt das bestätigte optionale Topic mit
+  const confirmed = validateCaps({ mqtt: { topics: ['shellies/#', 'tasmota/#', 'zigbee2mqtt/#', 'fremd/#'] }, tcp: { lan: true } });
+  assert.deepStrictEqual(intersectCaps(req, confirmed, opt).mqtt, { topics: ['shellies/#', 'tasmota/#', 'zigbee2mqtt/#'] }, 'fremd/# hat das Paket nie verlangt');
+  assert.deepStrictEqual(intersectCaps(req, confirmed, opt).tcp, { lan: true });
+  // nicht (mehr) bestätigt
+  const revoked = validateCaps({ mqtt: { topics: ['shellies/#', 'tasmota/#'] }, tcp: { lan: true } });
+  assert.deepStrictEqual(intersectCaps(req, revoked, opt).mqtt, { topics: ['shellies/#', 'tasmota/#'] });
+  // ohne optionale wie bisher
+  assert.deepStrictEqual(intersectCaps(req, confirmed).mqtt, { topics: ['shellies/#', 'tasmota/#'] });
+  assert.deepStrictEqual(intersectCaps(req, confirmed, {}).mqtt, { topics: ['shellies/#', 'tasmota/#'] });
+  // nur optionale MQTT-Topics im Manifest
+  assert.deepStrictEqual(intersectCaps({}, confirmed, opt).mqtt, { topics: ['zigbee2mqtt/#'] });
+  assert.strictEqual(intersectCaps({}, {}, opt).mqtt, undefined, 'ohne Genehmigung nichts');
+  // Eingaben bleiben unverändert
+  assert.deepStrictEqual(req.mqtt, { topics: ['shellies/#', 'tasmota/#'] });
 });
 
 test('Manifest edge: entry im Unterordner, memoryMb 16–256, minGateway', () => {

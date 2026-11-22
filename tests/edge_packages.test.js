@@ -59,6 +59,36 @@ test('entpackt nur den Edge-Ordner + plugin.json; prune()', () => {
   }
 });
 
+test('optionalCapabilities: im entpackten Paket; ältere .ready.json ohne den Schlüssel aus plugin.json nachgetragen', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-edge-pkg-'));
+  try {
+    const store = new packages.PackageStore({ packagesDir: root });
+    const edge = { entry: 'edge/index.js', capabilities: { mqtt: { topics: ['shellies/#'] } }, optionalCapabilities: { mqtt: { topics: ['zigbee2mqtt/#'] } } };
+    const p = makePackage({ sign: 'trusted', trusted, edge });
+    const checked = packages.inspect(p.buf, { id: 'demo-edge', version: '1.0.0', sha256: p.sha256, keys });
+    assert.deepStrictEqual(checked.edge.optionalCapabilities, { mqtt: { topics: ['zigbee2mqtt/#'] } });
+    const inst = store.extract({ id: 'demo-edge', version: '1.0.0', sha256: p.sha256 }, checked);
+    assert.deepStrictEqual(store.installed('demo-edge', '1.0.0', p.sha256).edge.optionalCapabilities, { mqtt: { topics: ['zigbee2mqtt/#'] } });
+    // so hat ein älteres Gateway entpackt: ohne optionalCapabilities in .ready.json
+    const ready = path.join(inst.dir, '.ready.json');
+    const info = JSON.parse(fs.readFileSync(ready, 'utf8'));
+    delete info.edge.optionalCapabilities;
+    fs.writeFileSync(ready, JSON.stringify(info));
+    assert.deepStrictEqual(store.installed('demo-edge', '1.0.0', p.sha256).edge.optionalCapabilities, { mqtt: { topics: ['zigbee2mqtt/#'] } });
+    // nach den neuen Regeln ungültig → neu holen (null)
+    const pj = path.join(inst.dir, 'plugin.json');
+    const m = JSON.parse(fs.readFileSync(pj, 'utf8'));
+    m.edge.optionalCapabilities = { mqtt: { topics: ['shellies/#'] } };
+    fs.writeFileSync(pj, JSON.stringify(m));
+    assert.strictEqual(store.installed('demo-edge', '1.0.0', p.sha256), null);
+    // ungültiges Manifest wird schon beim Prüfen abgelehnt
+    const bad = makePackage({ sign: 'trusted', trusted, edge: { ...edge, optionalCapabilities: { udp: { ports: [40000] } } } });
+    assert.throws(() => packages.inspect(bad.buf, { id: 'demo-edge', version: '1.0.0', sha256: bad.sha256, keys }), (e) => e.code === 'bad_caps' || e.code === 'bad_manifest');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('download(): Bearer-Token, 404 → not_found, Größenlimit', async () => {
   const p = makePackage({ sign: 'trusted', trusted });
   let auth = null;

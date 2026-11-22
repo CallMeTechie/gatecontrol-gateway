@@ -114,7 +114,8 @@ Gateway-Container erkennt das am fehlenden `/run/gc-edge` und tut dann nichts.
   alle 10 min, 401/403 (Token abgelehnt) → alle 5 min.
 * Nach dem Verbinden: `hello` (Gateway-Version, Edge-Host-Version,
   MQTT-Verfügbarkeit, Netzgrenze, Betriebsart `isolation: { mode, active }`,
-  Hardware-Profil), der Server antwortet mit
+  Hardware-Profil, Merkmale `features` – z. B. `edge-optional-caps`, siehe
+  „Optionale Fähigkeiten“), der Server antwortet mit
   dem vollständigen Sollzustand `state`. Danach sendet der Edge-Host noch
   unbestätigte Ereignisse erneut.
 * `status` bei jeder Änderung (gebündelt, 1 s) und alle 30 s.
@@ -413,7 +414,7 @@ D-Bus-Zugriff.
 **Edge-Teile:** `gc.mqtt.subscribe(filter, fn)` / `gc.mqtt.publish(topic,
 payload, {retain, qos})` laufen über das interne Konto (isoliert: per RPC über
 den Gateway-Socket, geprüft im Gateway). Erlaubt ist nur, was
-die Fähigkeit `mqtt.topics` des Plugins (Manifest ∩ Genehmigung) **und**
+die Fähigkeit `mqtt.topics` des Plugins ((Pflicht ∪ optional) ∩ Genehmigung) **und**
 `state.mqtt.pluginTopics[<plugin>]` abdecken; ein Abo darf nicht breiter sein
 als ein genehmigter Filter. QoS 0/1, höchstens 64 Abos je Plugin, Nutzlast ≤
 256 KB. Endet ein Edge-Prozess, werden seine Abos aufgeräumt.
@@ -520,6 +521,37 @@ genehmigt (`caps`) – die Schnittmenge.
   `denied`). Selbstsignierte Geräte nur mit `pinSha256`.
 * `mqtt.topics`: Filter ohne führendes `#`/`+`, ohne `$`-Themen, höchstens 16.
 * `serial`: benannte Geräte (`zigbee`).
+
+### Optionale Fähigkeiten (`edge.optionalCapabilities`)
+
+Ein Plugin kann MQTT-Topics zusätzlich als **optional** anmelden – der Admin
+bestätigt sie einzeln am Server:
+
+```json
+"edge": {
+  "capabilities":         { "mqtt": { "topics": ["shellies/#", "tasmota/#"] } },
+  "optionalCapabilities": { "mqtt": { "topics": ["zigbee2mqtt/#"] } }
+}
+```
+
+* Nur `mqtt.topics` kann optional sein (andere Schlüssel → `bad_caps`,
+  „only "mqtt" can be optional“); Regeln je Topic wie bei `mqtt.topics`.
+* Ein Topic steht nie in beiden Listen; beide zusammen höchstens 16 Topics –
+  sonst wird das Paket abgelehnt (`bad_caps`, dieselben Regeln wie am Server).
+* Wirksam: (`capabilities` ∪ `optionalCapabilities`) ∩ `state`. Der Server
+  schickt in `caps.mqtt.topics` und `mqtt.pluginTopics` nur die
+  **bestätigten** optionalen Topics mit – er bleibt die Instanz, die
+  bestätigt. Was das Paket nicht verlangt hat, gilt nie.
+* **Entziehen** wirkt mit dem nächsten `state`: das Topic fällt aus den
+  wirksamen Fähigkeiten, laufende Abos darauf werden beendet (im Edge-Host
+  und im Gateway), `publish`/`subscribe` antworten `denied`.
+* Manifeste ohne den Schlüssel: unverändert. Pakete, die ein älteres Gateway
+  entpackt hat, bekommen die optionalen Topics aus ihrer geprüften
+  `plugin.json` nachgetragen (nach den neuen Regeln ungültig → das Paket wird
+  neu geholt und ganz geprüft).
+* Merkmal `edge-optional-caps` im `hello` (`gw.features`) und im Heartbeat
+  (`telemetry.capabilities`): fehlt es, ist das Gateway zu alt – dort gelten
+  bestätigte optionale Topics nicht (`denied`).
 
 ### Grenzen
 

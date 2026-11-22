@@ -142,6 +142,39 @@ test('gc.mqtt.*: nur genehmigte Themen (Manifest ∩ pluginTopics), Abos mit Ref
   }
 });
 
+test('gc.mqtt.*: entzogene Fähigkeiten beenden laufende Abos (recheckSubs, auch bei apply)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-mqtt-'));
+  const fake = new FakeClient();
+  const m = new MqttManager({ dir, getLanAddrs: () => ['192.168.1.10'], clientFactory: () => fake });
+  try {
+    const pluginTopics = { p1: ['shellies/#', 'zigbee2mqtt/#'] };
+    await m.apply({ enabled: true, tls: false, accounts: [], pluginTopics });
+    await new Promise((r) => setImmediate(r));
+    let caps = { mqtt: { topics: ['shellies/#', 'zigbee2mqtt/#'] } }; // inkl. bestätigtem optionalem Topic
+    const getCaps = () => caps;
+    const got = [];
+    await m.pluginCall('p1', getCaps, 'mqtt.subscribe', { topic: 'zigbee2mqtt/#' }, (msg) => got.push(msg));
+    await m.pluginCall('p1', getCaps, 'mqtt.subscribe', { topic: 'shellies/#' }, (msg) => got.push(msg));
+    // nur die Fähigkeiten entzogen (pluginTopics noch gleich) → Abo weg, sobald neu geprüft wird
+    caps = { mqtt: { topics: ['shellies/#'] } };
+    m.recheckSubs();
+    assert.deepStrictEqual(fake.unsubs, ['zigbee2mqtt/#']);
+    fake.emit('message', 'zigbee2mqtt/lampe', Buffer.from('x'), { qos: 0, retain: false });
+    assert.strictEqual(got.length, 0, 'keine Nachrichten mehr für das entzogene Topic');
+    await assert.rejects(m.pluginCall('p1', getCaps, 'mqtt.publish', { topic: 'zigbee2mqtt/lampe/set', b64: '' }, () => {}), (e) => e.code === 'denied');
+    // apply mit neuen pluginTopics prüft gegen die aktuellen Fähigkeiten
+    caps = { mqtt: { topics: ['shellies/#', 'zigbee2mqtt/#'] } };
+    await m.pluginCall('p1', getCaps, 'mqtt.subscribe', { topic: 'zigbee2mqtt/#' }, () => {});
+    await m.apply({ enabled: true, tls: false, accounts: [], pluginTopics: { p1: ['shellies/#'] } });
+    assert.deepStrictEqual(fake.unsubs, ['zigbee2mqtt/#', 'zigbee2mqtt/#']);
+    fake.emit('message', 'shellies/s1', Buffer.from('on'), { qos: 0, retain: false });
+    assert.strictEqual(got.length, 1, 'das Pflicht-Topic läuft weiter');
+  } finally {
+    await m.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('MQTT-Client gegen einen Fake-Broker: CONNECT, SUBSCRIBE, PUBLISH QoS 1 in beide Richtungen', async () => {
   assert.deepStrictEqual([...encodeLength(321)], [0xc1, 0x02]);
   const seen = [];

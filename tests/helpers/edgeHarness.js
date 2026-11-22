@@ -14,10 +14,11 @@ const signature = require('../../src/edge/signature');
 
 const TOKEN = 'gc_gw_test_token';
 
-function buildPackage({ key, sign = true, version = '1.0.0', caps, port }) {
+function buildPackage({ key, sign = true, version = '1.0.0', caps, optionalCaps, port }) {
   const src = fs.readFileSync(path.join(__dirname, '..', 'fixtures/edge/echo-plugin.js'), 'utf8')
     .replace('|| 40000', `|| ${port}`).replace('bind(40001', `bind(${port + 1}`);
   const manifest = { id: 'echo', version, name: 'Echo', edge: { entry: 'edge/index.js', memoryMb: 32, capabilities: caps || { udp: { ports: [port], multicast: [] } } } };
+  if (optionalCaps) manifest.edge.optionalCapabilities = optionalCaps;
   let files = new Map([['plugin.json', Buffer.from(JSON.stringify(manifest))], ['edge/index.js', Buffer.from(src)], ['server/index.js', Buffer.from('x')]]);
   if (sign) files = signature.sign(files, key.privateKey).files;
   const buf = gcplugin.encode(files);

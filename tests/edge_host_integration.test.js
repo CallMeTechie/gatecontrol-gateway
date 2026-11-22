@@ -85,6 +85,7 @@ test('hello → state → Edge-Teil läuft', async () => {
   assert.strictEqual(typeof hello.gw.version, 'string');
   assert.deepStrictEqual(hello.gw.fence, { active: true, backend: 'isolated' });
   assert.deepStrictEqual(hello.gw.isolation, { mode: 'isolated', active: true });
+  assert.ok(hello.gw.features.includes('edge-optional-caps'), 'Merkmal für den Server (sonst „Gateway zu alt“)');
   // das Token setzt das Gateway; der Edge-Host kennt es nicht
   assert.ok(server.auth.includes(`Bearer ${TOKEN}`));
   for (const f of fs.readdirSync(runDir)) {
@@ -230,6 +231,31 @@ test('unsigniert ohne allowUnsigned → denied; mit allowUnsigned → läuft (Up
   // alte Version nach erfolgreichem Start gelöscht
   await new Promise((r) => setTimeout(r, 50));
   assert.deepStrictEqual(fs.readdirSync(path.join(tmp, 'packages', 'echo')), ['1.1.0']);
+});
+
+test('optionale MQTT-Topics: gelten, solange der state sie bestätigt; entzogen mit dem nächsten state', async () => {
+  const udp = { udp: { ports: [PORT], multicast: [] } };
+  pkgs.current = buildPackage({ version: '1.2.0', caps: { ...udp, mqtt: { topics: ['shellies/#', 'tasmota/#'] } }, optionalCaps: { mqtt: { topics: ['zigbee2mqtt/#'] } } });
+  publish(pkgs.current);
+  const withCaps = (topics) => {
+    const p = pkgs.current;
+    return state({ plugins: [{ id: 'echo', version: p.version, sha256: p.sha256, memoryMb: 32, enabled: true, caps: { ...udp, mqtt: { topics } } }] });
+  };
+  server.clear();
+  server.send(withCaps(['shellies/#', 'tasmota/#', 'zigbee2mqtt/#']));
+  await server.wait(pluginStatus((p) => p.state === 'running' && p.version === '1.2.0'), 15000, 'running 1.2.0');
+  assert.deepStrictEqual(host.plugins.get('echo').caps.mqtt, { topics: ['shellies/#', 'tasmota/#', 'zigbee2mqtt/#'] });
+  assert.deepStrictEqual(host.plugins.get('echo').installed.edge.optionalCapabilities, { mqtt: { topics: ['zigbee2mqtt/#'] } });
+  // Admin entzieht das optionale Topic → nächster state ohne
+  server.send(withCaps(['shellies/#', 'tasmota/#']));
+  const deadline = Date.now() + 5000;
+  while (host.plugins.get('echo').caps.mqtt.topics.includes('zigbee2mqtt/#') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(host.plugins.get('echo').caps.mqtt, { topics: ['shellies/#', 'tasmota/#'] });
+  // was das Paket nie verlangt hat, gilt auch mit Genehmigung nicht
+  server.send(withCaps(['shellies/#', 'fremd/#']));
+  const until = Date.now() + 5000;
+  while (host.plugins.get('echo').caps.mqtt.topics.includes('tasmota/#') && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(host.plugins.get('echo').caps.mqtt, { topics: ['shellies/#'] });
 });
 
 test('edgeEnabled:false stoppt alles', async () => {

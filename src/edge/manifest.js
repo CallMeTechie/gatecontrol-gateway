@@ -109,11 +109,44 @@ function validateCaps(caps, where = 'capabilities') {
 }
 
 /**
- * Wirksame Fähigkeiten = was das Manifest verlangt UND der Server genehmigt
- * hat. Was nur der `state` nennt, gilt nicht (das Paket hat es nie verlangt).
+ * Optionale Fähigkeiten (`edge.optionalCapabilities`): nur `mqtt.topics`. Ein
+ * Topic steht nie zugleich in `capabilities`, beide zusammen höchstens 16 –
+ * dieselben Regeln wie beim Server. Fehlt der Schlüssel → {}.
  */
-function intersectCaps(manifestCaps, approved) {
-  const m = manifestCaps || {};
+function validateOptionalCaps(opt, required, where = 'edge.optionalCapabilities') {
+  if (opt === undefined || opt === null) return {};
+  if (!isObj(opt)) throw new ManifestError('bad_caps', `${where} must be an object`);
+  for (const k of Object.keys(opt)) {
+    if (k !== 'mqtt') throw new ManifestError('bad_caps', `${where}: only "mqtt" can be optional (not "${k}")`);
+  }
+  if (opt.mqtt === undefined) return {};
+  const m = opt.mqtt;
+  if (!isObj(m) || Object.keys(m).some((x) => x !== 'topics')) throw new ManifestError('bad_caps', `${where}.mqtt: only "topics" can be optional`);
+  const out = validateCaps({ mqtt: m }, where).mqtt;
+  const own = (required && required.mqtt && required.mqtt.topics) || [];
+  const both = out.topics.find((t) => own.includes(t));
+  if (both !== undefined) throw new ManifestError('bad_caps', `${where}.mqtt.topics: ${both} is already in edge.capabilities`);
+  if (own.length + out.topics.length > 16) throw new ManifestError('bad_caps', `${where}.mqtt.topics: at most 16 topics together with edge.capabilities`);
+  return { mqtt: out };
+}
+
+/** Obergrenze aus Pflicht- und optionalen Fähigkeiten (nur MQTT-Topics). */
+function withOptional(caps, opt) {
+  const extra = (opt && opt.mqtt && opt.mqtt.topics) || [];
+  if (!extra.length) return caps;
+  const own = (caps.mqtt && caps.mqtt.topics) || [];
+  return { ...caps, mqtt: { topics: uniq(own.concat(extra)) } };
+}
+
+/**
+ * Wirksame Fähigkeiten = was das Manifest verlangt (Pflicht ∪ optional) UND
+ * der Server genehmigt hat. Was nur der `state` nennt, gilt nicht (das Paket
+ * hat es nie verlangt). Optionale Topics kommen nur mit, solange der Server
+ * sie im `state` schickt (Bestätigung durch den Admin) – entzogen fallen sie
+ * mit dem nächsten `state` heraus.
+ */
+function intersectCaps(manifestCaps, approved, optionalCaps) {
+  const m = withOptional(manifestCaps || {}, optionalCaps);
   const a = approved || {};
   const out = {};
   if (m.udp && a.udp) {
@@ -151,7 +184,7 @@ function compareVersions(a, b) {
 
 /**
  * Manifest (plugin.json) prüfen und den Edge-Teil liefern:
- * { id, version, entry, entryDir, minGateway, memoryMb, capabilities }.
+ * { id, version, entry, entryDir, minGateway, memoryMb, capabilities, optionalCapabilities }.
  */
 function validateEdgeManifest(manifest, { gatewayVersion } = {}) {
   if (!isObj(manifest)) throw new ManifestError('bad_manifest', 'plugin.json is not an object');
@@ -181,10 +214,11 @@ function validateEdgeManifest(manifest, { gatewayVersion } = {}) {
     }
   }
   const capabilities = validateCaps(e.capabilities, 'edge.capabilities');
-  return { id: manifest.id, version: manifest.version, entry, entryDir, minGateway, memoryMb, capabilities };
+  const optionalCapabilities = validateOptionalCaps(e.optionalCapabilities, capabilities);
+  return { id: manifest.id, version: manifest.version, entry, entryDir, minGateway, memoryMb, capabilities, optionalCapabilities };
 }
 
 module.exports = {
-  ManifestError, validateCaps, intersectCaps, validateEdgeManifest, compareVersions, parseSemver, multicastAllowed,
+  ManifestError, validateCaps, validateOptionalCaps, intersectCaps, validateEdgeManifest, compareVersions, parseSemver, multicastAllowed,
   MDNS_GROUP, SERIAL_NAMES,
 };
