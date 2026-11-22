@@ -26,6 +26,7 @@ const { ThreadBorderRouter, createOtbrClient, networkOf } = require('../src/radi
 const { RadioService, assignSticks } = require('../src/radio/radio');
 const { BleScanner } = require('../src/radio/ble');
 const { MqttManager } = require('../src/edge/mqtt/manager');
+const { CAPABILITIES } = require('../src/features/manager');
 const { makeSysfs, CONBEE2, ZBT1 } = require('./helpers/fakeSysfs');
 
 const tmp = (p) => fs.mkdtempSync(path.join(os.tmpdir(), p));
@@ -325,6 +326,72 @@ describe('radio: zigbee2mqtt', () => {
     assert.deepEqual(valuesOf({ current_heating_setpoint: 19, local_temperature: 18.26, pi_heating_demand: 0 }, tuya.caps), { temperature: 18.3, setpoint: 19, valve: 0, heating: false });
     assert.notEqual(summarize({ exposes: [{ type: 'climate', features: [{ type: 'numeric', name: 'local_temperature', property: 'local_temperature' }] }] }).kind, 'climate');
     z.stop();
+  });
+
+  it('a thermostat with preset, boost and window detection (z2m-thermostat-ext): only what its exposes offer, read and set', async () => {
+    // Tuya TS0601 (gekürzt): preset im climate, boost_heating ON/OFF, boost_time in s, window_detection, window_open nur lesbar
+    const tuya = { type: 'EndDevice', ieee_address: '0xa4c1380000445566', friendly_name: 'Heizung Kind', supported: true, interview_completed: true, power_source: 'Battery',
+      definition: { model: 'TS0601_thermostat', vendor: 'Tuya', description: 'Radiator valve', exposes: [
+        { type: 'climate', features: [
+          { type: 'numeric', name: 'current_heating_setpoint', property: 'current_heating_setpoint', value_min: 5, value_max: 35, value_step: 0.5, access: 7 },
+          { type: 'numeric', name: 'local_temperature', property: 'local_temperature', access: 1 },
+          { type: 'enum', name: 'system_mode', property: 'system_mode', values: ['heat', 'auto', 'off'], access: 7 },
+          { type: 'enum', name: 'preset', property: 'preset', values: ['schedule', 'manual', 'boost', 'comfort', 'eco', 'holiday', 'Bad Value!', 'eco'], access: 7 }] },
+        { type: 'binary', name: 'boost_heating', property: 'boost_heating', value_on: 'ON', value_off: 'OFF', access: 7 },
+        { type: 'numeric', name: 'boost_time', property: 'boost_time', value_min: 0, value_max: 900, value_step: 1, unit: 's', access: 7 },
+        { type: 'binary', name: 'window_detection', property: 'window_detection', value_on: 'ON', value_off: 'OFF', access: 7 },
+        { type: 'binary', name: 'window_open', property: 'window_open', value_on: true, value_off: false, access: 1 }] } };
+    const { mq, z, by } = running();
+    mq.emit('zigbee2mqtt/bridge/devices', JSON.stringify([...MORE, tuya]));
+    const d = by()['Heizung Kind'];
+    assert.equal(d.kind, 'climate');
+    assert.deepEqual(d.caps, { setpoint: { min: 5, max: 35, step: 0.5 }, modes: ['off', 'heat', 'auto'], presets: ['schedule', 'manual', 'boost', 'comfort', 'eco', 'holiday'], boost: true, windowDetection: true, boostTime: { min: 0, max: 900, step: 1, unit: 's' } });
+    assert.equal(d.caps.windowOpen, undefined, 'window_open is only reported, not settable');
+    assert.doesNotMatch(JSON.stringify(z.list()), /thermoProps/);
+    mq.emit('zigbee2mqtt/Heizung Kind', { local_temperature: 19.5, current_heating_setpoint: 21, system_mode: 'heat', preset: 'comfort', boost_heating: 'OFF', boost_time: 300, window_detection: 'ON', window_open: true });
+    assert.deepEqual(by()['Heizung Kind'].values, { temperature: 19.5, setpoint: 21, mode: 'heat', preset: 'comfort', boost: false, window_detection: true, window_open: true, boost_time: 300 });
+    mq.emit('zigbee2mqtt/Heizung Kind', { preset: 'party', window_open: 'maybe' });
+    assert.deepEqual([by()['Heizung Kind'].values.preset, by()['Heizung Kind'].values.window_open], ['comfort', true], 'unknown values are not reported');
+    const id = 'a4:c1:38:00:00:44:55:66';
+    assert.equal(await z.set(id, { preset: 'eco' }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Heizung Kind/set', { preset: 'eco' }]);
+    assert.equal(by()['Heizung Kind'].values.preset, 'eco', 'carried along until zigbee2mqtt reports');
+    assert.equal(await z.set(id, { boost: true, boost_time: 1234.4 }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Heizung Kind/set', { boost_heating: 'ON', boost_time: 900 }]);
+    assert.deepEqual([by()['Heizung Kind'].values.boost, by()['Heizung Kind'].values.boost_time], [true, 900]);
+    assert.equal(await z.set(id, { window_detection: false, setpoint: 20 }), 'accepted');
+    assert.deepEqual(mq.st.pubs.at(-1), ['zigbee2mqtt/Heizung Kind/set', { current_heating_setpoint: 20, window_detection: 'OFF' }]);
+    assert.equal(by()['Heizung Kind'].values.window_detection, false);
+    const n = mq.st.pubs.length;
+    for (const bad of [{ preset: 'party' }, { preset: 'Bad Value!' }, { boost: 'ON' }, { window_open: true }, { window_detection: 1 }, { boost_time: '60' }]) assert.equal(await z.set(id, bad), 'invalid', JSON.stringify(bad));
+    // the Aqara E1 above offers none of it
+    for (const bad of [{ preset: 'eco' }, { boost: true }, { window_detection: true }, { boost_time: 60 }]) assert.equal(await z.set('54:ef:44:10:00:aa:bb:cc', bad), 'invalid', JSON.stringify(bad));
+    assert.equal(mq.st.pubs.length, n, 'nothing sent');
+    z.stop();
+  });
+
+  it('thermostat extras: other spellings in the exposes, read-only fields, no invented ones', () => {
+    const climate = (...more) => ({ exposes: [{ type: 'climate', features: [{ type: 'numeric', name: 'occupied_heating_setpoint', property: 'occupied_heating_setpoint', access: 7 }] }, ...more] });
+    // Bosch BTH-RA: boost_heating, window_open settable (external contact), no preset
+    const bosch = summarize(climate({ type: 'binary', name: 'boost_heating', property: 'boost_heating', value_on: 'ON', value_off: 'OFF', access: 7 }, { type: 'binary', name: 'window_open', property: 'window_open', value_on: 'ON', value_off: 'OFF', access: 7 }));
+    assert.deepEqual([bosch.caps.boost, bosch.caps.windowOpen, bosch.caps.presets, bosch.caps.windowDetection, bosch.caps.boostTime], [true, true, undefined, undefined, undefined]);
+    assert.deepEqual(setPayload({ kind: 'climate', caps: bosch.caps }, { window_open: true, boost: false }), { boost_heating: 'OFF', window_open: 'ON' });
+    assert.deepEqual(valuesOf({ boost_heating: 'ON', window_open: 'OFF' }, bosch.caps), { boost: true, window_open: false });
+    // plain „boost“ with true/false; preset and window_detection read-only (access 5)
+    const other = summarize(climate({ type: 'binary', name: 'boost', property: 'boost', value_on: true, value_off: false, access: 7 }, { type: 'enum', name: 'preset', property: 'preset', values: ['eco', 'comfort'], access: 5 }, { type: 'binary', name: 'window_detection', property: 'window_detection', value_on: 'ON', value_off: 'OFF', access: 5 }));
+    assert.deepEqual([other.caps.boost, other.caps.presets, other.caps.windowDetection], [true, undefined, undefined]);
+    assert.deepEqual(setPayload({ kind: 'climate', caps: other.caps }, { boost: true }), { boost: true });
+    assert.equal(setPayload({ kind: 'climate', caps: other.caps }, { preset: 'eco' }), null);
+    assert.deepEqual(valuesOf({ boost: false, preset: 'eco', window_detection: 'ON' }, other.caps), { boost: false, preset: 'eco', window_detection: true });
+    // boost_time without an upper limit is only read
+    const bt = summarize(climate({ type: 'numeric', name: 'boost_time', property: 'boost_time', access: 7 }));
+    assert.equal(bt.caps.boostTime, undefined);
+    assert.deepEqual(valuesOf({ boost_time: 120 }, bt.caps), { boost_time: 120 });
+    // nothing of it on a device that is no thermostat, nor fields with odd types or names
+    assert.equal(summarize({ exposes: [{ type: 'binary', name: 'window_detection', property: 'window_detection', access: 7 }] }).caps.windowDetection, undefined);
+    const odd = summarize(climate({ type: 'numeric', name: 'boost_heating', property: 'boost_heating', access: 7 }, { type: 'binary', name: 'preset', property: 'preset', access: 7 }, { type: 'binary', name: 'window_open', property: 'window_open', value_on: 'X', value_off: 'X', access: 7 }));
+    assert.deepEqual(odd.caps, { setpointProp: 'occupied_heating_setpoint', setpoint: { min: 5, max: 30, step: 0.5 } });
+    assert.ok(CAPABILITIES.includes('z2m-thermostat-ext'));
   });
 
   it('firmware over the air: what zigbee2mqtt knows of a device, check and update through bridge/request, the answers', async () => {

@@ -28,6 +28,13 @@
 // error } aus dem Feld „update“ des Geräts; { ota: 'check' | 'update' } geht
 // an bridge/request/device/ota_update/…, die Antwort kommt über
 // bridge/response/device/ota_update/….
+// Thermostate, nur was ihr Expose anbietet (Merkmal z2m-thermostat-ext): caps.
+// presets (enum „preset“, beschreibbar), caps.boost (binär boost_heating oder
+// boost), caps.boostTime { min, max, step, unit } (numerisch boost_time),
+// caps.windowDetection / caps.windowOpen (binär window_detection / window_open,
+// beschreibbar); values preset, boost, boost_time, window_detection,
+// window_open (auch nur lesbar gemeldete); gesetzt mit { preset }, { boost },
+// { boost_time }, { window_detection }, { window_open }.
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -54,6 +61,11 @@ const CHANNEL_RE = /^[a-z0-9_]{1,8}$/;
 const MAX_CHANNELS = 8;
 const CLIMATE_MODES = ['off', 'heat', 'auto', 'cool', 'fan_only', 'dry'];
 const SETPOINT_PROPS = ['occupied_heating_setpoint', 'current_heating_setpoint'];
+const PRESET_RE = /^[a-z0-9_]{1,24}$/;
+const MAX_PRESETS = 16;
+const BOOST_PROPS = ['boost_heating', 'boost'];
+// Binäre Zusatzfelder eines Thermostats: Wertname → [Eigenschaften im Expose, Name in caps]
+const THERMO_BINARY = { boost: [BOOST_PROPS, 'boost'], window_detection: [['window_detection'], 'windowDetection'], window_open: [['window_open'], 'windowOpen'] };
 const OTA_STATES = ['idle', 'available', 'updating', 'scheduled'];
 const OTA_TOPIC = 'bridge/response/device/ota_update/';
 const SENSOR_PROPS = ['temperature', 'humidity', 'pressure', 'illuminance', 'illuminance_lux', 'co2', 'contact', 'occupancy', 'presence', 'water_leak', 'smoke', 'pm25', 'soil_moisture'];
@@ -157,11 +169,72 @@ function summarize(def) {
     const mode = props.get('system_mode');
     const modes = mode && Array.isArray(mode.values) ? CLIMATE_MODES.filter((m) => mode.values.includes(m)) : [];
     if (modes.length) caps.modes = modes;
+    Object.assign(caps, thermoExt(props));
   }
   if (has('power')) caps.power = true;
   if (has('battery')) caps.battery = true;
   if (def && def.supports_ota === true) caps.ota = true;
   return { kind, caps };
+}
+
+// zigbee2mqtt: access Bit 2 = setzbar; ohne Angabe (ältere Definitionen) wie beim Soll setzbar
+const writable = (e) => typeof e.access !== 'number' || (e.access & 2) === 2;
+const binVal = (v) => (typeof v === 'string' && v.length <= 16) || typeof v === 'boolean';
+
+/**
+ * Preset, Boost und Fenster eines Thermostats aus seinem Expose. Öffentlich: presets, boost, boostTime,
+ * windowDetection, windowOpen (nur, was setzbar ist); intern thermoProps { Wertname: { prop, on, off, values, min, max, step } }
+ * für alles, was das Gerät meldet (auch nur lesbar).
+ */
+function thermoExt(props) {
+  const out = {};
+  const tp = {};
+  const pre = props.get('preset');
+  if (pre && pre.type === 'enum' && pre.property === 'preset' && Array.isArray(pre.values)) {
+    const values = [...new Set(pre.values.filter((v) => typeof v === 'string' && PRESET_RE.test(v)))].slice(0, MAX_PRESETS);
+    if (values.length) {
+      tp.preset = { prop: 'preset', values };
+      if (writable(pre)) out.presets = values;
+    }
+  }
+  for (const [key, [names, capName]] of Object.entries(THERMO_BINARY)) {
+    const name = names.find((n) => { const e = props.get(n); return e && e.type === 'binary' && e.property === n; });
+    if (!name) continue;
+    const e = props.get(name);
+    const on = binVal(e.value_on) ? e.value_on : 'ON';
+    const off = binVal(e.value_off) ? e.value_off : 'OFF';
+    if (on === off) continue;
+    tp[key] = { prop: name, on, off };
+    if (writable(e)) out[capName] = true;
+  }
+  const bt = props.get('boost_time');
+  if (bt && bt.type === 'numeric' && bt.property === 'boost_time') {
+    const min = finite(bt.value_min);
+    const max = finite(bt.value_max);
+    const step = finite(bt.value_step);
+    const r = { min: min != null && min >= 0 ? min : 0, max: 0, step: step != null && step > 0 ? step : 1 };
+    r.max = max != null && max > r.min && max <= 86400 ? max : null;
+    tp.boost_time = { prop: 'boost_time', ...r };
+    if (writable(bt) && r.max != null) {
+      out.boostTime = { min: r.min, max: r.max, step: r.step };
+      if (typeof bt.unit === 'string' && /^[A-Za-z]{1,8}$/.test(bt.unit)) out.boostTime.unit = bt.unit;
+    }
+  }
+  if (Object.keys(tp).length) out.thermoProps = tp;
+  return out;
+}
+
+/** Preset, Boost, Boostdauer und Fenster aus einem Zustand (nur Felder, die das Expose nennt). */
+function thermoValues(p, tp = {}) {
+  const v = {};
+  if (!tp) return v;
+  if (tp.preset && typeof p.preset === 'string' && tp.preset.values.includes(p.preset)) v.preset = p.preset;
+  for (const key of Object.keys(THERMO_BINARY)) {
+    const b = tp[key];
+    if (b && (p[b.prop] === b.on || p[b.prop] === b.off)) v[key] = p[b.prop] === b.on;
+  }
+  if (tp.boost_time && finite(p.boost_time) != null) v.boost_time = round(Math.max(0, p.boost_time));
+  return v;
 }
 
 /** Das Feld „update“ eines Geräts (zigbee2mqtt ≥ 1.33; davor update_available) → { state, progress, installed, latest }. */
@@ -209,6 +282,7 @@ function valuesOf(p, caps = {}) {
     if (finite(p.pi_heating_demand) != null) v.valve = Math.max(0, Math.min(100, Math.round(p.pi_heating_demand)));
     if (typeof p.running_state === 'string') v.heating = p.running_state === 'heat';
     else if (v.valve != null) v.heating = v.valve > 0;
+    Object.assign(v, thermoValues(p, caps.thermoProps));
   }
   if (caps.ota) {
     const ota = otaOf(p);
@@ -219,7 +293,7 @@ function valuesOf(p, caps = {}) {
 
 /**
  * Ein Befehl des Servers ({ on, bri 0…100, ct, xy, hue 0…65535, sat 0…254, pos }, ein Kanal { on, channel },
- * ein Thermostat { setpoint, mode }) → Nutzlast für <Name>/set oder null.
+ * ein Thermostat { setpoint, mode, preset, boost, boost_time, window_detection, window_open }) → Nutzlast für <Name>/set oder null.
  */
 function setPayload(dev, set) {
   const s = set && typeof set === 'object' ? set : {};
@@ -237,6 +311,15 @@ function setPayload(dev, set) {
       out[c.setpointProp] = round(Math.max(min, Math.min(max, Math.round(s.setpoint / step) * step)), 1);
     }
     if (typeof s.mode === 'string' && Array.isArray(c.modes) && c.modes.includes(s.mode)) out.system_mode = s.mode;
+    const tp = c.thermoProps || {};
+    if (typeof s.preset === 'string' && Array.isArray(c.presets) && c.presets.includes(s.preset)) out.preset = s.preset;
+    for (const [key, [, capName]] of Object.entries(THERMO_BINARY)) {
+      if (typeof s[key] === 'boolean' && c[capName] && tp[key]) out[tp[key].prop] = s[key] ? tp[key].on : tp[key].off;
+    }
+    if (num(s.boost_time) && c.boostTime) {
+      const { min, max, step } = c.boostTime;
+      out.boost_time = round(Math.max(min, Math.min(max, Math.round(s.boost_time / step) * step)), 2);
+    }
     return Object.keys(out).length ? out : null;
   }
   if ((dev.kind === 'light' || dev.kind === 'plug') && typeof s.on === 'boolean') out[c.stateProp || 'state'] = s.on ? 'ON' : 'OFF';
@@ -576,6 +659,7 @@ class Zigbee2Mqtt {
     if (dev.kind === 'climate') {
       if (Number.isFinite(body[dev.caps.setpointProp])) v.setpoint = body[dev.caps.setpointProp];
       if (typeof body.system_mode === 'string') v.mode = body.system_mode;
+      Object.assign(v, thermoValues(body, dev.caps.thermoProps));
     }
     this.values.set(ieee, v);
     this.dirty = true;
@@ -621,7 +705,7 @@ class Zigbee2Mqtt {
   /** Geräteliste für den Server und den Reiter „Funk“. */
   list() {
     return [...this.devices.values()].map((d) => {
-      const { stateProp, chProps, setpointProp, ...caps } = d.caps; // eslint-disable-line no-unused-vars
+      const { stateProp, chProps, setpointProp, thermoProps, ...caps } = d.caps; // eslint-disable-line no-unused-vars
       let values = this.values.get(d.ieee) || {};
       if (caps.ota) {
         const info = this.otaInfo.get(d.ieee) || {};
