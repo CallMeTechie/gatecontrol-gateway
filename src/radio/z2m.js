@@ -702,6 +702,17 @@ class Zigbee2Mqtt {
     return this.now() - this.wantSince < START_GRACE_MS ? 'starting' : 'error';
   }
 
+  /** Geräte mit Kontakt (values.opening) für die Fensterkontakte der Edge-Teile (contacts.js): [{ ieee, values, seen, available }]. */
+  contacts() {
+    const out = [];
+    for (const d of this.devices.values()) {
+      const values = this.values.get(d.ieee);
+      if (!values || typeof values.opening !== 'boolean') continue;
+      out.push({ ieee: d.ieee, values: { opening: values.opening }, seen: this.seen.has(d.ieee) ? this.seen.get(d.ieee) : null, available: this.available.has(d.ieee) ? this.available.get(d.ieee) : null });
+    }
+    return out;
+  }
+
   /** Geräteliste für den Server und den Reiter „Funk“. */
   list() {
     return [...this.devices.values()].map((d) => {

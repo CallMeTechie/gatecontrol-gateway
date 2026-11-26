@@ -21,6 +21,7 @@ const { Zigbee } = require('./zigbee');
 const { Zigbee2Mqtt } = require('./z2m');
 const { ThreadBorderRouter } = require('./thread');
 const { BleScanner } = require('./ble');
+const { ContactFeed } = require('./contacts');
 const { BleKeyStore } = require('./blekeys');
 const { createDeconzClient } = require('./deconz');
 const { loop } = require('../features/status');
@@ -29,6 +30,7 @@ const logger = require('../logger');
 const DETECT_MS = 30_000;
 const ZIGBEE_MS = 60_000;
 const PAIR_MS = 5_000;
+const CONTACTS_MS = 2_000;
 const HOST_PROFILE_MAX = 8192;
 const START_FLAG = 'radio-start';
 const START_FLAG_EVERY_MS = 10 * 60_000;
@@ -170,10 +172,20 @@ class RadioService {
     this.started = false;
     this.detectLoop = loop(() => this.refresh(), () => DETECT_MS);
     this.zigbeeLoop = loop(() => this._tick(), () => (this.zigbee.pairing() || this.z2m.pairing() ? PAIR_MS : ZIGBEE_MS));
+    // Fensterkontakte für Edge-Teile (contacts.js, Capability radio-contacts): Bluetooth und zigbee2mqtt
+    this.contacts = new ContactFeed({
+      now,
+      ble: () => (this.cfg.ble ? this.ble.list() : []),
+      z2m: () => (this._z2m() && typeof this.z2m.contacts === 'function' ? this.z2m.contacts() : []),
+    });
+    this.contactsLoop = loop(() => this.contacts.tick(), () => CONTACTS_MS);
   }
 
-  /** Den MQTT-Broker des Gateways anhängen (für zigbee2mqtt, bootstrap.js). */
-  attachMqtt(mqtt) { this.z2m.attach(mqtt); }
+  /** Den MQTT-Broker des Gateways anhängen (für zigbee2mqtt und die Fensterkontakte, bootstrap.js). */
+  attachMqtt(mqtt) {
+    this.z2m.attach(mqtt);
+    this.contacts.attach(mqtt);
+  }
 
   _wish() {
     return { stack: this.cfg.stack, z2m: this.cfg.stack === 'zigbee2mqtt' && this.cfg.zigbee !== false, thread: this.cfg.thread === true };
@@ -243,12 +255,14 @@ class RadioService {
       this.started = true;
       this.detectLoop.start(DETECT_MS);
       this.zigbeeLoop.start(2_000);
+      this.contactsLoop.start(CONTACTS_MS);
     }
   }
 
   stop() {
     this.detectLoop.stop();
     this.zigbeeLoop.stop();
+    this.contactsLoop.stop();
     this.ble.stop();
     this.z2m.stop();
     this.started = false;
