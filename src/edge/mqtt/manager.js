@@ -116,6 +116,7 @@ class MqttManager {
     // Konten und Themen des Gateways selbst (Funk: zigbee2mqtt, src/radio/z2m.js) – kommen
     // nicht vom Server; ein gleichnamiges Konto aus dem state wird übergangen
     this.local = { accounts: [], topics: [] };
+    this.localParts = new Map(); // Teil (radio, contacts) → { accounts, topics } – this.local ist ihre Vereinigung
     this.localSubs = new Map(); // filter → Set(handler)
     // Gerätezertifikat (attachVpnCert/applyVpnCert): nur im Gateway-Container, der es abholt
     this.vpn = null;            // { vpnCert, tunnelIp, hasAddr, portTaken, readFile }
@@ -256,9 +257,14 @@ class MqttManager {
 
   // ─── Für das Gateway selbst (Funk: zigbee2mqtt) ──────────────
 
-  /** Eigene Konten ({ user, hash, acl }) und Themen des internen Kontos setzen (schreibt die Broker-Dateien neu). */
-  setLocal({ accounts = [], topics: own = [] } = {}) {
-    const next = { accounts: accounts.slice(0, 4), topics: own.filter((t) => topics.validFilter(t)).slice(0, 8) };
+  /**
+   * Eigene Konten ({ user, hash, acl }) und Themen des internen Kontos setzen (schreibt die Broker-Dateien neu).
+   * `part`: wer sie setzt (zigbee2mqtt „radio“, die Fensterkontakte „contacts“) – jeder Teil ersetzt nur seine eigenen.
+   */
+  setLocal({ accounts = [], topics: own = [] } = {}, part = 'radio') {
+    this.localParts.set(String(part), { accounts: accounts.slice(0, 4), topics: own.filter((t) => topics.validFilter(t)).slice(0, 8) });
+    const parts = [...this.localParts.values()];
+    const next = { accounts: parts.flatMap((p) => p.accounts).slice(0, 4), topics: [...new Set(parts.flatMap((p) => p.topics))].slice(0, 8) };
     if (JSON.stringify(next) === JSON.stringify(this.local)) return;
     this.local = next;
     this.refresh();

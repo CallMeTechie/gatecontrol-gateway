@@ -140,22 +140,32 @@ test('udp.send an Broadcast ohne LAN-Subnetz mit Broadcast-Adresse: denied', asy
 test('TCP: 64 Verbindungen je Edge-Teil (vorher 32), gemeinsamer Schreibpuffer 32 MB', async () => {
   assert.strictEqual(LIMITS.tcpSocketsPerPlugin, 64);
   assert.strictEqual(LIMITS.tcpWriteBufferTotalBytes, 32 * 1024 * 1024);
-  const server = net.createServer((s) => s.on('error', () => {}));
+  const conns = new Set();
+  const server = net.createServer((s) => { conns.add(s); s.on('error', () => {}); s.on('close', () => conns.delete(s)); });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
   const { p } = plugin({ tcp: { lan: true } });
   try {
-    const ids = [];
-    for (let i = 0; i < 64; i++) ids.push((await p.tcpConnect({ host: '127.0.0.1', port })).id);
-    assert.strictEqual(ids.length, 64);
+    // 63 Plätze belegt (ohne echte Sockets – keine flüchtigen Ports, die parallele Tests brauchen)
+    for (let i = 0; i < 63; i++) p.tcp.set(-1 - i, { destroy() {}, end() {}, writableLength: 0 });
+    const { id } = await p.tcpConnect({ host: '127.0.0.1', port });
+    assert.strictEqual(p.tcp.size, 64, 'die 64. Verbindung geht');
     await assert.rejects(async () => p.tcpConnect({ host: '127.0.0.1', port }), (e) => e.code === 'busy' && /at most 64/.test(e.message));
-    p.tcpDestroy({ id: ids[0] });
+    p.tcp.delete(-1);
+    p.tcpDestroy({ id });
     assert.ok((await p.tcpConnect({ host: '127.0.0.1', port })).id, 'nach dem Schließen wieder eine frei');
+    // gemeinsamer Schreibpuffer: zusammen höchstens 32 MB
+    p.tcp.get(-2).writableLength = 32 * 1024 * 1024;
+    const own = [...p.tcp.keys()].find((k) => k > 0);
+    await assert.rejects(p.tcpWrite({ id: own, b64: b64('x') }), (e) => e.code === 'busy' && /write buffers of this edge part full/.test(e.message));
+    p.tcp.get(-2).writableLength = 0;
+    assert.deepStrictEqual(await p.tcpWrite({ id: own, b64: b64('x') }), {});
     // ohne tcp.lan: denied
     const q = plugin({});
     await assert.rejects(async () => q.p.tcpConnect({ host: '127.0.0.1', port }), (e) => e.code === 'denied');
   } finally {
     p.closeAll();
+    for (const c of conns) c.destroy();
     await new Promise((r) => server.close(r));
   }
 });

@@ -115,7 +115,8 @@ Gateway-Container erkennt das am fehlenden `/run/gc-edge` und tut dann nichts.
 * Nach dem Verbinden: `hello` (Gateway-Version, Edge-Host-Version,
   MQTT-Verfügbarkeit, Netzgrenze, Betriebsart `isolation: { mode, active }`,
   Hardware-Profil, Merkmale `features` – z. B. `edge-optional-caps`, siehe
-  „Optionale Fähigkeiten“), der Server antwortet mit
+  „Optionale Fähigkeiten“, `radio-contacts`, siehe [radio.md](radio.md)
+  „Fensterkontakte für Edge-Teile“), der Server antwortet mit
   dem vollständigen Sollzustand `state`. Danach sendet der Edge-Host noch
   unbestätigte Ereignisse erneut.
 * `status` bei jeder Änderung (gebündelt, 1 s) und alle 30 s.
@@ -444,7 +445,7 @@ Der Edge-Teil ist ein CommonJS-Modul (`edge.entry`), das ein Objekt mit
 | `gc.log.info/warn/error(...)` | – | Logs an den Server (≤ 20/s, Zeile ≤ 2 KB); `console.*` ebenso |
 | `gc.lan.udp.bind(port, {multicast}, onMessage)` | `udp.ports`, `udp.multicast` | → `{port, send(host, port, buf), close()}`; nur Absender aus dem LAN |
 | `gc.lan.udp.send(host, port, buf)` | `udp` | einzelnes Datagramm (≤ 8 KB) von einem flüchtigen Port; Broadcast siehe unten |
-| `gc.gateway` | – | `{version, features, limits: {tcpConnections, udpSockets, udpDatagramBytes}}` des Gateways (ab 1.48.0; älter: `undefined`) |
+| `gc.gateway` | – | `{version, features, limits: {tcpConnections, udpSockets, udpDatagramBytes}}` des Gateways (ab 1.49.0; älter: `undefined`) |
 | `gc.lan.mdns.browse(service, onFound)` | `mdns.services` | `onFound({host, ip, port, service, txt})` → `{stop()}` |
 | `gc.lan.tcp.connect(host, port)` | `tcp.lan` | Duplex-Stream |
 | `gc.lan.http.request({method, url, headers, body, timeoutMs, pinSha256})` | `http.lan` | → `{status, headers, body, text(), json()}`; Antwort ≤ 5 MB, ≤ 30 s, keine Weiterleitungen; HTTPS siehe unten |
@@ -459,7 +460,7 @@ WireGuard-, Docker- und VPN-Schnittstellen), nie die Tunnel-Adresse, nie der
 Server, nie die Netzadresse; die Router-Adresse ist erlaubt. Multicast nur für
 genehmigte Gruppen. IPv6 ist in v1 nicht vorgesehen.
 
-**UDP-Broadcast** (ab 1.48.0, Fähigkeit `udp.broadcast`, z. B. die Suche nach
+**UDP-Broadcast** (ab 1.49.0, Fähigkeit `udp.broadcast`, z. B. die Suche nach
 Tuya-Geräten an Port 7000): `send` an `255.255.255.255` geht an die
 Broadcast-Adresse **jedes privaten LAN-Subnetzes** des Gateways (nie über
 Tunnel, Docker oder andere Schnittstellen), `send` an die Broadcast-Adresse
@@ -535,7 +536,7 @@ genehmigt (`caps`) – die Schnittmenge.
 
 ### Optionale Fähigkeiten (`edge.optionalCapabilities`)
 
-Ein Plugin kann MQTT-Topics und (ab 1.48.0) LAN-Zugriff per TCP, UDP-Ports und
+Ein Plugin kann MQTT-Topics und (ab 1.49.0) LAN-Zugriff per TCP, UDP-Ports und
 UDP-Broadcast zusätzlich als **optional** anmelden – der Admin bestätigt sie
 einzeln je Gateway am Server (Schlüssel `mqtt.topic:<t>`, `tcp.lan`,
 `udp.port:<n>`, `udp.broadcast`):
@@ -553,9 +554,9 @@ einzeln je Gateway am Server (Schlüssel `mqtt.topic:<t>`, `tcp.lan`,
   `udp: {ports, broadcast}` (keine Multicast-Gruppen: `bad_caps`); Regeln wie
   bei den Pflicht-Fähigkeiten. Andere Schlüssel (eines neueren Servers)
   übergeht das Gateway – sie gelten nie, das Paket läuft weiter. **Gateways
-  1.46.0 und 1.47.0 lehnen ein Paket mit `tcp`/`udp` in
+  1.46.0 bis 1.48.0 lehnen ein Paket mit `tcp`/`udp` in
   `optionalCapabilities` ganz ab** (`bad_caps`, „only "mqtt" can be
-  optional“) – solche Plugins setzen `edge.minGateway` auf 1.48.0.
+  optional“) – solche Plugins setzen `edge.minGateway` auf 1.49.0.
 * Nichts steht in beiden Listen; Topics und UDP-Ports je höchstens 16
   zusammen mit `capabilities`, optionales `udp.broadcast` braucht UDP-Ports –
   sonst wird das Paket abgelehnt (`bad_caps`, dieselben Regeln wie am Server).
@@ -573,7 +574,7 @@ einzeln je Gateway am Server (Schlüssel `mqtt.topic:<t>`, `tcp.lan`,
 * Merkmal `edge-optional-caps` im `hello` (`gw.features`) und im Heartbeat
   (`telemetry.capabilities`): fehlt es, ist das Gateway zu alt – dort gelten
   bestätigte optionale Topics nicht (`denied`). Merkmal **`edge-optional-lan`**
-  (ab 1.48.0): optionale `tcp.lan`, `udp.port:<n>` und `udp.broadcast` gelten,
+  (ab 1.49.0): optionale `tcp.lan`, `udp.port:<n>` und `udp.broadcast` gelten,
   UDP-Broadcast an die eigenen Ports und 64 TCP-Verbindungen je Edge-Teil. Der
   Edge-Teil sieht die Merkmale in `gc.gateway.features`.
 
@@ -582,7 +583,7 @@ einzeln je Gateway am Server (Schlüssel `mqtt.topic:<t>`, `tcp.lan`,
 Frame 64 KB · Aufruf-Timeout ≤ 30 s, höchstens 32 offene Aufrufe je Plugin ·
 Ereignisse 50/s (darüber verworfen, `throttled` im Status) · Logs 20/s ·
 gleichzeitige `gc.*`-Aufrufe 64 · UDP-Sockets 16, TCP-Verbindungen 64 (bis
-1.47.0: 32), mDNS-Suchen 8 je Plugin · Schreibpuffer je TCP-Verbindung 1 MB,
+1.48.0: 32), mDNS-Suchen 8 je Plugin · Schreibpuffer je TCP-Verbindung 1 MB,
 alle Verbindungen eines Edge-Teils zusammen 32 MB · Speicher `memoryMb`
 (16–256, Standard 48).
 
