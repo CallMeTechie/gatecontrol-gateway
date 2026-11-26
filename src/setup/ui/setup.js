@@ -29,7 +29,8 @@
       fix_dsm: 'So behebst du das in DSM',
       fix_dsm_1: 'Systemsteuerung › Aufgabenplaner › Erstellen › Ausgelöste Aufgabe › Benutzerdefiniertes Skript',
       fix_dsm_2: 'Benutzer {root}, Ereignis {boot}', fix_dsm_boot: 'Hochfahren',
-      fix_dsm_3: 'Befehl: {cmd}',
+      fix_dsm_3: 'Dieses Skript einfügen:',
+      fix_dsm_what: 'Es lädt das Modul tun, legt /dev/net/tun an und startet danach das Gateway – auch nach jedem Neustart der NAS, bei dem Docker das Gateway sonst nicht starten kann. Ist das Gerät schon da, ändert es nichts.',
       fix_dsm_4: 'Aufgabe markieren und „Ausführen“ wählen',
       fix_dsm_5: 'In der Compose-Datei muss beim Dienst gateway unter {devices} stehen: {line} – dann das Projekt im Container Manager neu erstellen',
       fix_tun: 'So behebst du das',
@@ -109,7 +110,8 @@
       fix_dsm: 'How to fix this in DSM',
       fix_dsm_1: 'Control Panel › Task Scheduler › Create › Triggered Task › User-defined script',
       fix_dsm_2: 'User {root}, event {boot}', fix_dsm_boot: 'Boot-up',
-      fix_dsm_3: 'Command: {cmd}',
+      fix_dsm_3: 'Paste this script:',
+      fix_dsm_what: 'It loads the module tun, creates /dev/net/tun and then starts the gateway – also after every restart of the NAS, when Docker otherwise cannot start the gateway. If the device is already there, it changes nothing.',
       fix_dsm_4: 'Select the task and choose “Run”',
       fix_dsm_5: 'In the compose file the service gateway needs under {devices}: {line} – then recreate the project in Container Manager',
       fix_tun: 'How to fix this',
@@ -326,6 +328,25 @@
   function connectButton(disabled) {
     return h('button', { class: 'btn', type: 'submit', id: 'btn-connect', disabled: disabled || sending }, [sending ? t('connecting_btn') : t('connect')]);
   }
+  // Aufgabe für den DSM-Aufgabenplaner – Wortlaut von deploy/synology-tun.sh (tests/deploy_synology_tun.test.js)
+  var DSM_TUN_TASK = [
+    '# GateControl-Gateway (Synology): /dev/net/tun bereitstellen, dann Gateway starten',
+    'PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin"',
+    'modprobe tun 2>/dev/null || insmod "$(find /lib/modules -name \'tun.ko*\' | head -n 1)" 2>/dev/null',
+    'mkdir -p /dev/net',
+    '[ -c /dev/net/tun ] || mknod /dev/net/tun c 10 200',
+    'chmod 0666 /dev/net/tun',
+    'n=0',
+    'until docker info >/dev/null 2>&1; do',
+    '  n=$((n + 1)); [ "$n" -lt 24 ] || exit 1',
+    '  sleep 5',
+    'done',
+    'for c in $(docker ps -aq --filter status=exited --filter status=created); do',
+    '  case "$(docker inspect -f \'{{index .Config.Labels "com.docker.compose.service"}} {{.Config.Image}}\' "$c")" in',
+    '    "gateway "*gatecontrol-gateway* | "otbr "*openthread/otbr*) docker start "$c" ;;',
+    '  esac',
+    'done'
+  ].join('\n');
   function checkList(c) {
     var syno = state.platform === 'synology';
     return h('ul', { class: 'checks' }, [
@@ -343,7 +364,7 @@
         out.push(h('div', { class: 'note help' }, [h('b', { text: t('fix_dsm') }), h('ol', {}, [
           h('li', { text: t('fix_dsm_1') }),
           h('li', {}, rich('fix_dsm_2', { root: 'root', boot: t('fix_dsm_boot') })),
-          h('li', {}, rich('fix_dsm_3', { cmd: 'insmod /lib/modules/tun.ko' })),
+          h('li', {}, [t('fix_dsm_3'), h('pre', { tabindex: '0', text: DSM_TUN_TASK }), h('span', { text: t('fix_dsm_what') })]),
           h('li', { text: t('fix_dsm_4') }),
           h('li', {}, rich('fix_dsm_5', { devices: 'devices:', line: '- /dev/net/tun:/dev/net/tun' }))
         ])]));
