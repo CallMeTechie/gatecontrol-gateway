@@ -61,6 +61,7 @@ class PluginNet {
     this.tcp = new Map();
     this.browses = new Map();
     this.ephemeral = null;
+    this.ephemeralReady = null;
     this.nextId = 0;
   }
 
@@ -117,26 +118,60 @@ class PluginNet {
   async udpSend({ id, host, port, b64 }) {
     const c = this.caps().udp;
     this.need(!!c, 'udp');
-    this.guard.check(host, { multicast: c.multicast });
     checkPort(port);
+    // Broadcast (255.255.255.255 oder Broadcast-Adresse eines LAN-Subnetzes): nur mit udp.broadcast und nur an
+    // die eigenen UDP-Ports; 255.255.255.255 geht an die Broadcast-Adresse jedes privaten LAN-Subnetzes
+    const targets = this.guard.broadcastTargets ? this.guard.broadcastTargets(host) : null;
+    if (targets) {
+      this.need(c.broadcast === true, 'udp.broadcast');
+      this.need(c.ports.includes(port), `udp port ${port} (broadcast only to the plugin's UDP ports)`);
+      if (!targets.length) throw new DeniedError('no LAN subnet with a broadcast address');
+    } else {
+      this.guard.check(host, { multicast: c.multicast });
+    }
     const buf = decodeB64(b64, LIMITS.udpDatagramBytes);
     let sock;
     if (id !== undefined && id !== null) {
       sock = this.udp.get(id);
       if (!sock) throw new NetError('not_found', 'udp socket closed');
     } else {
-      if (!this.ephemeral) {
-        this.ephemeral = dgram.createSocket('udp4');
-        this.ephemeral.on('error', () => {});
-        this.ephemeral.on('message', (msg, rinfo) => {
-          if (!this.guard.allowed(rinfo.address)) return;
-          this.toChild({ t: 'udp', id: 0, b64: msg.subarray(0, LIMITS.udpDatagramBytes).toString('base64'), address: rinfo.address, port: rinfo.port });
-        });
-      }
-      sock = this.ephemeral;
+      sock = await this.ephemeralSocket();
     }
-    await new Promise((resolve, reject) => sock.send(buf, port, host, (e) => (e ? reject(new NetError('net_error', `udp send: ${e.code || e.message}`)) : resolve())));
-    return {};
+    const sendTo = (to) => new Promise((resolve, reject) => sock.send(buf, port, to, (e) => (e ? reject(new NetError('net_error', `udp send: ${e.code || e.message}`)) : resolve())));
+    if (!targets) { await sendTo(host); return {}; }
+    // SO_BROADCAST erst, wenn ein Broadcast erlaubt ist; jedes Senden prüft das Ziel trotzdem oben
+    try { sock.setBroadcast(true); } catch (e) { throw new NetError('net_error', `udp broadcast: ${e.code || e.message}`); }
+    let sent = 0;
+    let last = null;
+    for (const to of targets) {
+      try { await sendTo(to); sent++; } catch (e) { last = e; }
+    }
+    if (!sent && last) throw last;
+    return { sent };
+  }
+
+  /**
+   * Der flüchtige Socket für gc.lan.udp.send ohne gebundenen Port – gleich gebunden (Port 0), weil
+   * SO_BROADCAST einen gebundenen Socket braucht. Gleichzeitige Aufrufe warten auf dasselbe Binden.
+   */
+  ephemeralSocket() {
+    if (!this.ephemeral) {
+      const sock = dgram.createSocket('udp4');
+      sock.on('message', (msg, rinfo) => {
+        if (!this.guard.allowed(rinfo.address)) return;
+        this.toChild({ t: 'udp', id: 0, b64: msg.subarray(0, LIMITS.udpDatagramBytes).toString('base64'), address: rinfo.address, port: rinfo.port });
+      });
+      this.ephemeral = sock;
+      this.ephemeralReady = new Promise((resolve, reject) => {
+        sock.once('error', reject);
+        sock.bind(0, () => { sock.off('error', reject); sock.on('error', () => {}); resolve(sock); });
+      }).catch((e) => {
+        if (this.ephemeral === sock) { this.ephemeral = null; this.ephemeralReady = null; }
+        try { sock.close(); } catch { /* zu */ }
+        throw new NetError('net_error', `udp bind: ${e.code || e.message}`);
+      });
+    }
+    return this.ephemeralReady;
   }
 
   udpClose({ id }) {
@@ -152,7 +187,7 @@ class PluginNet {
     this.need(c && c.lan === true, 'tcp.lan');
     this.guard.check(host);
     checkPort(port);
-    if (this.tcp.size >= LIMITS.tcpSocketsPerPlugin) throw new NetError('busy', 'too many TCP connections');
+    if (this.tcp.size >= LIMITS.tcpSocketsPerPlugin) throw new NetError('busy', `too many TCP connections (at most ${LIMITS.tcpSocketsPerPlugin})`);
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const sock = net.connect({ host, port });
@@ -185,6 +220,10 @@ class PluginNet {
     const s = this.tcpSocket(id);
     const buf = decodeB64(b64, LIMITS.tcpWriteBufferBytes);
     if (s.writableLength + buf.length > LIMITS.tcpWriteBufferBytes) throw new NetError('busy', 'write buffer full');
+    // alle Verbindungen des Edge-Teils zusammen (mit 64 Verbindungen sonst bis 64 MB im Gateway)
+    let total = buf.length;
+    for (const x of this.tcp.values()) total += x.writableLength;
+    if (total > LIMITS.tcpWriteBufferTotalBytes) throw new NetError('busy', 'write buffers of this edge part full');
     await new Promise((resolve, reject) => s.write(buf, (e) => (e ? reject(new NetError('net_error', e.message)) : resolve())));
     return {};
   }
@@ -339,7 +378,7 @@ class PluginNet {
   closeAll() {
     for (const s of this.udp.values()) { try { s.close(); } catch { /* zu */ } }
     this.udp.clear();
-    if (this.ephemeral) { try { this.ephemeral.close(); } catch { /* zu */ } this.ephemeral = null; }
+    if (this.ephemeral) { try { this.ephemeral.close(); } catch { /* zu */ } this.ephemeral = null; this.ephemeralReady = null; }
     for (const s of this.tcp.values()) s.destroy();
     this.tcp.clear();
     for (const mid of this.browses.values()) this.mdns.stopBrowse(mid);

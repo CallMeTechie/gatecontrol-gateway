@@ -263,9 +263,17 @@ function makeGc(info) {
     const o = opts && typeof opts === 'object' ? opts : {};
     return hostCall('tls.fingerprint', { host: o.host, port: o.port === undefined ? 443 : o.port, timeoutMs: o.timeoutMs });
   };
+  // gc.gateway: Version, Merkmale (z. B. edge-optional-lan) und Grenzen des Gateways – fehlt bei älteren Gateways
+  const gw = info.gateway && typeof info.gateway === 'object' ? info.gateway : null;
+  const gateway = gw ? Object.freeze({
+    version: typeof gw.version === 'string' ? gw.version : null,
+    features: Object.freeze(Array.isArray(gw.features) ? gw.features.filter((x) => typeof x === 'string') : []),
+    limits: Object.freeze({ ...(gw.limits && typeof gw.limits === 'object' ? gw.limits : {}) }),
+  }) : null;
   return Object.freeze({
     id: info.id,
     version: info.version,
+    gateway,
     handle: (method, fn) => {
       if (typeof method !== 'string' || !/^[A-Za-z0-9._:-]{1,64}$/.test(method)) throw new Error('gc.handle: invalid method name');
       if (typeof fn !== 'function') throw new Error('gc.handle: handler must be a function');

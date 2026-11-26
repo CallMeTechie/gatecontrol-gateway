@@ -94,7 +94,7 @@ class EdgeProcess extends EventEmitter {
 
   spawn() {
     if (this.child) return;
-    const { dir, entry, memoryMb, id, version } = this.spec;
+    const { dir, entry, memoryMb, id, version, gateway } = this.spec;
     const entryPath = path.join(dir, entry);
     if (!entryPath.startsWith(dir + path.sep)) throw new Error('entry outside the plugin folder');
     this.startedAt = this.now();
@@ -141,7 +141,7 @@ class EdgeProcess extends EventEmitter {
     if (this.readyTimer.unref) this.readyTimer.unref();
     let config = null;
     try { config = this.hooks.config ? this.hooks.config() : null; } catch { config = null; }
-    this.toChild({ t: 'init', plugin: { id, version, entry: entryPath, config } });
+    this.toChild({ t: 'init', plugin: { id, version, entry: entryPath, config, gateway: gateway || null } });
   }
 
   toChild(msg) {

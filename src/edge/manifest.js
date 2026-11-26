@@ -63,7 +63,10 @@ function validateCaps(caps, where = 'capabilities') {
     for (const g of groups) {
       if (typeof g !== 'string' || !multicastAllowed(g)) throw new ManifestError('bad_caps', `${where}.udp.multicast: ${g} not allowed`);
     }
-    out.udp = { ports: uniq(ports), multicast: uniq(groups) };
+    // broadcast (Fähigkeit udp.broadcast): gc.lan.udp.send an 255.255.255.255 bzw. die Broadcast-Adresse
+    // eines LAN-Subnetzes – nur an die eigenen udp.ports (netProxy.udpSend)
+    if (u.broadcast !== undefined && typeof u.broadcast !== 'boolean') throw new ManifestError('bad_caps', `${where}.udp.broadcast must be true or false`);
+    out.udp = { ports: uniq(ports), multicast: uniq(groups), ...(u.broadcast === true ? { broadcast: true } : {}) };
   }
   if (caps.mdns !== undefined) {
     const m = caps.mdns;
@@ -108,34 +111,69 @@ function validateCaps(caps, where = 'capabilities') {
   return out;
 }
 
+// Was optional sein kann: MQTT-Topics (Merkmal edge-optional-caps) sowie LAN-Zugriff per TCP, UDP-Ports
+// und UDP-Broadcast (Merkmal edge-optional-lan). Unbekannte optionale Schlüssel (eines neueren Servers)
+// werden übergangen statt das ganze Paket abzulehnen – genehmigt wird ohnehin nur, was hier bekannt ist.
+
 /**
- * Optionale Fähigkeiten (`edge.optionalCapabilities`): nur `mqtt.topics`. Ein
- * Topic steht nie zugleich in `capabilities`, beide zusammen höchstens 16 –
- * dieselben Regeln wie beim Server. Fehlt der Schlüssel → {}.
+ * Optionale Fähigkeiten (`edge.optionalCapabilities`): `mqtt.topics`, `tcp.lan`, `udp.ports` und
+ * `udp.broadcast`. Nichts davon steht zugleich in `capabilities`; Topics und UDP-Ports je höchstens 16
+ * zusammen mit `capabilities` – dieselben Regeln wie beim Server. Fehlt der Schlüssel → {}.
  */
 function validateOptionalCaps(opt, required, where = 'edge.optionalCapabilities') {
   if (opt === undefined || opt === null) return {};
   if (!isObj(opt)) throw new ManifestError('bad_caps', `${where} must be an object`);
-  for (const k of Object.keys(opt)) {
-    if (k !== 'mqtt') throw new ManifestError('bad_caps', `${where}: only "mqtt" can be optional (not "${k}")`);
+  const req = required || {};
+  const out = {};
+  if (opt.mqtt !== undefined) {
+    const m = opt.mqtt;
+    if (!isObj(m) || Object.keys(m).some((x) => x !== 'topics')) throw new ManifestError('bad_caps', `${where}.mqtt: only "topics" can be optional`);
+    const mq = validateCaps({ mqtt: m }, where).mqtt;
+    const own = (req.mqtt && req.mqtt.topics) || [];
+    const both = mq.topics.find((t) => own.includes(t));
+    if (both !== undefined) throw new ManifestError('bad_caps', `${where}.mqtt.topics: ${both} is already in edge.capabilities`);
+    if (own.length + mq.topics.length > 16) throw new ManifestError('bad_caps', `${where}.mqtt.topics: at most 16 topics together with edge.capabilities`);
+    out.mqtt = mq;
   }
-  if (opt.mqtt === undefined) return {};
-  const m = opt.mqtt;
-  if (!isObj(m) || Object.keys(m).some((x) => x !== 'topics')) throw new ManifestError('bad_caps', `${where}.mqtt: only "topics" can be optional`);
-  const out = validateCaps({ mqtt: m }, where).mqtt;
-  const own = (required && required.mqtt && required.mqtt.topics) || [];
-  const both = out.topics.find((t) => own.includes(t));
-  if (both !== undefined) throw new ManifestError('bad_caps', `${where}.mqtt.topics: ${both} is already in edge.capabilities`);
-  if (own.length + out.topics.length > 16) throw new ManifestError('bad_caps', `${where}.mqtt.topics: at most 16 topics together with edge.capabilities`);
-  return { mqtt: out };
+  if (opt.tcp !== undefined) {
+    const t = validateCaps({ tcp: opt.tcp }, where).tcp;
+    if (t.lan !== true) throw new ManifestError('bad_caps', `${where}.tcp: only { "lan": true } can be optional`);
+    if (req.tcp && req.tcp.lan === true) throw new ManifestError('bad_caps', `${where}.tcp.lan is already in edge.capabilities`);
+    out.tcp = { lan: true };
+  }
+  if (opt.udp !== undefined) {
+    const u = opt.udp;
+    if (!isObj(u) || Object.keys(u).some((x) => x !== 'ports' && x !== 'broadcast')) {
+      throw new ManifestError('bad_caps', `${where}.udp: only "ports" and "broadcast" can be optional`);
+    }
+    const ud = validateCaps({ udp: u }, where).udp;
+    const own = req.udp || { ports: [], multicast: [] };
+    const both = ud.ports.find((p) => own.ports.includes(p));
+    if (both !== undefined) throw new ManifestError('bad_caps', `${where}.udp.ports: ${both} is already in edge.capabilities`);
+    if (own.ports.length + ud.ports.length > 16) throw new ManifestError('bad_caps', `${where}.udp.ports: at most 16 ports together with edge.capabilities`);
+    if (ud.broadcast && own.broadcast) throw new ManifestError('bad_caps', `${where}.udp.broadcast is already in edge.capabilities`);
+    if (ud.broadcast && !own.ports.length && !ud.ports.length) throw new ManifestError('bad_caps', `${where}.udp.broadcast needs udp.ports`);
+    if (ud.ports.length || ud.broadcast) out.udp = { ports: ud.ports, ...(ud.broadcast ? { broadcast: true } : {}) };
+  }
+  return out;
 }
 
-/** Obergrenze aus Pflicht- und optionalen Fähigkeiten (nur MQTT-Topics). */
+/** Obergrenze aus Pflicht- und optionalen Fähigkeiten (MQTT-Topics, tcp.lan, UDP-Ports und -Broadcast). */
 function withOptional(caps, opt) {
-  const extra = (opt && opt.mqtt && opt.mqtt.topics) || [];
-  if (!extra.length) return caps;
-  const own = (caps.mqtt && caps.mqtt.topics) || [];
-  return { ...caps, mqtt: { topics: uniq(own.concat(extra)) } };
+  const o = opt || {};
+  let out = caps;
+  const extra = (o.mqtt && o.mqtt.topics) || [];
+  if (extra.length) {
+    const own = (caps.mqtt && caps.mqtt.topics) || [];
+    out = { ...out, mqtt: { topics: uniq(own.concat(extra)) } };
+  }
+  if (o.tcp && o.tcp.lan === true) out = { ...out, tcp: { lan: true } };
+  if (o.udp && ((o.udp.ports && o.udp.ports.length) || o.udp.broadcast === true)) {
+    const own = caps.udp || { ports: [], multicast: [] };
+    out = { ...out, udp: { ports: uniq(own.ports.concat(o.udp.ports || [])), multicast: own.multicast.slice(),
+      ...(own.broadcast === true || o.udp.broadcast === true ? { broadcast: true } : {}) } };
+  }
+  return out;
 }
 
 /**
@@ -152,7 +190,7 @@ function intersectCaps(manifestCaps, approved, optionalCaps) {
   if (m.udp && a.udp) {
     const ports = m.udp.ports.filter((p) => a.udp.ports.includes(p));
     const multicast = m.udp.multicast.filter((g) => a.udp.multicast.includes(g));
-    out.udp = { ports, multicast };
+    out.udp = { ports, multicast, ...(m.udp.broadcast === true && a.udp.broadcast === true ? { broadcast: true } : {}) };
   }
   if (m.mdns && a.mdns) out.mdns = { services: m.mdns.services.filter((s) => a.mdns.services.includes(s)) };
   if (m.tcp && a.tcp) out.tcp = { lan: m.tcp.lan === true && a.tcp.lan === true };
@@ -219,6 +257,6 @@ function validateEdgeManifest(manifest, { gatewayVersion } = {}) {
 }
 
 module.exports = {
-  ManifestError, validateCaps, validateOptionalCaps, intersectCaps, validateEdgeManifest, compareVersions, parseSemver, multicastAllowed,
+  ManifestError, validateCaps, validateOptionalCaps, withOptional, intersectCaps, validateEdgeManifest, compareVersions, parseSemver, multicastAllowed,
   MDNS_GROUP, SERIAL_NAMES,
 };

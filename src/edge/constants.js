@@ -50,8 +50,12 @@ const LIMITS = Object.freeze({
   httpTimeoutMaxMs: 30000,
   udpSocketsPerPlugin: 16,
   udpDatagramBytes: 8192,
-  tcpSocketsPerPlugin: 32,
+  // 64 (vorher 32): z. B. Tuya – je WLAN-Gerät eine dauerhafte Verbindung, 20–30 Geräte und mehr an einem Gateway.
+  // Kosten je Verbindung im Gateway: ein Socket (Dateideskriptor) und einige KB; der Schreibpuffer ist je
+  // Verbindung (1 MB) und für alle zusammen (32 MB, so viel wie früher 32 × 1 MB) begrenzt.
+  tcpSocketsPerPlugin: 64,
   tcpWriteBufferBytes: 1024 * 1024,
+  tcpWriteBufferTotalBytes: 32 * 1024 * 1024,
   mdnsBrowsesPerPlugin: 8,
   mqttSubscriptionsPerPlugin: 64,
   mqttPayloadBytes: 256 * 1024,
