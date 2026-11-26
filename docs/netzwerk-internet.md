@@ -146,8 +146,10 @@ je Bericht ≤ 600 Werte; bestätigte Einträge fliegen aus dem Puffer.
 **Speedtest** gegen den eigenen Server über die öffentliche `serverUrl` (nicht
 durch den Tunnel): 4 parallele Streams, je Richtung 10 s
 (`GET /api/v1/gateway/speedtest/down?bytes=25000000` wiederholt,
-`POST /api/v1/gateway/speedtest/up` mit 8 MB je Anfrage), die erste Sekunde
-zählt nicht. Ergebnis `{ at, downMbps, upMbps, bytes, streams, error? }`.
+`POST /api/v1/gateway/speedtest/up` mit bis zu 8 MB je Anfrage), die erste Sekunde
+zählt nicht. Der Upload geht ohne `Content-Length` (chunked): ist die Zeit um,
+schließt das Gateway den Body mit dem letzten Chunk ab und wartet bis zu 5 s auf
+die Antwort, statt die Anfrage mitten im Body abzubrechen. Ergebnis `{ at, downMbps, upMbps, bytes, streams, error? }`.
 Plan `4x` = 00/06/12/18 Uhr Ortszeit + Zufallsminute, `hourly` = jede Stunde +
 Zufallsminute, nicht während eines Ausfalls; während des Tests wird nicht
 gemessen. „Jetzt messen“: `POST /api/inetq/speedtest` → 202 / 409

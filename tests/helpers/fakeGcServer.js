@@ -10,7 +10,7 @@ const crypto = require('node:crypto');
 async function startFakeServer({ token = 'gc_gw_' + 'a'.repeat(64), maxStreams = 8, status = {}, streamBytesPerSec = 0 } = {}) {
   const posts = [];
   // maxActiveDown/-Up: gleichzeitige Streams je Richtung
-  const counters = { down: 0, up: 0, active: 0, maxActive: 0, activeDown: 0, activeUp: 0, maxActiveDown: 0, maxActiveUp: 0, authFail: 0 };
+  const counters = { down: 0, up: 0, active: 0, maxActive: 0, activeDown: 0, activeUp: 0, maxActiveDown: 0, maxActiveUp: 0, authFail: 0, upEnded: 0, upCut: 0, upFixedLength: 0 };
   const block = crypto.randomBytes(64 * 1024);
   const server = http.createServer((req, res) => {
     if (req.headers.authorization !== `Bearer ${token}`) {
@@ -58,13 +58,17 @@ async function startFakeServer({ token = 'gc_gw_' + 'a'.repeat(64), maxStreams =
       }
       if (url.pathname.endsWith('/up') && req.method === 'POST') {
         let got = 0;
+        let complete = false;
         const t0 = Date.now();
+        // Upload mit festem Content-Length lässt sich nicht vorzeitig sauber beenden
+        if (req.headers['content-length'] !== undefined) counters.upFixedLength++;
         req.on('data', (c) => {
           got += c.length; counters.up += c.length;
           if (streamBytesPerSec) { req.pause(); setTimeout(() => req.resume(), (c.length / streamBytesPerSec) * 1000); }
         });
-        req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, bytes: got, ms: Date.now() - t0 })); });
-        req.on('close', done);
+        req.on('end', () => { complete = true; counters.upEnded++; res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, bytes: got, ms: Date.now() - t0 })); });
+        // Body nicht zu Ende gelesen → so sieht der Server einen abgebrochenen Upload (Caddy: 499/502)
+        req.on('close', () => { if (!complete) counters.upCut++; done(); });
         return undefined;
       }
       done();
