@@ -13,6 +13,13 @@
 // Zeit bis dahin. Der Server kürzt einen Download von sich aus (weniger Bytes
 // als verlangt); den Upload bestimmt das Gateway, deshalb gilt der Deckel hier
 // für beide Richtungen.
+//
+// Upload sauber beenden: Der Upload geht ohne Content-Length (chunked). Ist die
+// Zeit um, schickt das Gateway den letzten (leeren) Chunk (`req.end()`) und
+// wartet kurz auf die Antwort des Servers, statt die Anfrage mitten im Body
+// abzubrechen (`destroy()`). Ein abgebrochener Body erschien im Server-Log als
+// 499/502; mit festem Content-Length ließe sich die Anfrage vorzeitig gar nicht
+// sauber beenden.
 
 const http = require('node:http');
 const https = require('node:https');
@@ -26,6 +33,7 @@ const DEFAULTS = Object.freeze({
   downBytes: 25_000_000,
   upBytes: 8_000_000,
   requestTimeoutMs: 15_000,
+  endGraceMs: 5_000, // Upload: so lange nach dem Ende des Bodys auf die Antwort warten (Rest im Socket-Puffer)
   maxDownBytes: null, // Deckel je Richtung über alle Streams (null = nur die Zeit begrenzt)
   maxUpBytes: null,
   maxTotalBytes: null, // Deckel für beide Richtungen zusammen (Rest des Tagesbudgets)
@@ -83,7 +91,8 @@ async function phase(direction, { base, mod, agent, apiToken, o, cap }) {
   const over = () => timeUp() || full();
 
   const warmTimer = setTimeout(() => { warm = { t: performance.now(), bytes }; }, o.warmupMs);
-  const stopTimer = setTimeout(() => { for (const r of active) r.destroy(); }, o.durationMs);
+  // Zeit um: Downloads abbrechen, Uploads sauber beenden (letzter Chunk statt Abbruch)
+  const stopTimer = setTimeout(() => { for (const r of active) (r.gcEndBody || r.destroy).call(r); }, o.durationMs);
 
   function once() {
     return new Promise((resolve) => {
@@ -94,7 +103,8 @@ async function phase(direction, { base, mod, agent, apiToken, o, cap }) {
       let got = 0; // tatsächlich übertragen (der Server darf einen Download kürzen)
       const url = new URL(`${base}/api/v1/gateway/speedtest/${down ? `down?bytes=${want}` : 'up'}`);
       const headers = { Authorization: `Bearer ${apiToken}` };
-      if (!down) { headers['Content-Type'] = 'application/octet-stream'; headers['Content-Length'] = String(want); }
+      // Upload ohne Content-Length → chunked: lässt sich jederzeit sauber beenden
+      if (!down) headers['Content-Type'] = 'application/octet-stream';
       let settled = false;
       const done = (err) => {
         if (settled) return;
@@ -130,15 +140,27 @@ async function phase(direction, { base, mod, agent, apiToken, o, cap }) {
       });
       if (down) { req.end(); return; }
       let sent = 0;
+      let bodyEnded = false;
+      // Body abschließen (letzter Chunk) und kurz auf die Antwort warten; antwortet der
+      // Server nicht, wird die Anfrage erst danach abgebrochen
+      const endBody = () => {
+        if (bodyEnded || req.destroyed) return;
+        bodyEnded = true;
+        req.end();
+        const grace = setTimeout(() => req.destroy(new Error('timeout')), o.endGraceMs);
+        req.once('close', () => clearTimeout(grace));
+      };
+      req.gcEndBody = endBody;
       const pump = () => {
-        while (sent < want && !timeUp() && !req.destroyed) {
+        while (sent < want && !timeUp() && !bodyEnded && !req.destroyed) {
           const n = Math.min(UP_CHUNK.length, want - sent);
           const chunk = n === UP_CHUNK.length ? UP_CHUNK : UP_CHUNK.subarray(0, n);
           sent += n;
-          const more = req.write(chunk, (err) => { if (!err) { bytes += n; got += n; } });
+          // was erst nach Ablauf der Zeit aus dem Puffer geht, zählt nicht mehr zur Messung
+          const more = req.write(chunk, (err) => { if (err) return; got += n; if (!timeUp()) bytes += n; });
           if (!more) { req.once('drain', pump); return; }
         }
-        if (sent >= want) req.end();
+        endBody(); // alles gesendet oder die Zeit ist um
       };
       pump();
     });

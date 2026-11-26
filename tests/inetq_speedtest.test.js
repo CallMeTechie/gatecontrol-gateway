@@ -36,6 +36,47 @@ describe('speedtest against a fake server', () => {
     }
   });
 
+  it('upload ends cleanly when the time is up: chunked, last chunk sent, no request cut mid-body', async () => {
+    // gedrosselt und große Anfragen: keine Upload-Anfrage wird vor Ablauf der Zeit fertig
+    const s2 = await startFakeServer({ streamBytesPerSec: 20_000_000 });
+    try {
+      const r = await runSpeedtest({
+        serverUrl: s2.url, apiToken: s2.token, streams: 2, durationMs: 800, warmupMs: 100,
+        downBytes: 200_000, upBytes: 500_000_000,
+      });
+      assert.equal(r.error, undefined, JSON.stringify(r));
+      assert.ok(r.upMbps > 0, JSON.stringify(r));
+      assert.ok(s2.counters.up > 0 && s2.counters.up < 500_000_000);
+      assert.equal(s2.counters.upFixedLength, 0, 'upload without Content-Length (chunked)');
+      assert.ok(s2.counters.upEnded >= 2, `upEnded ${s2.counters.upEnded}`);
+      assert.equal(s2.counters.upCut, 0, 'no upload ended mid-body');
+    } finally {
+      await s2.close();
+    }
+  });
+
+  it('upload: server answers nothing after the end of the body → aborted after the grace time, no hang', async () => {
+    const http = require('node:http');
+    const server = http.createServer((req, res) => {
+      if (req.url.includes('/down')) { res.writeHead(200, { 'Content-Length': 10 }); return res.end('x'.repeat(10)); }
+      req.resume(); // liest den Body, antwortet aber nie
+      return undefined;
+    });
+    await new Promise((ok) => server.listen(0, '127.0.0.1', ok));
+    try {
+      const t0 = Date.now();
+      const r = await runSpeedtest({
+        serverUrl: `http://127.0.0.1:${server.address().port}`, apiToken: 't', streams: 1,
+        durationMs: 900, warmupMs: 50, downBytes: 10, upBytes: 1_000_000_000_000, endGraceMs: 300,
+      });
+      assert.ok(Date.now() - t0 < 4000, `took ${Date.now() - t0} ms`);
+      assert.ok(r.upMbps > 0, JSON.stringify(r));
+    } finally {
+      server.closeAllConnections();
+      await new Promise((ok) => server.close(ok));
+    }
+  });
+
   it('server busy (429) → error code from the body, no Mbps', async () => {
     srv.status.speedtest = 429;
     try {
