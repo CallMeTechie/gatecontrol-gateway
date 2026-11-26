@@ -87,6 +87,7 @@ test('hello → state → Edge-Teil läuft', async () => {
   assert.deepStrictEqual(hello.gw.isolation, { mode: 'isolated', active: true });
   assert.ok(hello.gw.features.includes('edge-optional-caps'), 'Merkmal für den Server (sonst „Gateway zu alt“)');
   assert.ok(hello.gw.features.includes('z2m-thermostat-ext'), 'Thermostate über zigbee2mqtt mit preset/boost/Fenster');
+  assert.ok(hello.gw.features.includes('radio-contacts'), 'Fensterkontakte für Edge-Teile unter gatecontrol/contacts/#');
   // das Token setzt das Gateway; der Edge-Host kennt es nicht
   assert.ok(server.auth.includes(`Bearer ${TOKEN}`));
   for (const f of fs.readdirSync(runDir)) {

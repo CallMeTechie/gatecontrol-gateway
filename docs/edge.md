@@ -115,7 +115,8 @@ Gateway-Container erkennt das am fehlenden `/run/gc-edge` und tut dann nichts.
 * Nach dem Verbinden: `hello` (Gateway-Version, Edge-Host-Version,
   MQTT-Verfügbarkeit, Netzgrenze, Betriebsart `isolation: { mode, active }`,
   Hardware-Profil, Merkmale `features` – z. B. `edge-optional-caps`, siehe
-  „Optionale Fähigkeiten“), der Server antwortet mit
+  „Optionale Fähigkeiten“, `radio-contacts`, siehe [radio.md](radio.md)
+  „Fensterkontakte für Edge-Teile“), der Server antwortet mit
   dem vollständigen Sollzustand `state`. Danach sendet der Edge-Host noch
   unbestätigte Ereignisse erneut.
 * `status` bei jeder Änderung (gebündelt, 1 s) und alle 30 s.

@@ -188,6 +188,40 @@ Adapter und MQTT-Zugang über Umgebungsvariablen (`ZIGBEE2MQTT_CONFIG_*`).
   Thermostaten, geplante OTA-Updates
   (`ota_update/schedule`).
 
+## Fensterkontakte für Edge-Teile
+
+Capability `radio-contacts` (Heartbeat und `hello` unter `gw.features`). Damit ein
+Edge-Teil – die Heizung des Smart-Home-Plugins – ein offenes Fenster auch ohne
+Server erkennt, legt das Gateway den Zustand der Tür-/Fensterkontakte, die es
+selbst hört, als gehaltene (retained) Nachrichten an seinen MQTT-Broker
+(`src/radio/contacts.js`):
+
+| Topic | Inhalt |
+|---|---|
+| `gatecontrol/contacts` | `{ v: 1, feature: "radio-contacts", sources: ["ble", "z2m"] }` – das Gateway liefert |
+| `gatecontrol/contacts/ble-<MAC>` | Bluetooth (BTHome `window`/`door`/`opening`, z. B. Shelly BLU Door/Window): `{ open, since, seen }` |
+| `gatecontrol/contacts/z2m-<IEEE>` | zigbee2mqtt (`contact`): `{ open, since, seen, online? }` |
+
+`<MAC>` sind die zwölf Hex-Zeichen klein ohne Doppelpunkte, `<IEEE>` die 16 ohne
+`0x` – wie die Kennungen `ble:<MAC>` / `z2m:<IEEE>` im Server. `open: true` heißt
+offen, `since` seit wann (ms) dieser Zustand gilt, `seen` die letzte Meldung des
+Kontakts (ms), `online` die availability von zigbee2mqtt (nur wenn sie gemeldet
+wird). Bluetooth nur, solange Bluetooth an ist, zigbee2mqtt nur mit diesem Stack.
+
+* Gesendet bei jeder Änderung von `open`/`online` (geprüft alle 2 s), sonst
+  höchstens alle 10 Min. mit neuem `seen`; nach jedem neuen Verbindungsaufbau
+  zum Broker alles noch einmal. Ein Kontakt, der 24 h nichts meldet, wird
+  gelöscht (leere gehaltene Nachricht) – vorher nicht: ein Bluetooth-Kontakt,
+  der nur bei Änderungen sendet, behält seinen letzten Zustand. Wie lange ein
+  „offen“ gilt, entscheidet der Leser anhand von `seen`.
+* Höchstens 128 Kontakte. Nur mit dem Edge-Volume (neue Compose-Datei), wie
+  zigbee2mqtt; ohne Broker merkt sich das Gateway den Zustand und sendet,
+  sobald er läuft.
+* Lesen darf nur ein Edge-Teil, dem GateControl `gatecontrol/contacts/#`
+  genehmigt hat (Pflicht- oder bestätigte optionale Fähigkeit, „Optionale
+  Fähigkeiten“ in [edge.md](edge.md)); schreiben nur das Gateway (internes
+  Konto, eigener Teil neben zigbee2mqtt).
+
 ## Thread (OpenThread Border Router)
 
 Für einen Stick mit **RCP-Firmware** (OpenThread): SkyConnect/ZBT-1, ZBT-2,

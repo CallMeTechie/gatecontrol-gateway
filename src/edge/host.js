@@ -32,7 +32,7 @@ const { GatewayRpc, RemoteNet, RemoteMqtt } = require('./remote');
 const { checkBoundary } = require('./fence');
 
 // Merkmale für das hello (der Server zeigt „Gateway zu alt“, wenn eines fehlt)
-const EDGE_FEATURES = Object.freeze(['edge-optional-caps', 'z2m-thermostat-ext']);
+const EDGE_FEATURES = Object.freeze(['edge-optional-caps', 'z2m-thermostat-ext', 'radio-contacts']);
 
 const GATEWAY_VERSION = (() => { try { return require('../../package.json').version; } catch { return '0.0.0'; } })();
 const DOWNLOAD_RETRY_MS = 60000;
@@ -226,7 +226,8 @@ class EdgeHost extends EventEmitter {
         isolation: { mode: this.mode, active: this.fence.active },
         hardware: this.hardware(),
         // Merkmale des Edge-Hosts; edge-optional-caps: bestätigte optionale MQTT-Topics (edge.optionalCapabilities) gelten;
-        // z2m-thermostat-ext: Thermostate über zigbee2mqtt mit preset/boost/boost_time/window_* (docs/radio.md)
+        // z2m-thermostat-ext: Thermostate über zigbee2mqtt mit preset/boost/boost_time/window_* (docs/radio.md);
+        // radio-contacts: Fensterkontakte (Bluetooth, zigbee2mqtt) für Edge-Teile unter gatecontrol/contacts/# (docs/radio.md)
         features: EDGE_FEATURES,
       },
     };
