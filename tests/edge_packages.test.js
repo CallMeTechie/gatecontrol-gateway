@@ -82,7 +82,7 @@ test('optionalCapabilities: im entpackten Paket; ältere .ready.json ohne den Sc
     fs.writeFileSync(pj, JSON.stringify(m));
     assert.strictEqual(store.installed('demo-edge', '1.0.0', p.sha256), null);
     // ungültiges Manifest wird schon beim Prüfen abgelehnt
-    const bad = makePackage({ sign: 'trusted', trusted, edge: { ...edge, optionalCapabilities: { udp: { ports: [40000] } } } });
+    const bad = makePackage({ sign: 'trusted', trusted, edge: { ...edge, optionalCapabilities: { udp: { ports: [40000], multicast: ['239.1.2.3'] } } } });
     assert.throws(() => packages.inspect(bad.buf, { id: 'demo-edge', version: '1.0.0', sha256: bad.sha256, keys }), (e) => e.code === 'bad_caps' || e.code === 'bad_manifest');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

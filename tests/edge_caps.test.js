@@ -40,7 +40,7 @@ test('wirksam = Manifest ∩ Genehmigung', () => {
   assert.strictEqual(e.mdns, undefined, 'nicht verlangt');
 });
 
-test('optionalCapabilities: nur mqtt.topics, nie doppelt, höchstens 16 zusammen', () => {
+test('optionalCapabilities (MQTT): nie doppelt, höchstens 16 zusammen', () => {
   const base = { id: 'x', version: '1.0.0' };
   const edge = (extra) => ({ ...base, edge: { entry: 'edge/index.js', capabilities: { mqtt: { topics: ['shellies/#', 'tasmota/#'] } }, ...extra } });
   const ok = validateEdgeManifest(edge({ optionalCapabilities: { mqtt: { topics: ['zigbee2mqtt/#', 'zigbee2mqtt/#'] } } }));
@@ -52,8 +52,8 @@ test('optionalCapabilities: nur mqtt.topics, nie doppelt, höchstens 16 zusammen
   // ohne Pflicht-MQTT nur optional
   assert.deepStrictEqual(validateEdgeManifest({ ...base, edge: { entry: 'e/i.js', optionalCapabilities: { mqtt: { topics: ['a/#'] } } } }).optionalCapabilities, { mqtt: { topics: ['a/#'] } });
   const reject = (opt, re) => assert.throws(() => validateEdgeManifest(edge({ optionalCapabilities: opt })), (e) => e.code === 'bad_caps' && re.test(e.message), JSON.stringify(opt));
-  reject({ udp: { ports: [40000] } }, /only "mqtt" can be optional/);
-  reject({ http: { lan: true } }, /only "mqtt" can be optional/);
+  // andere Schlüssel (mdns, http, serial, unbekannte eines neueren Servers) werden übergangen – sie gelten nie
+  assert.deepStrictEqual(validateEdgeManifest(edge({ optionalCapabilities: { http: { lan: true }, mdns: { services: ['_x._tcp'] }, future: 1 } })).optionalCapabilities, {});
   reject({ mqtt: { topics: ['a/#'], qos: 1 } }, /only "topics" can be optional/);
   reject({ mqtt: { topics: ['#'] } }, /optionalCapabilities\.mqtt\.topics: #/);
   reject({ mqtt: { topics: 'a/#' } }, /optionalCapabilities\.mqtt\.topics/);

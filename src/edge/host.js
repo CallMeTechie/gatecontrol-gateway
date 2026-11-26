@@ -31,12 +31,23 @@ const { NetError } = require('./netProxy');
 const { GatewayRpc, RemoteNet, RemoteMqtt } = require('./remote');
 const { checkBoundary } = require('./fence');
 
-// Merkmale für das hello (der Server zeigt „Gateway zu alt“, wenn eines fehlt)
-const EDGE_FEATURES = Object.freeze(['edge-optional-caps', 'z2m-thermostat-ext', 'radio-contacts']);
+// Merkmale für das hello (der Server zeigt „Gateway zu alt“, wenn eines fehlt); der Edge-Teil sieht sie als gc.gateway.features
+//   edge-optional-caps  bestätigte optionale MQTT-Topics (edge.optionalCapabilities) gelten
+//   edge-optional-lan   bestätigte optionale tcp.lan / udp.port / udp.broadcast gelten, UDP-Broadcast an die eigenen
+//                       Ports, 64 TCP-Verbindungen je Edge-Teil (vorher 32)
+//   z2m-thermostat-ext  Thermostate über zigbee2mqtt mit preset/boost/boost_time/window_* (docs/radio.md)
+//   radio-contacts      Fensterkontakte (Bluetooth, zigbee2mqtt) für Edge-Teile unter gatecontrol/contacts/# (docs/radio.md)
+const EDGE_FEATURES = Object.freeze(['edge-optional-caps', 'edge-optional-lan', 'z2m-thermostat-ext', 'radio-contacts']);
 
 const GATEWAY_VERSION = (() => { try { return require('../../package.json').version; } catch { return '0.0.0'; } })();
 const DOWNLOAD_RETRY_MS = 60000;
 const INFO_WAIT_MS = 3000;
+
+/** gc.gateway im Edge-Teil: Version, Merkmale und die Grenzen, die ein Edge-Teil kennen sollte. */
+function gatewayInfo(version) {
+  return { version, features: EDGE_FEATURES.slice(),
+    limits: { tcpConnections: LIMITS.tcpSocketsPerPlugin, udpSockets: LIMITS.udpSocketsPerPlugin, udpDatagramBytes: LIMITS.udpDatagramBytes } };
+}
 
 function errInfo(e) {
   return { code: (e && typeof e.code === 'string' && e.code.length <= 32) ? e.code : 'edge_error', message: String((e && e.message) || e).slice(0, 300) };
@@ -225,9 +236,7 @@ class EdgeHost extends EventEmitter {
         fence: this.fenceView(),
         isolation: { mode: this.mode, active: this.fence.active },
         hardware: this.hardware(),
-        // Merkmale des Edge-Hosts; edge-optional-caps: bestätigte optionale MQTT-Topics (edge.optionalCapabilities) gelten;
-        // z2m-thermostat-ext: Thermostate über zigbee2mqtt mit preset/boost/boost_time/window_* (docs/radio.md);
-        // radio-contacts: Fensterkontakte (Bluetooth, zigbee2mqtt) für Edge-Teile unter gatecontrol/contacts/# (docs/radio.md)
+        // Merkmale des Edge-Hosts (siehe EDGE_FEATURES)
         features: EDGE_FEATURES,
       },
     };
@@ -408,7 +417,7 @@ class EdgeHost extends EventEmitter {
     // Obergrenze: Pflicht- ∪ optionale Fähigkeiten des Pakets; optionale nur, solange der Server sie schickt
     const caps = intersectCaps(inst.edge.capabilities, p.caps, inst.edge.optionalCapabilities);
     const memoryMb = p.memoryMb || inst.edge.memoryMb;
-    const spec = { id: p.id, version: p.version, dir: inst.dir, entry: inst.edge.entry, memoryMb };
+    const spec = { id: p.id, version: p.version, dir: inst.dir, entry: inst.edge.entry, memoryMb, gateway: gatewayInfo(this.gatewayVersion) };
     const changed = !e.spec || e.spec.version !== spec.version || e.sha256 !== p.sha256 || e.spec.memoryMb !== spec.memoryMb;
     e.caps = caps;
     // entzogene Topics: laufende Abos sofort beenden (nicht erst beim nächsten Aufruf)

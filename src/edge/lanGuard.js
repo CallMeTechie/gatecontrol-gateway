@@ -15,6 +15,17 @@ class DeniedError extends Error {
 }
 
 const CACHE_MS = 10000;
+const LIMITED_BROADCAST = '255.255.255.255';
+
+/** Broadcast-Adresse eines IPv4-Netzes (Netzadresse + Präfix); null für /31 und /32 (kein Broadcast). */
+function broadcastOf(network, prefix) {
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix >= 31) return null;
+  const o = network.split('.').map(Number);
+  const n = ((o[0] << 24) >>> 0) + (o[1] << 16) + (o[2] << 8) + o[3];
+  const host = prefix === 0 ? 0xffffffff : (2 ** (32 - prefix)) - 1;
+  const b = (n | host) >>> 0;
+  return [b >>> 24, (b >>> 16) & 255, (b >>> 8) & 255, b & 255].join('.');
+}
 
 /** Netzadresse in RFC 1918 (10/8, 172.16/12, 192.168/16)? */
 function isPrivateNet(cidr) {
@@ -74,7 +85,23 @@ function makeLanGuard({ getSubnets, tunnelIp = null, serverAddrs = () => [], now
     try { check(host, opts); return true; } catch { return false; }
   }
 
-  return { check, allowed, subnets: () => subnets().map((s) => s.cidr) };
+  /** Broadcast-Adressen der privaten LAN-Subnetze (ohne /31, /32). */
+  function broadcasts() {
+    return [...new Set(subnets().map((s) => broadcastOf(s.network, s.prefix)).filter(Boolean))];
+  }
+
+  /**
+   * Ist `host` ein Broadcast-Ziel? 255.255.255.255 → alle Subnetz-Broadcasts (nie über Tunnel oder andere
+   * Schnittstellen), eine Subnetz-Broadcast-Adresse → nur sie; sonst null (kein Broadcast).
+   */
+  function broadcastTargets(host) {
+    if (typeof host !== 'string') return null;
+    const list = broadcasts();
+    if (host === LIMITED_BROADCAST) return list;
+    return list.includes(host) ? [host] : null;
+  }
+
+  return { check, allowed, broadcasts, broadcastTargets, subnets: () => subnets().map((s) => s.cidr) };
 }
 
 function checkPort(port) {
@@ -82,4 +109,4 @@ function checkPort(port) {
   return port;
 }
 
-module.exports = { makeLanGuard, checkPort, DeniedError, privateLanCidrs, isPrivateNet };
+module.exports = { makeLanGuard, checkPort, DeniedError, privateLanCidrs, isPrivateNet, broadcastOf, LIMITED_BROADCAST };
