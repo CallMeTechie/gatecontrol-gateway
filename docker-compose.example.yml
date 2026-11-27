@@ -710,11 +710,13 @@ services:
   #                             (/volume2/mediathek) – so passen die Pfade aus Jellyfin
   #   GC_UMW_ROOTS              nur bei mehreren Ordnern: alle mit „:“ getrennt, und je
   #                             Ordner eine Zeile unter volumes:
+  #   GC_UMW_IMAGE              nur, wenn ein anderes Image gelten soll (z. B. auf der NAS
+  #                             selbst gebaut: docker build --target umwandeln -t … .)
   # Ohne Intel-Grafik (kein /dev/dri/renderD128): die Zeilen devices: entfernen –
   # umgewandelt wird dann nur, wenn „ohne Grafik (langsam)“ in GateControl erlaubt ist.
   umwandeln:
     profiles: ["umwandeln"]
-    image: ghcr.io/callmetechie/gatecontrol-gateway:umwandeln
+    image: ${GC_UMW_IMAGE:-ghcr.io/callmetechie/gatecontrol-gateway:umwandeln}   # anderes Image (z. B. selbst gebaut): GC_UMW_IMAGE
     restart: unless-stopped
     network_mode: none        # Aufträge kommen über das Volume, nichts geht ins Netz
     user: "${GC_UMW_UID:-65534}:${GC_UMW_GID:-65534}"

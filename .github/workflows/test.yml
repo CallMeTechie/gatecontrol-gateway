@@ -235,12 +235,16 @@ jobs:
     # Container mit den Schutzoptionen der Compose-Datei (kein Netz, keine Rechte, nicht root,
     # read-only) ein erzeugtes 10-Bit-Video wirklich umwandeln – auf dem Software-Weg, weil der
     # Runner keine Intel-Grafik hat. VAAPI selbst prüft nur ein echtes Gerät.
+    # Beide ffmpeg-Varianten (Dockerfile, ARG UMW_FFMPEG): jellyfin (Standard) und debian.
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: { ffmpeg: [jellyfin, debian] }
     steps:
       - uses: actions/checkout@v4
-      - name: Build umwandeln image (amd64)
-        run: docker build --target umwandeln -t gc-umwandeln-test .
+      - name: Build umwandeln image (amd64, ${{ matrix.ffmpeg }})
+        run: docker build --target umwandeln --build-arg UMW_FFMPEG=${{ matrix.ffmpeg }} -t gc-umwandeln-test .
       - name: ffmpeg, ffprobe, vainfo, Encoder
         run: |
           docker run --rm --entrypoint ffmpeg gc-umwandeln-test -hide_banner -version | head -n 1
@@ -249,7 +253,14 @@ jobs:
           docker run --rm --entrypoint sh gc-umwandeln-test -c 'ffmpeg -hide_banner -encoders 2>/dev/null | grep -E " (h264_vaapi|libx264) "'
           docker run --rm --entrypoint sh gc-umwandeln-test -c 'ffmpeg -hide_banner -encoders 2>/dev/null | grep -c " h264_vaapi "'
           docker run --rm --entrypoint cat gc-umwandeln-test /usr/share/doc/gatecontrol-umwandeln/NOTICE.txt | head -n 8
-          docker run --rm --entrypoint test gc-umwandeln-test -s /usr/share/doc/jellyfin-ffmpeg8/copyright
+          if [ "${{ matrix.ffmpeg }}" = jellyfin ]; then
+            docker run --rm --entrypoint test gc-umwandeln-test -s /usr/share/doc/jellyfin-ffmpeg8/copyright
+          else
+            docker run --rm --entrypoint test gc-umwandeln-test -s /usr/share/doc/ffmpeg/copyright
+            docker run --rm --entrypoint sh gc-umwandeln-test -c '! ffmpeg -hide_banner -buildconf 2>/dev/null | grep -q fdk'
+            docker run --rm --entrypoint dpkg-query gc-umwandeln-test -W ffmpeg intel-media-va-driver-non-free vainfo
+          fi
+          docker image inspect -f 'Größe: {{.Size}}' gc-umwandeln-test
       - name: Compose-Datei mit dem Profil umwandeln
         run: |
           docker compose -f docker-compose.example.yml --profile umwandeln config -q

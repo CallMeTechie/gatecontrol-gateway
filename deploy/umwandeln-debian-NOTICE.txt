@@ -1,0 +1,33 @@
+GateControl Gateway – Image ":umwandeln", Variante "debian" (docs/transcode.md)
+===============================================================================
+
+Dieses Image enthaelt keinen GateControl-Code. Es besteht aus Debian 13
+("trixie", slim) und unveraenderten Debian-Paketen, vor allem
+
+    ffmpeg (mit libavcodec, libavformat ... aus Debian, Abschnitt main)
+    intel-media-va-driver-non-free (Intel-Treiber iHD, Abschnitt non-free)
+    vainfo
+
+Die genauen Fassungen stehen im Image: dpkg-query -W ffmpeg intel-media-va-driver-non-free
+
+Lizenz
+------
+ffmpeg ist in Debian mit --enable-gpl gebaut (ohne --enable-nonfree, ohne
+libfdk-aac) und steht unter der GNU General Public License, Version 2 oder
+spaeter (GPL-2.0-or-later). intel-media-va-driver-non-free steht unter der
+Expat-Lizenz (MIT) bzw. BSD-3-Clause; "non-free" heisst bei Debian hier nur,
+dass die mitgelieferten Shader ohne Quelltext kommen – die Weitergabe ist
+erlaubt. Die Urheber- und Lizenzangaben jedes Pakets stehen in
+    /usr/share/doc/<Paket>/copyright
+die Lizenztexte in
+    /usr/share/common-licenses/
+Es gibt KEINE GEWAEHRLEISTUNG, soweit gesetzlich zulaessig.
+
+Quelltext
+---------
+Der Quelltext jedes Pakets genau dieser Fassung: https://snapshot.debian.org/
+bzw. "apt-get source <Paket>" mit einer deb-src-Zeile fuer trixie.
+
+Der Waechter (umwandeln.sh), den das GateControl-Gateway zur Laufzeit in das
+Volume /gc-umw legt, ist ein eigenstaendiges Programm, das ffmpeg und ffprobe
+nur als Befehle aufruft; er ist nicht Teil dieses Images.

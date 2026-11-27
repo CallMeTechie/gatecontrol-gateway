@@ -74,7 +74,7 @@ sudo grep -qx 'mode=software' "$CTL/state/live0001.res" || fail "nicht der Softw
 sudo grep -qx 'device=absent' "$CTL/state/caps" || fail "caps: device"
 sudo grep -qx 'software=1' "$CTL/state/caps" || fail "caps: software"
 sudo grep -qx "uid=$SVC_UID" "$CTL/state/caps" || fail "caps: uid"
-sudo grep -q '^ffmpeg=8\.' "$CTL/state/caps" || fail "caps: ffmpeg"
+sudo grep -Eq '^ffmpeg=[0-9]+\.' "$CTL/state/caps" || fail "caps: ffmpeg"
 
 echo "== Ergebnis prüfen"
 [ "$(probe -select_streams V:0 -show_entries stream=codec_name,profile,pix_fmt -of csv=p=0 "$SRC")" = "h264,High,yuv420p" ] || fail "neue Datei ist nicht H.264 High 8 Bit"
