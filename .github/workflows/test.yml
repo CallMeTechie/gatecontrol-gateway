@@ -44,7 +44,8 @@ jobs:
         run: |
           d="$RUNNER_TEMP/nm"
           mkdir -p "$d" && cd "$d"
-          apt-get download network-manager libnm0
+          # veraltete Paketliste des Runners (404 auf eine ersetzte Fassung): einmal neu laden
+          apt-get download network-manager libnm0 || { sudo apt-get update -qq && apt-get download network-manager libnm0; }
           for f in *.deb; do dpkg -x "$f" root; done
           lib="$(dirname "$(find "$d/root/usr/lib" -name 'libnm.so.0' | head -n1)")"
           printf '#!/bin/sh\nLD_LIBRARY_PATH=%s exec %s "$@"\n' "$lib" "$d/root/usr/bin/nmcli" >"$d/nmcli"
