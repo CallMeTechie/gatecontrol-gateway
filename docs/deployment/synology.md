@@ -185,7 +185,7 @@ Grafikkarte nutzt der Dienst nicht – auf einer NAS ohne GPU antwortet ein
 Schaltet man in GateControl **Videos umwandeln** für dieses Gateway ein (Gateway ›
 Funktionen, [docs/transcode.md](../transcode.md)), wandelt die NAS Videos, die nicht
 überall laufen (z. B. H.264 mit 10 Bit), mit ihrer Intel-Grafik in H.264 8 Bit um.
-Dafür braucht sie den Dienst `umwandeln` (Image ≈ 120 MB Download, nur
+Dafür braucht sie den Dienst `umwandeln` (Image ≈ 130 MB, nur
 Intel/AMD-64-Bit-Modelle). Der Dienst hat kein Netz und darf nur in die gewählten
 Medienordner schreiben. Einmalig:
 

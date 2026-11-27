@@ -91,7 +91,7 @@ RUN wget -q -O /jff.deb "https://repo.jellyfin.org/files/ffmpeg/debian/8.x/${JFF
 
 # --- Stage: Dienst umwandeln, Variante „jellyfin“ (docs/transcode.md § 5) ---
 # Debian 12 slim + das unveränderte Paket jellyfin-ffmpeg8 mit seinen
-# Abhängigkeiten, ≈ 120 MB Download / ≈ 330 MB auf der Platte. Kein Node, kein
+# Abhängigkeiten, Image ≈ 130 MB (gemessen in CI). Kein Node, kein
 # eigener Code: die Logik (umwandeln.sh) legt das Gateway ins Volume umw-ctl.
 # Der Dienst läuft ohne Netz, ohne Rechte, nicht als root (Compose: user:).
 FROM debian:12-slim AS umwandeln-jellyfin
@@ -114,7 +114,7 @@ ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-umw/umwandeln.sh ]; do sleep 2; d
 # iHD aus Debian. „non-free“ nur wegen der mitgelieferten Shader ohne Quelltext
 # (Lizenz Expat/BSD, frei weitergebbar) – ohne sie kodiert Gen 9 (Apollo Lake)
 # nicht mit VAAPI. Sicherheitskorrekturen kommen mit jedem Release-Bau aus Debian.
-# ≈ 150 MB Download / ≈ 500 MB auf der Platte (ffmpeg zieht SDL, Pulse, X11-Bibliotheken).
+# Image ≈ 215 MB (gemessen in CI; ffmpeg zieht SDL-, Pulse- und X11-Bibliotheken mit).
 FROM debian:13-slim AS umwandeln-debian
 # hadolint ignore=DL3008
 RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources && \

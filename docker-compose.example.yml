@@ -694,7 +694,7 @@ services:
   # in .env). Die Datei aus GateControl („docker-compose.yml herunterladen“)
   # enthält den Dienst ohne Profil, sobald „Videos umwandeln“ für das Gateway an
   # ist – mit den gewählten Ordnern und der Gruppe der Grafik. Nur amd64.
-  # Image ≈ 120 MB Download, ≈ 330 MB auf der Platte (Debian + jellyfin-ffmpeg).
+  # Image ≈ 130 MB (Debian + jellyfin-ffmpeg; Variante debian ≈ 215 MB).
   # Der Einstieg wartet auf /gc-umw/umwandeln.sh, das das Gateway schreibt, und
   # führt es aus: ein Video zur Zeit per Grafik-Hardware (VAAPI) in H.264 8 Bit.
   # Kein Netz, keine Rechte, nicht root; schreiben kann der Dienst nur in die

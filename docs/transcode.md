@@ -178,12 +178,12 @@ Zustand (`status`, Bericht):
   amd64). Woher ffmpeg kommt, steht an **einer** Stelle: `ARG UMW_FFMPEG` oben im Dockerfile.
   * `jellyfin` (Standard): Debian 12 slim + das unveränderte Paket **jellyfin-ffmpeg8** (Fassung und
     SHA-256 im Dockerfile gepinnt) – dieselbe ffmpeg-/Treiber-Kombination (iHD, i965, libva, libvpl),
-    mit der Jellyfin auf Intel-Grafik umwandelt und die auf der DS918+ gemessen wurde. ≈ 120 MB
-    Download, ≈ 330 MB auf der Platte. GPL-3.0-or-later; das Paket enthält auch `libfdk-aac`
+    mit der Jellyfin auf Intel-Grafik umwandelt und die auf der DS918+ gemessen wurde. Image
+    ≈ 130 MB. GPL-3.0-or-later; das Paket enthält auch `libfdk-aac`
     (der Dienst kodiert keinen Ton, er kopiert ihn). Hinweis: `deploy/umwandeln-NOTICE.txt`.
   * `debian`: Debian 13 slim + `ffmpeg`, `intel-media-va-driver-non-free` und `vainfo` aus Debian –
-    ohne `libfdk-aac`, GPL-2.0-or-later, Sicherheitskorrekturen mit jedem Bau. ≈ 150 MB Download,
-    ≈ 500 MB auf der Platte. Kein i965-Treiber mit Shadern. Hinweis: `deploy/umwandeln-debian-NOTICE.txt`.
+    ohne `libfdk-aac`, GPL-2.0-or-later, Sicherheitskorrekturen mit jedem Bau. Image
+    ≈ 215 MB. Kein i965-Treiber mit Shadern. Hinweis: `deploy/umwandeln-debian-NOTICE.txt`.
 
   Beide baut und prüft der Test-Workflow (Software-Weg). Ein anderes Image (z. B. auf der NAS selbst
   gebaut: `docker build --target umwandeln --build-arg UMW_FFMPEG=… -t gc-umwandeln .`) setzt
