@@ -38,6 +38,7 @@ const { createFeatureManager } = require('./features/manager');
 const { configHash } = require('./features/config');
 const { createFeaturesRouter } = require('./api/routes/features');
 const { createCamerasRouter } = require('./api/routes/cameras');
+const { createTranscodeRouter } = require('./api/routes/transcode');
 const { VpnCertManager } = require('./vpncert/vpnCert');
 const { createVpnStatusServer } = require('./setup/vpnHttps');
 const { createStatusPageRouter } = require('./api/routes/statusPage');
@@ -254,6 +255,7 @@ async function bootstrap(opts = {}) {
         mergeRouter.use(createLanScanRouter({ scanMgr, defaultGatewayIp }));
         mergeRouter.use(createFeaturesRouter({ featureMgr }));
         mergeRouter.use(createCamerasRouter({ featureMgr }));
+        mergeRouter.use(createTranscodeRouter({ featureMgr }));
         mergeRouter.use(createStatusPageRouter({ getVpnStatus: () => vpnStatus }));
         return mergeRouter;
       },

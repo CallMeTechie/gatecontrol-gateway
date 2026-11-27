@@ -2,7 +2,7 @@
 
 // Hält die Funktionen des Gateways zusammen: Netzwerk-Wächter,
 // Internetqualität, Anwesenheit, USV (Phase 3a), DNS-Filter, Zwischenspeicher
-// und Zeitzone (Phase 3b), Drucken & Scannen, Funk, Lokale KI und Kameras (Phase 3c). Schaltet sie nach `features` aus dem Config-Pull
+// und Zeitzone (Phase 3b), Drucken & Scannen, Funk, Lokale KI und Kameras (Phase 3c), Videos umwandeln. Schaltet sie nach `features` aus dem Config-Pull
 // (fehlt es → alles aus) und liefert ihren Zustand für die Telemetrie. Alles
 // läuft im Gateway-Prozess, Zustand in /state.
 
@@ -17,6 +17,7 @@ const { PrintService } = require('../print/print');
 const { RadioService } = require('../radio/radio');
 const { AiService } = require('../ai/ai');
 const { CameraService } = require('../cameras/cameras');
+const { TranscodeService } = require('../transcode/transcode');
 const { makeReporter } = require('./reporter');
 const { NetWatch } = require('../netwatch/netwatch');
 const { createScanner } = require('../netwatch/scanner');
@@ -34,8 +35,9 @@ const logger = require('../logger');
 // radio-stick-assign: Funksticks von Hand Zigbee/Thread/„nicht verwenden“ zuordnen (features.radio.sticks, docs/radio.md)
 // ipv6-lan: Heimnetz ohne IPv4 – meldet lan_ip6/lan_subnets6 (ULA), USV-Server auch unter einer privaten IPv6-Adresse
 // dns-vpn-names: der DNS-Filter behandelt die Zonen der VPN-Gerätenamen gesondert (features.internal_dns, docs/dns-cache.md)
+// transcode: Videos per Grafik-Hardware in H.264 8 Bit umwandeln, Dienst umwandeln (features.transcode, docs/transcode.md)
 // speed-volume: Speedtests halten features.inetq.speedVolume ein (Tagesbudget im State-Verzeichnis, Deckel je Richtung)
-const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume', 'dns-vpn-names', 'udp-routes', 'z2m-thermostat-ext', 'radio-contacts']);
+const CAPABILITIES = Object.freeze(['netwatch', 'inetq', 'presence', 'ups', 'dns', 'cache', 'storage', 'timezone', 'print', 'print-convert', 'print-ocr', 'print-office', 'print-media', 'radio', 'radio-stacks', 'radio-stick-assign', 'ai', 'cameras', 'ipv6-lan', 'speed-volume', 'dns-vpn-names', 'udp-routes', 'z2m-thermostat-ext', 'radio-contacts', 'transcode']);
 // DNS-Einstellung und Zeitzone überstehen den Neustart: Zeigt der Router auch
 // den Gateway-Host auf den Filter, braucht schon der erste Config-Pull ihn.
 const BOOT_FILE = 'features-boot.json';
@@ -44,6 +46,7 @@ const noopPrint = { ...noop, requestSearch: () => 'disabled', requestJobs: () =>
 const noopRadio = { ...noop, requestPair: async () => 'disabled', requestUnlock: async () => 'disabled', requestRetry: async () => 'disabled', requestRemove: async () => 'disabled', requestSet: async () => 'disabled',
   requestThreadForm: async () => 'disabled', requestThreadJoin: async () => 'disabled', requestThreadDataset: async () => ({ outcome: 'disabled' }), attachMqtt() {}, status: async () => null };
 const noopCameras = { ...noop, cfg: { enabled: false } };
+const noopTranscode = { ...noop, cfg: { enabled: false } };
 const noopAi = { ...noop, cfg: { enabled: false }, requestPull: () => 'disabled', cancelPull: () => 'disabled', removeModel: async () => 'disabled', canChat: () => 'disabled', status: async () => null };
 
 /** Eigene private LAN-Subnetze mit der eigenen Adresse darin. */
@@ -54,8 +57,8 @@ function privateSubnets(defaultGatewayIp) {
 }
 
 class FeatureManager {
-  constructor({ netwatch, inetq, presence, ups, dns = noop, cache = noop, print = noopPrint, radio = noopRadio, ai = noopAi, cameras = noopCameras, stateDir = null }) {
-    Object.assign(this, { netwatch, inetq, presence, ups, dns, cache, print, radio, ai, cameras, stateDir });
+  constructor({ netwatch, inetq, presence, ups, dns = noop, cache = noop, print = noopPrint, radio = noopRadio, ai = noopAi, cameras = noopCameras, transcode = noopTranscode, stateDir = null }) {
+    Object.assign(this, { netwatch, inetq, presence, ups, dns, cache, print, radio, ai, cameras, transcode, stateDir });
     this.features = normalizeFeatures(undefined);
     this.chain = Promise.resolve(); // DNS/Zwischenspeicher nacheinander anwenden
   }
@@ -104,7 +107,7 @@ class FeatureManager {
       netwatch: f.netwatch.enabled, portscan: f.netwatch.portscan, inetq: f.inetq.enabled,
       speedtest: f.inetq.speedtest, presence: f.presence.enabled, presenceMacs: f.presence.macs.length, ups: f.ups.enabled,
       dns: f.dns.enabled, dnsProfiles: f.dns.profiles.length, vpnNameZones: f.dns.vpnNames ? f.dns.vpnNames.domains.length : 0, vpnNamesForward: !!(f.dns.vpnNames && f.dns.vpnNames.forward), cache: f.cache.enabled, print: f.print.enabled,
-      zigbee: f.radio.zigbee, zigbeeStack: f.radio.stack, radioSticks: f.radio.sticks.length, ble: f.radio.ble, thread: f.radio.thread, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, timezone: f.timezone,
+      zigbee: f.radio.zigbee, zigbeeStack: f.radio.stack, radioSticks: f.radio.sticks.length, ble: f.radio.ble, thread: f.radio.thread, ai: f.ai.enabled, aiSource: f.ai.source, cameras: f.cameras.enabled, cameraCount: f.cameras.cameras.length, transcode: f.transcode.enabled, timezone: f.timezone,
     }, 'features applied');
     return this._serial(async () => {
       await this.dns.apply(f.dns);
@@ -113,11 +116,12 @@ class FeatureManager {
       await this.radio.apply(f.radio);
       await this.ai.apply(f.ai);
       await this.cameras.apply(f.cameras);
+      await this.transcode.apply(f.transcode);
     });
   }
 
   stop() {
-    for (const x of [this.netwatch, this.inetq, this.presence, this.ups, this.dns, this.cache, this.print, this.radio, this.ai, this.cameras]) {
+    for (const x of [this.netwatch, this.inetq, this.presence, this.ups, this.dns, this.cache, this.print, this.radio, this.ai, this.cameras, this.transcode]) {
       try { x.stop(); } catch (_e) { /* best effort */ }
     }
   }
@@ -138,6 +142,7 @@ class FeatureManager {
         radio: this.radio.featureTelemetry(),
         ai: this.ai.featureTelemetry(),
         cameras: this.cameras.featureTelemetry(),
+        transcode: this.transcode.featureTelemetry(),
       },
       ups: this.ups.telemetry(),
       dns: this.dns.telemetry(),
@@ -181,7 +186,8 @@ function createFeatureManager({ config, defaultGatewayIp }) {
   const cameras = new CameraService({
     reporter, serverUrl: config.serverUrl, apiToken: config.apiToken, stateDir: config.stateDir, getSubnets,
   });
-  return new FeatureManager({ netwatch, inetq, presence, ups, dns, cache, print, radio, ai, cameras, stateDir: config.stateDir });
+  const transcode = new TranscodeService({ reporter, stateDir: config.stateDir });
+  return new FeatureManager({ netwatch, inetq, presence, ups, dns, cache, print, radio, ai, cameras, transcode, stateDir: config.stateDir });
 }
 
 module.exports = { FeatureManager, createFeatureManager, privateSubnets, CAPABILITIES };

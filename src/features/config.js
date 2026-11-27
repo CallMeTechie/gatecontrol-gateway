@@ -16,6 +16,7 @@ const { normalizePrint } = require('../print/config');
 const { normalizeRadio } = require('../radio/config');
 const { normalizeAi } = require('../ai/config');
 const { normalizeCameras } = require('../cameras/config');
+const { normalizeTranscode } = require('../transcode/config');
 
 const DEFAULT_TARGETS = Object.freeze(['1.1.1.1', '9.9.9.9']);
 const SPEEDTEST_PLANS = new Set(['off', '4x', 'hourly']);
@@ -68,6 +69,8 @@ function normalizeFeatures(raw) {
   const ai = normalizeAi(f.ai);
   // Phase 3c, Schritt 4: Kameras (fehlt es: aus)
   const cameras = normalizeCameras(f.cameras);
+  // Videos umwandeln (docs/transcode.md; fehlt es: aus)
+  const transcode = normalizeTranscode(f.transcode);
 
   const targets = Array.isArray(iq.targets)
     ? [...new Set(iq.targets.filter((t) => typeof t === 'string' && isUsableTarget(t)))].slice(0, MAX_TARGETS)
@@ -109,6 +112,7 @@ function normalizeFeatures(raw) {
     radio,
     ai,
     cameras,
+    transcode,
   };
 }
 

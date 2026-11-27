@@ -180,6 +180,59 @@ erstellen). Das Ollama-Image ist ≈ 3 GB groß, jedes Modell 1–6 GB (Volume
 Grafikkarte nutzt der Dienst nicht – auf einer NAS ohne GPU antwortet ein
 3B-Modell in einigen Sekunden bis Minuten.
 
+## Videos umwandeln
+
+Schaltet man in GateControl **Videos umwandeln** für dieses Gateway ein (Gateway ›
+Funktionen, [docs/transcode.md](../transcode.md)), wandelt die NAS Videos, die nicht
+überall laufen (z. B. H.264 mit 10 Bit), mit ihrer Intel-Grafik in H.264 8 Bit um.
+Dafür braucht sie den Dienst `umwandeln` (Image ≈ 130 MB, nur
+Intel/AMD-64-Bit-Modelle). Der Dienst hat kein Netz und darf nur in die gewählten
+Medienordner schreiben. Einmalig:
+
+1. **Eigenen Benutzer anlegen:** Systemsteuerung › Benutzer & Gruppe › „Erstellen“,
+   z. B. `gc-umwandeln`, ohne Zugriff auf Anwendungen. Bei „Berechtigungen für
+   gemeinsame Ordner“ **Lesen/Schreiben nur** für die Medien-Freigabe(n) wählen, alle
+   anderen „Kein Zugriff“.
+2. **Zahlen nachsehen** (SSH oder Aufgabenplaner):
+   ```bash
+   id gc-umwandeln                      # uid=1034(gc-umwandeln) gid=100(users) …
+   stat -c '%g %G' /dev/dri/renderD128  # 937 videodriver
+   ```
+   Fehlt `/dev/dri/renderD128`, hat das Modell keine nutzbare Intel-Grafik – dann geht
+   nur der langsame Weg ohne Grafik (in GateControl ausdrücklich erlauben) und die
+   Zeilen `devices:` müssen aus dem Dienst entfernt werden.
+3. **Compose-Datei:** Bietet GateControl bei „Videos umwandeln“ den Knopf
+   **„docker-compose.yml herunterladen“** an, dort Ordner, Benutzer und Gruppe der
+   Grafik eintragen und die Datei wie oben unter „Compose-Datei aus GateControl holen“
+   einspielen. Von Hand (Dienst `umwandeln` und Volume `umw-ctl` aus
+   `docker-compose.example.yml`, dazu die Zeile `/gc-umw` beim Dienst `gateway`) in die
+   `.env` des Projekts:
+   ```
+   COMPOSE_PROFILES=umwandeln
+   GC_UMW_UID=1034
+   GC_UMW_GID=100
+   GC_UMW_RENDER_GID=937
+   GC_UMW_MEDIA=/volume2/mediathek
+   ```
+   Der Ordner wird innen unter demselben Pfad eingehängt wie außen – so passen die
+   Pfade, die Jellyfin kennt. Mehrere Ordner: je Ordner eine Zeile unter `volumes:`
+   des Dienstes und `GC_UMW_ROOTS=/volume2/mediathek:/volume1/filme`.
+
+Das Gateway meldet danach die Grafik (Treiber „Intel iHD …“), die geprüften Verfahren
+und den freien Platz. Meldet es `device: denied`, stimmt `GC_UMW_RENDER_GID` nicht mit
+der Gruppe des Geräts überein (die richtige Zahl steht als `deviceGid` dabei). Die
+Rechte von `/dev/dri/renderD128` nicht ändern (kein `chmod 666`).
+
+Prüfen: `sudo docker compose ps umwandeln` zeigt `healthy`; in
+`sudo docker compose logs umwandeln` steht nichts (der Dienst schreibt nur in sein
+Volume).
+
+Die neue Datei ersetzt das Original unter demselben Namen; das Original liegt
+14 Tage (einstellbar) im Ordner `.gc-papierkorb` der Freigabe und lässt sich in
+GateControl zurückholen. Zwischendateien liegen in `.gc-umwandeln`. Beide Ordner
+liest Jellyfin nicht ein (`.ignore`). Bei Btrfs-Schnappschüssen wird der Platz des
+Originals erst frei, wenn auch die Schnappschüsse ablaufen.
+
 ## DSM 7.0/7.1 (Legacy)
 
 Container Manager auf älteren DSM-Versionen hat eingeschränkten docker-compose-Support. Empfohlen: Standalone Docker via SSH:

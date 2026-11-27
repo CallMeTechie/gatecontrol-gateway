@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 ARG NODE_VERSION=20
 ARG ALPINE_VERSION=3.22
+# Dienst umwandeln (docs/transcode.md): woher ffmpeg kommt – die EINE Stelle zum Umschalten.
+#   debian   = Debian 13 + ffmpeg und intel-media-va-driver-non-free aus Debian (ohne libfdk-aac) – Standard
+#   jellyfin = Debian 12 + offizielles Paket jellyfin-ffmpeg8 (gepinnt, siehe Stage umwandeln-jellyfin; enthält libfdk-aac)
+ARG UMW_FFMPEG=debian
 
 # --- Stage 1: build wireguard-go from source (pinned via WG_GO_REF) ---
 FROM golang:1.23-alpine${ALPINE_VERSION} AS wg-build
@@ -68,6 +72,68 @@ RUN apt-get update && \
 # Kein `soffice --version` beim Bauen: unter QEMU (arm64/armv7 im Release) stürzt
 # LibreOffice mit SIGSEGV (139) ab. Ausgeführt wird es nativ im Test-Workflow (amd64).
 ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-office/office.sh ]; do sleep 2; done; exec /bin/sh /gc-office/office.sh"]
+
+# --- Stage: jellyfin-ffmpeg-Paket holen und prüfen (für den Dienst umwandeln) ---
+# Das offizielle Paket des Jellyfin-Projekts (repo.jellyfin.org), fest auf eine
+# Fassung gepinnt: dieselbe ffmpeg-/Treiber-Kombination (iHD, i965, libva, libvpl,
+# libmfx), mit der Jellyfin selbst auf Intel-Grafik umwandelt. Die Prüfsumme steht
+# in der .changes-Datei daneben. Wird JFF_VERSION angehoben, MUSS JFF_SHA256 mit –
+# sonst bricht der Bau hier laut ab. Quelltext zu genau dieser Fassung:
+# deploy/umwandeln-NOTICE.txt.
+FROM debian:12-slim AS jff-fetch
+ARG JFF_VERSION=8.1.3-2
+ARG JFF_SHA256=75558a2282c6f6f3ce88dd10e87c4b4d3af4736a1a1c812a57c1c57f849b58f6
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && rm -rf /var/lib/apt/lists/*
+RUN wget -q -O /jff.deb "https://repo.jellyfin.org/files/ffmpeg/debian/8.x/${JFF_VERSION}/amd64/jellyfin-ffmpeg8_${JFF_VERSION}-bookworm_amd64.deb" \
+ && printf '%s  /jff.deb\n' "${JFF_SHA256}" > /jff.sha256 \
+ && sha256sum -c /jff.sha256
+
+# --- Stage: Dienst umwandeln, Variante „jellyfin“ (docs/transcode.md § 5) ---
+# Debian 12 slim + das unveränderte Paket jellyfin-ffmpeg8 mit seinen
+# Abhängigkeiten, Image ≈ 130 MB (gemessen in CI). Kein Node, kein
+# eigener Code: die Logik (umwandeln.sh) legt das Gateway ins Volume umw-ctl.
+# Der Dienst läuft ohne Netz, ohne Rechte, nicht als root (Compose: user:).
+FROM debian:12-slim AS umwandeln-jellyfin
+# hadolint ignore=DL3008
+RUN --mount=type=bind,from=jff-fetch,source=/jff.deb,target=/tmp/jff.deb \
+    apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/jff.deb && \
+    rm -rf /var/lib/apt/lists/* /usr/share/man/* && \
+    ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
+    ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe && \
+    ln -s /usr/lib/jellyfin-ffmpeg/vainfo /usr/local/bin/vainfo && \
+    ffmpeg -hide_banner -version && ffprobe -hide_banner -version
+# Lizenzhinweis und Fundort des Quelltexts (GPL-3.0-or-later); /usr/share/doc bleibt im Image
+COPY deploy/umwandeln-NOTICE.txt /usr/share/doc/gatecontrol-umwandeln/NOTICE.txt
+USER 65534:65534
+ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-umw/umwandeln.sh ]; do sleep 2; done; exec /bin/sh /gc-umw/umwandeln.sh"]
+
+# --- Stage: Dienst umwandeln, Variante „debian“ (docs/transcode.md § 5) ---
+# Debian 13 slim + ffmpeg (GPL-2.0-or-later, ohne libfdk-aac) und der Intel-Treiber
+# iHD aus Debian. „non-free“ nur wegen der mitgelieferten Shader ohne Quelltext
+# (Lizenz Expat/BSD, frei weitergebbar) – ohne sie kodiert Gen 9 (Apollo Lake)
+# nicht mit VAAPI. Sicherheitskorrekturen kommen mit jedem Release-Bau aus Debian.
+# Image ≈ 215 MB (gemessen in CI; ffmpeg zieht SDL-, Pulse- und X11-Bibliotheken mit).
+FROM debian:13-slim AS umwandeln-debian
+# hadolint ignore=DL3008
+RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources && \
+    grep -q '^Components: main non-free$' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg intel-media-va-driver-non-free vainfo && \
+    rm -rf /var/lib/apt/lists/* /usr/share/man/* && \
+    ffmpeg -hide_banner -version && ffprobe -hide_banner -version && \
+    ffmpeg -hide_banner -buildconf > /tmp/buildconf && \
+    ! grep -q -- --enable-libfdk-aac /tmp/buildconf && rm /tmp/buildconf
+COPY deploy/umwandeln-debian-NOTICE.txt /usr/share/doc/gatecontrol-umwandeln/NOTICE.txt
+USER 65534:65534
+ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-umw/umwandeln.sh ]; do sleep 2; done; exec /bin/sh /gc-umw/umwandeln.sh"]
+
+# --- Stage: Dienst umwandeln („Videos umwandeln“, docs/transcode.md) ---
+# Image-Tag :umwandeln (Release-Workflow, target umwandeln, nur amd64) – die
+# Variante wählt ARG UMW_FFMPEG oben (oder --build-arg UMW_FFMPEG=debian).
+# hadolint ignore=DL3006
+FROM umwandeln-${UMW_FFMPEG} AS umwandeln
 
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}

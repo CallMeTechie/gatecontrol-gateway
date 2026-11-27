@@ -96,3 +96,22 @@ Der Dienst `kameras` ([docs/cameras.md](../cameras.md)) steht in
 (enthält `kameras` ohne Profil) oder `COMPOSE_PROFILES=kameras` in `.env` setzen und
 `docker compose up -d`. Er öffnet keinen Port und hat keine Rechte; Clips liegen im
 Volume `cam-recordings` oder unter `GC_CAMERA_DIR`.
+
+## Videos umwandeln (optional, nur amd64)
+
+Der Dienst `umwandeln` ([docs/transcode.md](../transcode.md)) steht in
+`docker-compose.example.yml` im Profil `umwandeln`: Videos, die nicht überall laufen
+(z. B. H.264 mit 10 Bit), wandelt er mit der Intel-Grafik des Rechners (VAAPI) in
+H.264 8 Bit um. Kein Netz, keine Rechte, nicht root; schreiben kann er nur in die
+eingehängten Medienordner. In `.env`:
+
+```
+COMPOSE_PROFILES=umwandeln
+GC_UMW_UID=1001                 # Benutzer mit Schreibrecht nur auf die Medien: id -u <Benutzer>
+GC_UMW_GID=1001
+GC_UMW_RENDER_GID=993           # stat -c %g /dev/dri/renderD128 (Debian/Ubuntu: Gruppe render)
+GC_UMW_MEDIA=/srv/medien        # innen derselbe Pfad wie außen
+```
+
+Ohne `/dev/dri/renderD128` die Zeilen `devices:` des Dienstes entfernen; umgewandelt
+wird dann nur, wenn der Weg ohne Grafik in GateControl erlaubt ist (langsam).
