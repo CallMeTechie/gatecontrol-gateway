@@ -2,9 +2,9 @@
 ARG NODE_VERSION=20
 ARG ALPINE_VERSION=3.22
 # Dienst umwandeln (docs/transcode.md): woher ffmpeg kommt – die EINE Stelle zum Umschalten.
-#   jellyfin = Debian 12 + offizielles Paket jellyfin-ffmpeg8 (gepinnt, siehe Stage umwandeln-jellyfin)
-#   debian   = Debian 13 + ffmpeg und intel-media-va-driver-non-free aus Debian (ohne libfdk-aac)
-ARG UMW_FFMPEG=jellyfin
+#   debian   = Debian 13 + ffmpeg und intel-media-va-driver-non-free aus Debian (ohne libfdk-aac) – Standard
+#   jellyfin = Debian 12 + offizielles Paket jellyfin-ffmpeg8 (gepinnt, siehe Stage umwandeln-jellyfin; enthält libfdk-aac)
+ARG UMW_FFMPEG=debian
 
 # --- Stage 1: build wireguard-go from source (pinned via WG_GO_REF) ---
 FROM golang:1.23-alpine${ALPINE_VERSION} AS wg-build

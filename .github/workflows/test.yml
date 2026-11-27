@@ -236,7 +236,7 @@ jobs:
     # Container mit den Schutzoptionen der Compose-Datei (kein Netz, keine Rechte, nicht root,
     # read-only) ein erzeugtes 10-Bit-Video wirklich umwandeln – auf dem Software-Weg, weil der
     # Runner keine Intel-Grafik hat. VAAPI selbst prüft nur ein echtes Gerät.
-    # Beide ffmpeg-Varianten (Dockerfile, ARG UMW_FFMPEG): jellyfin (Standard) und debian.
+    # Beide ffmpeg-Varianten (Dockerfile, ARG UMW_FFMPEG): debian (Standard) und jellyfin.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:

@@ -102,7 +102,7 @@ jobs:
             ghcr.io/callmetechie/gatecontrol-gateway:office
             ghcr.io/callmetechie/gatecontrol-gateway:office-${{ steps.v.outputs.version }}
 
-      # Dienst umwandeln („Videos umwandeln“, docs/transcode.md): Debian + jellyfin-ffmpeg (VAAPI),
+      # Dienst umwandeln („Videos umwandeln“, docs/transcode.md): Debian 13 + ffmpeg aus Debian (VAAPI, ARG UMW_FFMPEG),
       # Stage umwandeln im Dockerfile – nur amd64 (Intel-Grafik), geladen nur von Gateways mit dieser Funktion
       - name: Build umwandeln image (amd64)
         uses: docker/build-push-action@v6
