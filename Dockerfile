@@ -69,6 +69,43 @@ RUN apt-get update && \
 # LibreOffice mit SIGSEGV (139) ab. Ausgeführt wird es nativ im Test-Workflow (amd64).
 ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-office/office.sh ]; do sleep 2; done; exec /bin/sh /gc-office/office.sh"]
 
+# --- Stage: jellyfin-ffmpeg-Paket holen und prüfen (für den Dienst umwandeln) ---
+# Das offizielle Paket des Jellyfin-Projekts (repo.jellyfin.org), fest auf eine
+# Fassung gepinnt: dieselbe ffmpeg-/Treiber-Kombination (iHD, i965, libva, libvpl,
+# libmfx), mit der Jellyfin selbst auf Intel-Grafik umwandelt. Die Prüfsumme steht
+# in der .changes-Datei daneben. Wird JFF_VERSION angehoben, MUSS JFF_SHA256 mit –
+# sonst bricht der Bau hier laut ab. Quelltext zu genau dieser Fassung:
+# deploy/umwandeln-NOTICE.txt.
+FROM debian:12-slim AS jff-fetch
+ARG JFF_VERSION=8.1.3-2
+ARG JFF_SHA256=75558a2282c6f6f3ce88dd10e87c4b4d3af4736a1a1c812a57c1c57f849b58f6
+# hadolint ignore=DL3008
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget && rm -rf /var/lib/apt/lists/*
+RUN wget -q -O /jff.deb "https://repo.jellyfin.org/files/ffmpeg/debian/8.x/${JFF_VERSION}/amd64/jellyfin-ffmpeg8_${JFF_VERSION}-bookworm_amd64.deb" \
+ && printf '%s  /jff.deb\n' "${JFF_SHA256}" > /jff.sha256 \
+ && sha256sum -c /jff.sha256
+
+# --- Stage: Dienst umwandeln („Videos umwandeln“, docs/transcode.md) ---
+# Eigenes Image-Tag :umwandeln (Release-Workflow, target umwandeln, nur amd64):
+# Debian 12 slim + das unveränderte Paket jellyfin-ffmpeg8 mit seinen
+# Abhängigkeiten, ≈ 120 MB Download / ≈ 330 MB auf der Platte. Kein Node, kein
+# eigener Code: die Logik (umwandeln.sh) legt das Gateway ins Volume umw-ctl.
+# Der Dienst läuft ohne Netz, ohne Rechte, nicht als root (Compose: user:).
+FROM debian:12-slim AS umwandeln
+# hadolint ignore=DL3008
+RUN --mount=type=bind,from=jff-fetch,source=/jff.deb,target=/tmp/jff.deb \
+    apt-get update && \
+    apt-get install -y --no-install-recommends /tmp/jff.deb && \
+    rm -rf /var/lib/apt/lists/* /usr/share/man/* && \
+    ln -s /usr/lib/jellyfin-ffmpeg/ffmpeg /usr/local/bin/ffmpeg && \
+    ln -s /usr/lib/jellyfin-ffmpeg/ffprobe /usr/local/bin/ffprobe && \
+    ln -s /usr/lib/jellyfin-ffmpeg/vainfo /usr/local/bin/vainfo && \
+    ffmpeg -hide_banner -version && ffprobe -hide_banner -version
+# Lizenzhinweis und Fundort des Quelltexts (GPL-3.0-or-later); /usr/share/doc bleibt im Image
+COPY deploy/umwandeln-NOTICE.txt /usr/share/doc/gatecontrol-umwandeln/NOTICE.txt
+USER 65534:65534
+ENTRYPOINT ["/bin/sh", "-c", "while [ ! -s /gc-umw/umwandeln.sh ]; do sleep 2; done; exec /bin/sh /gc-umw/umwandeln.sh"]
+
 # --- Stage 3: runtime ---
 FROM node:${NODE_VERSION}-alpine${ALPINE_VERSION}
 # poppler-utils + font-liberation (≈ 23 MB): „Drucken & Scannen“ wandelt PDF für

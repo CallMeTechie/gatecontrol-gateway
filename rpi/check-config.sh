@@ -102,7 +102,8 @@ mkdir -p "$CDIR/config"
 (cd "$CDIR" && docker compose config -q) && echo ok || die "docker compose config"
 # Gleiche Sicherheits-Optionen wie docker-compose.example.yml
 cp docker-compose.example.yml "$CDIR/example.yml"
-pick='.services.gateway | {network_mode, cap_drop, cap_add, read_only, user, devices, tmpfs, volumes: [.volumes[] | {target, read_only}]}'
+# /gc-umw (Dienst umwandeln, docs/transcode.md) gibt es nur im Beispiel: das Image des Dienstes ist nur amd64
+pick='.services.gateway | {network_mode, cap_drop, cap_add, read_only, user, devices, tmpfs, volumes: [.volumes[] | select(.target != "/gc-umw") | {target, read_only}]}'
 a="$(cd "$CDIR" && docker compose -f example.yml config --format json | jq -S "$pick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$pick")"
 if [ "$a" = "$b" ]; then echo "ok: Gateway-Dienst hat dieselben Sicherheits-Optionen wie docker-compose.example.yml"; else
@@ -188,7 +189,17 @@ echo "$b" | jq -e '.network_mode == "none" and .cap_drop == ["ALL"] and .cap_add
   || die "Dienst office: kein Netz, keine Capabilities, keine Geräte, kein Port, read_only"
 prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx office || true)"
 [ "$prof" = 0 ] || die "docker-compose.example.yml: office muss im Profil office stehen (sonst lädt jeder das ≈ 700-MB-Image)"
-vpick='.volumes | with_entries(.value |= {driver_opts})'
+# Videos umwandeln (docs/transcode.md): nur im Beispiel (amd64, Intel-Grafik), dort im Profil umwandeln –
+# ohne Netz, ohne Rechte, nicht root, nur das Render-Gerät
+u="$(cd "$CDIR" && docker compose -f example.yml --profile umwandeln config --format json | jq -S '.services.umwandeln')"
+echo "$u" | jq -e '.network_mode == "none" and .cap_drop == ["ALL"] and .cap_add == null and .privileged == null and .ports == null and .read_only == true
+  and (.security_opt | index("no-new-privileges:true")) != null and (.user | startswith("0:") | not) and (.devices | length) == 1
+  and (.devices | tostring | test("/dev/dri/renderD128")) and (.group_add | map(tostring) | index("61002")) != null' >/dev/null \
+  || die "Dienst umwandeln: kein Netz, keine Capabilities, nicht root, read_only, nur /dev/dri/renderD128, Gruppe 61002"
+prof="$(cd "$CDIR" && docker compose -f example.yml config --services | grep -cx umwandeln || true)"
+[ "$prof" = 0 ] || die "docker-compose.example.yml: umwandeln muss im Profil umwandeln stehen"
+[ "$(cd "$CDIR" && docker compose -f docker-compose.yml config --services | grep -cx umwandeln || true)" = 0 ] || die "Pi-Image: kein Dienst umwandeln (nur amd64)"
+vpick='.volumes | del(.["umw-ctl"]) | with_entries(.value |= {driver_opts})'
 # ki-models gehört nur dem Dienst ki (Profil ki im Beispiel), z2m-data/otbr-data den Funk-Diensten
 a="$(cd "$CDIR" && docker compose -f example.yml --profile ki --profile kameras --profile zigbee2mqtt --profile thread --profile office config --format json | jq -S "$vpick")"
 b="$(cd "$CDIR" && docker compose -f docker-compose.yml config --format json | jq -S "$vpick")"

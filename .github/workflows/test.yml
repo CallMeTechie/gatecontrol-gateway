@@ -230,6 +230,33 @@ jobs:
       - name: soffice --version
         run: docker run --rm --entrypoint soffice gc-office-test --version
 
+  umwandeln-image:
+    # Dienst umwandeln (Dockerfile, target umwandeln, docs/transcode.md): Image bauen und im
+    # Container mit den Schutzoptionen der Compose-Datei (kein Netz, keine Rechte, nicht root,
+    # read-only) ein erzeugtes 10-Bit-Video wirklich umwandeln – auf dem Software-Weg, weil der
+    # Runner keine Intel-Grafik hat. VAAPI selbst prüft nur ein echtes Gerät.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build umwandeln image (amd64)
+        run: docker build --target umwandeln -t gc-umwandeln-test .
+      - name: ffmpeg, ffprobe, vainfo, Encoder
+        run: |
+          docker run --rm --entrypoint ffmpeg gc-umwandeln-test -hide_banner -version | head -n 1
+          docker run --rm --entrypoint ffprobe gc-umwandeln-test -hide_banner -version | head -n 1
+          docker run --rm --entrypoint sh gc-umwandeln-test -c 'command -v vainfo && id'
+          docker run --rm --entrypoint sh gc-umwandeln-test -c 'ffmpeg -hide_banner -encoders 2>/dev/null | grep -E " (h264_vaapi|libx264) "'
+          docker run --rm --entrypoint sh gc-umwandeln-test -c 'ffmpeg -hide_banner -encoders 2>/dev/null | grep -c " h264_vaapi "'
+          docker run --rm --entrypoint cat gc-umwandeln-test /usr/share/doc/gatecontrol-umwandeln/NOTICE.txt | head -n 8
+          docker run --rm --entrypoint test gc-umwandeln-test -s /usr/share/doc/jellyfin-ffmpeg8/copyright
+      - name: Compose-Datei mit dem Profil umwandeln
+        run: |
+          docker compose -f docker-compose.example.yml --profile umwandeln config -q
+          docker compose -f docker-compose.example.yml --profile umwandeln config --format json | jq '.services.umwandeln | {user, group_add, network_mode, cap_drop, read_only, devices, environment}'
+      - name: Umwandeln im Container (Software-Weg, Schutzoptionen der Compose-Datei)
+        run: bash tests/live/umwandeln-image.sh gc-umwandeln-test
+
   mutation:
     runs-on: ubuntu-latest
     needs: unit

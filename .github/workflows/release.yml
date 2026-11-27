@@ -102,6 +102,19 @@ jobs:
             ghcr.io/callmetechie/gatecontrol-gateway:office
             ghcr.io/callmetechie/gatecontrol-gateway:office-${{ steps.v.outputs.version }}
 
+      # Dienst umwandeln („Videos umwandeln“, docs/transcode.md): Debian + jellyfin-ffmpeg (VAAPI),
+      # Stage umwandeln im Dockerfile – nur amd64 (Intel-Grafik), geladen nur von Gateways mit dieser Funktion
+      - name: Build umwandeln image (amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: umwandeln
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/callmetechie/gatecontrol-gateway:umwandeln
+            ghcr.io/callmetechie/gatecontrol-gateway:umwandeln-${{ steps.v.outputs.version }}
+
       # Bundle FIRST, before the third-party SBOM/Trivy steps, so a flaky
       # external installer (e.g. Syft mirror serving HTML 404 like it did
       # on 2026-04-28) doesn't sink the release. Bundle is the

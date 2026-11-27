@@ -37,7 +37,8 @@ const { checkBoundary } = require('./fence');
 //                       Ports, 64 TCP-Verbindungen je Edge-Teil (vorher 32)
 //   z2m-thermostat-ext  Thermostate über zigbee2mqtt mit preset/boost/boost_time/window_* (docs/radio.md)
 //   radio-contacts      Fensterkontakte (Bluetooth, zigbee2mqtt) für Edge-Teile unter gatecontrol/contacts/# (docs/radio.md)
-const EDGE_FEATURES = Object.freeze(['edge-optional-caps', 'edge-optional-lan', 'z2m-thermostat-ext', 'radio-contacts']);
+//   transcode           Videos umwandeln: Dienst umwandeln und Mgmt /api/transcode/* (docs/transcode.md)
+const EDGE_FEATURES = Object.freeze(['edge-optional-caps', 'edge-optional-lan', 'z2m-thermostat-ext', 'radio-contacts', 'transcode']);
 
 const GATEWAY_VERSION = (() => { try { return require('../../package.json').version; } catch { return '0.0.0'; } })();
 const DOWNLOAD_RETRY_MS = 60000;
