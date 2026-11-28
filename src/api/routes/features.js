@@ -16,7 +16,7 @@ const AI_ANSWER_MAX = 256 * 1024;
 //   POST /api/inetq/speedtest   {}                – „Jetzt messen“ (Phase 3a)
 //   GET  /api/dns/log?limit&mac                   – Einzelprotokoll (nur mit logQueries)
 //   POST /api/dns/test          { domain, mac? }  – Was würde passieren?
-//   POST /api/cache/sync        {}                – Vorrat jetzt abgleichen
+//   POST /api/cache/sync        {}                – Vorrat jetzt abgleichen (auch während eines Laufs: Download ab, neu abgleichen; Zurückgezogenes wird gelöscht)
 //   POST /api/cache/clear       {}                – Zwischenspeicher leeren
 //   POST /api/print/discover    { retrust? }      – Drucker/Scanner neu suchen (Phase 3c); retrust: geändertes Zertifikat bestätigen
 //   POST /api/print/jobs        {}                – Druckaufträge jetzt abholen

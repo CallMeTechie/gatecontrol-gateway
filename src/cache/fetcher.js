@@ -54,21 +54,33 @@ function get(url, headers, { timeoutMs = IDLE_MS } = {}) {
   });
 }
 
-/** Vorrat-Liste auswerten: `[…]`, `{ items: […] }` oder `{ want: […] }`. */
+/**
+ * Vorrat-Liste auswerten: `[…]`, `{ items: […] }` oder `{ want: […] }`.
+ * Am Ergebnis zusätzlich (für das sofortige Löschen zurückgezogener Blobs):
+ *   listed   – jede gültige sha256 der Liste, auch aus Einträgen, die sonst verworfen werden
+ *   complete – die Liste ist nicht abgeschnitten (weniger als MAX_WANT_ITEMS Einträge;
+ *              der Server schneidet bei 20 000 ab). Nur dann fehlt, was nicht drinsteht, wirklich.
+ */
 function parseWant(data) {
   const arr = Array.isArray(data) ? data : (data && (Array.isArray(data.items) ? data.items : Array.isArray(data.want) ? data.want : null));
   if (!arr) return null;
   const out = [];
   const seen = new Set();
+  const listed = new Set();
   for (const x of arr.slice(0, MAX_WANT_ITEMS)) {
     if (!x || typeof x !== 'object') continue;
     const sha = typeof x.sha256 === 'string' ? x.sha256.toLowerCase() : '';
+    if (SHA_RE.test(sha)) listed.add(sha);
     if (!SHA_RE.test(sha) || seen.has(sha)) continue;
     if (!Number.isSafeInteger(x.size) || x.size <= 0 || x.size > MAX_BLOB) continue;
     if (typeof x.kind !== 'string' || !KIND_RE.test(x.kind)) continue;
     seen.add(sha);
     out.push({ sha256: sha, size: x.size, kind: x.kind, priority: Number.isFinite(x.priority) ? x.priority : 0 });
   }
+  Object.defineProperties(out, {
+    listed: { value: listed },
+    complete: { value: arr.length < MAX_WANT_ITEMS },
+  });
   return out;
 }
 
@@ -163,4 +175,4 @@ function makeCacheClient({ serverUrl, apiToken }) {
   return { want, blob };
 }
 
-module.exports = { makeCacheClient, parseWant, retryAfterMs, CacheFetchError };
+module.exports = { makeCacheClient, parseWant, retryAfterMs, CacheFetchError, MAX_WANT_ITEMS };

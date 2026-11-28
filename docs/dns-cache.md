@@ -263,7 +263,25 @@ Alle 15 Min. (und auf `POST /api/cache/sync`) `GET /api/v1/gateway/cache/want`
 (Bearer-Token). Erwartet `{ items: [{ sha256, size, kind, priority }] }`
 (auch `{ want: […] }` oder ein bloßes Array; ≤ 20 000 Einträge, ≤ 8 MB).
 Nur Arten mit `kinds.<kind> = true` (Standard: `drive`, `photos`, `updates`
-an, `vault` aus). Höhere `priority` zuerst. Fehlt ein Blob: Platz schaffen –
+an, `vault` aus). Höhere `priority` zuerst.
+
+**Zurückgezogen = sofort gelöscht.** Steht ein Blob, den das Gateway hält,
+nicht mehr in der Liste (der Server hat ihn zurückgezogen, z. B. Drive bei
+einem Tresor-Ordner „Nur auf diesem Gerät“), löscht das Gateway ihn gleich zu
+Beginn des Abgleichs: Datei, Index-Eintrag und einen halben Download
+(`<sha256>.part`); der Index wird sofort gespeichert und der Bericht meldet ihn
+als `gone`. Nur mit einer **vollständigen** Liste: Antwort 200 mit gültigem
+JSON und weniger als 20 000 Einträgen (bei 20 000 kann der Server abgeschnitten
+haben). Ist der Server nicht erreichbar, antwortet er mit Fehler oder 429, oder
+ist die Liste abgeschnitten, wird nichts gelöscht – dann gilt nur die
+Verdrängung bei Platznot (unten). Als gelistet gilt jede gültige sha256 der
+Liste, auch aus einem sonst verworfenen Eintrag; Blobs einer Art, die nur am
+Gateway aus ist (`kinds`), bleiben ebenfalls der Verdrängung überlassen.
+Gelöscht wird per `unlink` (kein Überschreiben – auf SSD/Flash ohnehin nicht
+verlässlich; die Tresor-Dateien sind ohnehin verschlüsselt). Eine Abgabe im
+LAN, die die Datei schon geöffnet hat, läuft noch zu Ende.
+
+Fehlt ein Blob: Platz schaffen –
 zuerst Blobs, die nicht (mehr) im Vorrat stehen, dann solche mit niedrigerer
 Priorität, jeweils die am längsten nicht abgegebenen; geht das nicht, wird der
 Blob übersprungen. Die Reihenfolge wird einmal je Abgleich festgelegt (der
@@ -323,7 +341,12 @@ Port belegt → `state: 'port_busy'`.
 
 ### Management-API
 
-- `POST /api/cache/sync {}` → 202, 409 `sync_running`, 503 `feature_disabled`
+- `POST /api/cache/sync {}` → 202, 503 `feature_disabled`. Läuft schon ein
+  Abgleich (Merkmal `cache-withdraw`): ebenfalls 202 – der laufende Download
+  wird abgebrochen (der `.part` bleibt; ist der Blob noch gewollt, geht es per
+  `Range` weiter) und gleich danach mit frischer Liste neu abgeglichen. So kann
+  der Server nach einem Rückzug sofort anstoßen, statt bis zu 15 Min. zu
+  warten. Ältere Gateways antworten dann 409 `sync_running`.
 - `POST /api/cache/clear {}` → 202 (alle Blobs gelöscht, nächster Bericht `full`), 503 wenn aus
 
 ## Datenträger (`telemetry.storage`)

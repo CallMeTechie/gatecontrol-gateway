@@ -198,6 +198,29 @@ class BlobStore {
   }
 
   /**
+   * Alles löschen, was `keep(sha)` nicht behalten will – fertige Blobs (Datei
+   * und Index) und halbe Downloads (.part). Für Blobs, die der Server aus dem
+   * Vorrat zurückgezogen hat: die sollen nicht bis zur nächsten Platznot liegen
+   * bleiben. Gibt die Ereignisschleife regelmäßig frei. → Zahl gelöschter Blobs
+   */
+  async prune(keep) {
+    let n = 0;
+    let at = performance.now();
+    for (const sha of [...this.items.keys()]) {
+      if (keep(sha)) continue;
+      await this.remove(sha);
+      n++;
+      if (performance.now() - at >= SLICE_MS) { await tick(); at = performance.now(); }
+    }
+    for (const name of await fsp.readdir(this.dir).catch(() => [])) {
+      const m = /^([0-9a-f]{64})\.part$/.exec(name);
+      if (m && !keep(m[1])) await fsp.rm(path.join(this.dir, name), { force: true }).catch(() => {});
+    }
+    if (n) await this.save();
+    return n;
+  }
+
+  /**
    * Räumungsreihenfolge einmal festlegen. `rank(sha, item)` → Zahl (kleiner =
    * zuerst raus, -Infinity erlaubt) oder null (geschützt).
    */
