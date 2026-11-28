@@ -3,6 +3,9 @@
 // Zwischenspeicher im Heimnetz (Vertrag Phase 3b §2): Vorrat vom Server
 // holen, fehlende Blobs laden (eine Datei zur Zeit), LRU bis `maxBytes`,
 // signierte Abgabe per HTTPS im LAN, Bestand/Statistik an den Server.
+// Was der Server aus dem Vorrat zurückzieht, wird beim nächsten Abgleich mit
+// vollständiger Liste sofort gelöscht (nicht erst bei Platznot) – etwa die
+// verschlüsselten Dateien eines Tresor-Ordners „Nur auf diesem Gerät“.
 
 const path = require('node:path');
 const { setImmediate: tick, setTimeout: sleep } = require('node:timers/promises');
@@ -55,6 +58,7 @@ class HomeCache {
     this.lastFullAt = 0;
     this.needFull = true;
     this.syncing = null;
+    this.again = false;            // während eines Laufs angestoßen → danach gleich noch einmal
     this.abort = null;
     const exclude = tunnelIp ? [tunnelIp] : [];
     this.addresses = addresses || (() => lanListenAddresses({ exclude, linkLocal: false }));
@@ -165,11 +169,30 @@ class HomeCache {
     return Math.max(0, Math.min(this.cfg.maxBytes, used + free - RESERVE_BYTES));
   }
 
-  /** Vorrat holen und fehlende Blobs laden. */
+  /** Vorrat holen und fehlende Blobs laden; während des Laufs angestoßen → gleich danach noch einmal. */
   sync() {
     if (this.syncing) return this.syncing;
-    this.syncing = this._sync().finally(() => { this.syncing = null; });
+    this.syncing = (async () => {
+      do {
+        this.again = false;
+        await this._sync();
+      } while (this.again && this.cfg.enabled && this.store);
+    })().finally(() => { this.syncing = null; this.again = false; });
     return this.syncing;
+  }
+
+  /**
+   * Blobs, die nicht (mehr) im Vorrat stehen, sofort löschen (Datei, Index,
+   * halber Download). Nur mit einer vollständigen Liste (`complete`, vom
+   * echten Client): fehlt der Server, antwortet er mit Fehler oder ist die
+   * Liste abgeschnitten, bleibt alles und die Verdrängung bei Platznot greift
+   * wie bisher. → Zahl gelöschter Blobs
+   */
+  async _dropWithdrawn(store, all) {
+    if (!all || all.complete !== true || !(all.listed instanceof Set)) return 0;
+    const n = await store.prune((sha) => all.listed.has(sha));
+    if (n) logger.info({ removed: n }, 'cache: withdrawn blobs deleted');
+    return n;
   }
 
   /** 429 vom Server: Zwischenspeicher-Verkehr bis Retry-After ruhen lassen. */
@@ -187,6 +210,7 @@ class HomeCache {
     this.status.start();
     try {
       const all = await this.client.want();
+      const dropped = this.store === store && this.cfg.enabled ? await this._dropWithdrawn(store, all) : 0;
       const kinds = this.cfg.kinds;
       this.want = all.filter((w) => kinds[w.kind] === true).sort((a, b) => b.priority - a.priority);
       this.lastSyncAt = this.now();
@@ -208,7 +232,7 @@ class HomeCache {
           sliceAt = performance.now();
           if (this.store === store && this.cfg.enabled) limit = this.effectiveMax();
         }
-        if (this.store !== store || !this.cfg.enabled) break;
+        if (this.store !== store || !this.cfg.enabled || this.again) break;
         if (store.has(w.sha256)) continue;
         if (w.size > limit) continue;
         if (!(await plan.makeRoom(w.size, limit, w.priority))) continue;
@@ -217,6 +241,7 @@ class HomeCache {
         try {
           const wait = this.lastBlobAt + this.blobGapMs - Date.now();
           if (wait > 0) await sleep(wait);
+          if (this.again || this.abort.signal.aborted) break;
           this.lastBlobAt = Date.now();
           const r = await this.client.blob(w.sha256, w.size, store.partPath(w.sha256), {
             signal: this.abort.signal,
@@ -240,7 +265,7 @@ class HomeCache {
       }
       await store.save();
       if (failures.length) this.status.fail(`download: ${failures[0]}`); else if (!this._paused()) this.status.ok();
-      if (fetchedAny) await this.report();
+      if (fetchedAny || dropped) await this.report();
     } catch (err) {
       if (err.code === 'rate_limited') { this._backoff(err.retryAfterMs); return; }
       this.status.fail(err.code || err.message);
@@ -312,9 +337,19 @@ class HomeCache {
     return 'accepted';
   }
 
+  /**
+   * Mgmt „Vorrat jetzt abgleichen“ (auch der Anstoß des Servers nach einem
+   * Rückzug). Läuft schon ein Abgleich: laufenden Download abbrechen (der
+   * .part bleibt, ein noch gewollter Blob wird per Range fortgesetzt) und
+   * gleich neu abgleichen – mit frischer Liste, die Zurückgezogenes löscht.
+   */
   requestSync() {
     if (!this.cfg.enabled || !this.store) return 'disabled';
-    if (this.syncing) return 'busy';
+    if (this.syncing) {
+      this.again = true;
+      if (this.abort) this.abort.abort();
+      return 'accepted';
+    }
     void this.sync();
     return 'accepted';
   }
